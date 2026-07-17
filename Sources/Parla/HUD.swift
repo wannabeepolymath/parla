@@ -144,6 +144,24 @@ final class HUD: @unchecked Sendable {
         }
         pill.onDragStart = { [weak self] in self?.beginDragChip() }
         pill.onDragEnd = { [weak self] in self?.snapToNearestEdge() }
+
+        // Display set changed (external screen plugged/unplugged, resolution
+        // switch): the panel's absolute origin is stale in the new coordinate
+        // space and macOS clamps it onto whatever screen edge is nearest.
+        // Re-dock to the persisted edge/offset instead.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            self?.screensDidChange()
+        }
+    }
+
+    /// Re-dock the visible panel after a display-configuration change.
+    /// currentScreen() keeps it on the screen it lives on; if that screen went
+    /// away it falls back to the active screen.
+    private func screensDidChange() {
+        guard panel.isVisible, let screen = currentScreen() else { return }
+        panel.setFrameOrigin(dockOrigin(idle: isIdle, on: screen))
     }
 
     /// Show the idle capsule (position on the active screen if the panel was off).
