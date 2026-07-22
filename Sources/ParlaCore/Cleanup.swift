@@ -16,6 +16,19 @@ public struct CleanupContext {
     }
 }
 
+public enum Polish {
+    /// Built-in instruction for the pill's "✦ Polish" button. Rides the
+    /// command-mode transform prompt, so the selection stays delimited
+    /// data. Proofread-only by design: the writer's voice is preserved.
+    public static let instruction = """
+    Proofread the text: fix spelling, punctuation, capitalization, and grammar \
+    mistakes only. Preserve the writer's voice, tone, wording, meaning, \
+    language, line breaks, and formatting. Do not rephrase, shorten, or expand \
+    anything that is already correct. If nothing needs fixing, return the text \
+    unchanged.
+    """
+}
+
 public enum PromptBuilder {
     public static func system(context: CleanupContext) -> String {
         // Command mode: transform the selected text per the spoken instruction.
@@ -154,6 +167,32 @@ public enum CleanupSanitizer {
             return String(inner).trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return trimmed
+    }
+
+    /// Sanitizer for selection edits (transforms/polish): strips only wrappers
+    /// the ORIGINAL selection didn't have. The user's own quotes are content
+    /// and must survive the round-trip; boundary whitespace they selected is
+    /// restored verbatim — models routinely trim it, and losing selected
+    /// indentation or a trailing newline merges lines in the field.
+    public static func sanitizeEdit(_ s: String, original: String) -> String {
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedOriginal == original {
+            if original.count >= 2, let first = original.first, let last = original.last,
+               pairs.contains(where: { first == $0.0 && last == $0.1 }) {
+                return s.trimmingCharacters(in: .whitespacesAndNewlines) // keep the user's quotes
+            }
+            return sanitize(s)
+        }
+        // A whitespace-only selection has no editable core: return it unchanged
+        // (the caller's no-change path then types nothing).
+        guard !trimmedOriginal.isEmpty else { return original }
+        // Rebuild the original's exact boundary around the edited core, whether
+        // or not the model preserved it.
+        let leading = String(original.prefix(while: \.isWhitespace))
+        let trailing = String(original.reversed().prefix(while: \.isWhitespace).reversed())
+        let core = sanitizeEdit(s.trimmingCharacters(in: .whitespacesAndNewlines),
+                                original: trimmedOriginal)
+        return leading + core + trailing
     }
 }
 

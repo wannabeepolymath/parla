@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Command mode (⇧+fn): transform the selection captured at fn-down instead of
     // dictating. Latched at fn-down, read at fn-up like liveTyping/focus.
     var commandMode = false
-    var commandSelection = ""
+    var commandCapture: Inserter.CapturedSelection?
     // Bumped on every fn-down; a pending cleaned-swap compares its captured
     // value on the main actor and never fires keystrokes into a newer session.
     var generation = 0
@@ -99,6 +99,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.hud.push(level: level) }
         }
 
+        hud.onPolish = { [weak self] in self?.polishSelection() }
+        hud.onScratchpad = { [weak self] in self?.scratchpad.show() }
+
         hotkey.onEdge = { [weak self] edge in
             guard let self else { return }
             NSLog("Parla: fn edge %@", "\(edge)")
@@ -111,12 +114,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     guard focus != .secure else {
                         self.hud.show(.error("No transforms in password fields")); return
                     }
-                    guard let selection = Inserter.selectedText() else {
+                    guard let capture = Inserter.captureSelection() else {
                         self.hud.show(.error("Select text first")); return
                     }
                     self.generation += 1 // invalidates any pending cleaned-swap
                     self.commandMode = true
-                    self.commandSelection = selection
+                    self.commandCapture = capture
                     self.focus = focus
                     self.liveTyping = false // never stream a transform
                     do { try self.recorder.start() }
@@ -205,12 +208,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.commandMode {
                     // Transform path: instruction → LLM → replace selection. Runs
                     // on the processTask chain (whisper ctx not reentrant).
-                    let selection = self.commandSelection
+                    guard let capture = self.commandCapture else { return }
                     let gen = self.generation
                     self.setStatus("…"); self.hud.show(.transcribing)
                     self.processTask = Task { [prev = self.processTask] in
                         await prev?.value
-                        await self.transform(samples: samples, selection: selection, gen: gen)
+                        await self.transform(samples: samples, capture: capture, gen: gen)
                     }
                     return
                 }
@@ -561,7 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// selection captured at fn-down via the cleanup LLM, and replace the live
     /// selection if it's still intact — else park it when history is enabled.
     /// Runs on the processTask chain like finish().
-    func transform(samples: [Float], selection: String, gen: Int) async {
+    func transform(samples: [Float], capture: Inserter.CapturedSelection, gen: Int) async {
         let hud = self.hud
         defer {
             DispatchQueue.main.async {
@@ -599,75 +602,186 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Transform via the cleanup client DIRECTLY (not Pipeline.clean): its
-        // raw-transcript fallback would return the spoken instruction on failure,
-        // which must never be typed over the user's selection. A failure here is
-        // a hard failure — nothing inserted, nothing stored.
+        guard let transformed = await editSelection(instruction: instruction, selection: capture.text,
+                                                    settings: settings, label: "transform", gen: gen) else { return }
+        await MainActor.run {
+            self.applySelectionEdit(transformed, capture: capture, gen: gen, settings: settings)
+        }
+        // ponytail: transforms only attempt history on the fallback paths above —
+        // a landed transform isn't a dictation, and the source text is the user's.
+    }
+
+    /// Pill "✦ Polish" button: command mode's capture and refusals, minus the
+    /// recording. Explicit click only — polish is never gesture-triggered.
+    /// The click didn't activate us (non-activating panel), so the front app's
+    /// focus and selection are still live.
+    func polishSelection() {
+        NSLog("Parla polish: click (front=%@)",
+              NSWorkspace.shared.frontmostApplication?.localizedName ?? "nil")
+        let focus = Inserter.focusTarget()
+        guard focus != .secure else {
+            hud.show(.error("No transforms in password fields")); return
+        }
+        guard let capture = Inserter.captureSelection() else {
+            NSLog("Parla polish: refused, no selection (focus=%@)", "\(focus)")
+            hud.show(.error("Select text first")); return
+        }
+        generation += 1 // invalidates any pending cleaned-swap
+        let gen = generation
+        setStatus("…"); hud.show(.polishingSelection)
+        processTask = Task { [prev = self.processTask] in
+            await prev?.value
+            await self.polish(capture: capture, gen: gen)
+        }
+    }
+
+    /// Polish body: run the built-in proofread instruction over the selection —
+    /// command mode without the spoken command. No whisper pass, so it works
+    /// with no model downloaded. Runs on the processTask chain like transform()
+    /// so insertions land in order.
+    func polish(capture: Inserter.CapturedSelection, gen: Int) async {
+        let hud = self.hud
+        defer {
+            DispatchQueue.main.async {
+                guard !self.isRecording else { return }
+                self.showIdle()
+            }
+        }
+        let settings = store.load()
+        // Same hard requirement as transforms: no raw fallback over a selection.
+        guard cleanupIsConfigured(settings: settings, env: ProcessInfo.processInfo.environment) else {
+            NSLog("Parla polish: cleanup not configured")
+            DispatchQueue.main.async {
+                guard gen == self.generation else { return }
+                hud.show(.error("Cleanup not configured"))
+            }
+            return
+        }
+        guard let polished = await editSelection(instruction: Polish.instruction, selection: capture.text,
+                                                 settings: settings, label: "polish", gen: gen) else { return }
+        await MainActor.run {
+            self.applySelectionEdit(polished, capture: capture, gen: gen, settings: settings)
+        }
+    }
+
+    /// LLM half shared by transform() and polish(), via the cleanup client
+    /// DIRECTLY (not Pipeline.clean): its raw-transcript fallback would return
+    /// the instruction on failure, which must never be typed over the user's
+    /// selection. Any failure here is hard — shows a toast, returns nil,
+    /// nothing inserted, nothing stored.
+    func editSelection(instruction: String, selection: String, settings: Settings,
+                       label: String, gen: Int) async -> String? {
+        let hud = self.hud
+        let toast = label.capitalized + " failed"
+        // Failure toasts land asynchronously — by then a newer session may own
+        // the HUD; never stomp its state with a stale error.
+        let fail = {
+            DispatchQueue.main.async {
+                guard gen == self.generation else { return }
+                hud.show(.error(toast))
+            }
+        }
         let ctx = CleanupContext(dictionary: settings.dictionary, snippets: [:], appName: nil, selection: selection)
-        let transformed: String
+        let edited: String
         do {
             let out = try await makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
                 .clean(transcript: instruction, context: ctx)
-            transformed = CleanupSanitizer.sanitize(out)
+            // Selection-aware sanitize: the user's own quotes/whitespace are
+            // content — only wrappers the selection didn't have get stripped.
+            edited = CleanupSanitizer.sanitizeEdit(out, original: selection)
         } catch {
-            NSLog("%@", "Parla transform failed: \(error)")
-            DispatchQueue.main.async { hud.show(.error("Transform failed")) }
-            return
+            NSLog("%@", "Parla \(label) failed: \(error)")
+            fail()
+            return nil
         }
-        guard !transformed.isEmpty else {
-            NSLog("Parla transform: empty result")
-            DispatchQueue.main.async { hud.show(.error("Transform failed")) }
-            return
+        // Whitespace-only output would ERASE the selection, not edit it —
+        // hard failure. (An unchanged whitespace-only selection is fine: the
+        // no-change check upstream types nothing.)
+        guard edited == selection ||
+              !edited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            NSLog("Parla %@: empty/whitespace-only result", label)
+            fail()
+            return nil
         }
         // ponytail: generous expansion ceiling; add repeated-substring detection
         // if legitimate transforms ever need more than 6× the source.
         let lengthCeiling = max(2000, 6 * selection.count)
-        guard transformed.count <= lengthCeiling else {
-            NSLog("Parla transform: result over ceiling (%d > %d)", transformed.count, lengthCeiling)
-            DispatchQueue.main.async { hud.show(.error("Transform failed")) }
+        guard edited.count <= lengthCeiling else {
+            NSLog("Parla %@: result over ceiling (%d > %d)", label, edited.count, lengthCeiling)
+            fail()
+            return nil
+        }
+        return edited
+    }
+
+    /// Insert half shared by transform() and polish(): verify the SAME element
+    /// still holds the same selection and replace it, else park in history.
+    /// Main thread only.
+    func applySelectionEdit(_ edited: String, capture: Inserter.CapturedSelection, gen: Int,
+                            settings: Settings, tries: Int = 20) {
+        let hud = self.hud
+        // Identical result: nothing to type, and retyping would only churn the
+        // field (and the user's undo stack). Checked before everything else —
+        // an unchanged result must never be parked in history as noise. The
+        // toast only shows if this session still owns the HUD.
+        guard edited != capture.text else {
+            NSLog("Parla edit: no changes")
+            if gen == self.generation { hud.show(.noChange) }
             return
         }
-        await MainActor.run {
-            // Park when we can't safely type; without history, discard honestly.
-            let park = { (why: String) -> HUD.State in
-                if settings.historyEnabled {
-                    NSLog("Parla transform: %@, saved to history", why)
-                    self.history.append(HistoryEntry(raw: transformed, cleaned: nil, appName: nil))
-                    return .savedToHistory
-                }
-                NSLog("Parla transform: %@, discarded (history off)", why)
-                return .error("History off — text discarded")
+        // Park when we can't safely type; without history, discard honestly.
+        let park = { (why: String) -> HUD.State in
+            if settings.historyEnabled {
+                NSLog("Parla edit: %@, saved to history", why)
+                self.history.append(HistoryEntry(raw: edited, cleaned: nil, appName: nil))
+                return .savedToHistory
             }
-            guard gen == self.generation else {
-                // A newer dictation owns the field/HUD — no keystrokes.
-                _ = park("stale generation")
-                return
-            }
-            // Same insert-time re-check as finish(): focus may have moved into
-            // a password field since fn-down — never type there, and don't even
-            // query its selection. The result derives from the user's own
-            // (non-secure) selection, so parking it in history is safe.
-            guard Inserter.focusTarget() != .secure else {
-                hud.show(park("focus moved to secure field"))
-                return
-            }
-            // Only replace if the selection is textually unchanged; otherwise
-            // never type over new context.
-            if Inserter.selectedText() == selection {
-                NSLog("Parla transform: selection intact, replacing")
-                let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                // Resolve terminal safety only for text actually being typed.
-                let result = TextRules.flattensNewlines(bundleID: bundleID)
-                    ? TextRules.flattenForTerminal(transformed) : transformed
-                Inserter.insert(result) // typing replaces the live selection
-                Sound.finish()
-                hud.show(.done)
-            } else {
-                hud.show(park("selection changed"))
-            }
+            NSLog("Parla edit: %@, discarded (history off)", why)
+            return .error("History off — text discarded")
         }
-        // ponytail: transforms only attempt history on the fallback paths above —
-        // a landed transform isn't a dictation, and the source text is the user's.
+        guard gen == self.generation else {
+            // A newer dictation owns the field/HUD — no keystrokes.
+            _ = park("stale generation")
+            return
+        }
+        // Modifiers (⇧+fn's shift after a transform, or any key held across a
+        // fast LLM round-trip) may still be physically down; typing with real
+        // modifiers held risks the app reading them alongside our events.
+        // Wait for release like paste-last, then verify.
+        guard NSEvent.modifierFlags
+            .intersection([.command, .control, .option, .shift, .function]).isEmpty else {
+            if tries > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self.applySelectionEdit(edited, capture: capture, gen: gen,
+                                            settings: settings, tries: tries - 1)
+                }
+            } else {
+                hud.show(park("modifiers held"))
+            }
+            return
+        }
+        // Same insert-time re-check as finish(): focus may have moved into
+        // a password field since capture — never type there, and don't even
+        // query its selection. The result derives from the user's own
+        // (non-secure) selection, so parking it in history is safe.
+        guard Inserter.focusTarget() != .secure else {
+            hud.show(park("focus moved to secure field"))
+            return
+        }
+        // Only replace if the SAME element still holds the same selection —
+        // identical text in a different field must never be typed over.
+        if Inserter.selectionIntact(capture) {
+            NSLog("Parla edit: selection intact, replacing")
+            let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            // Resolve terminal safety only for text actually being typed.
+            let result = TextRules.flattensNewlines(bundleID: bundleID)
+                ? TextRules.flattenForTerminal(edited) : edited
+            Inserter.insert(result) // typing replaces the live selection
+            Sound.finish()
+            hud.show(.done)
+        } else {
+            hud.show(park("selection changed"))
+        }
     }
 
     /// ~300ms between streaming passes, sliced so fn-up (isRecording flipping

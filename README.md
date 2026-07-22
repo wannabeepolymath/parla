@@ -116,6 +116,25 @@ is saved to history instead of overwriting new content. A failed transform
 never types the spoken instruction itself; nothing is inserted. Password
 fields and empty selections refuse before recording even starts.
 
+## Polish button
+
+Command mode without the spoken command: select text in any app, hover the
+idle pill — it morphs into a **✦ Polish** button — and click. The selection
+is proofread in place by the cleanup model: spelling, punctuation,
+capitalization, and grammar fixed, with the writer's voice, tone, wording,
+language, and formatting preserved. Dictionary spellings apply. If nothing
+needs fixing the HUD shows "✓ No changes" and the field is left untouched.
+No whisper pass runs, so polish works even before a model is downloaded.
+
+Polish runs **only** on that explicit click — there is no hotkey and nothing
+triggers it automatically. The pill never activates Parla (it's a
+non-activating panel), so your app keeps focus and the selection survives the
+click. The button lives on the always-on idle pill, so it requires **Show
+pill at all times** (the default). All command-mode safety applies: password
+fields refuse, the same field must still hold the same selection before
+replacing (changed ⇒ result parked in history, or discarded when history is
+off), and a failed polish inserts nothing.
+
 ## Permissions
 
 Parla needs:

@@ -184,4 +184,59 @@ final class CleanupTests: XCTestCase {
         let out = try await client.clean(transcript: "x", context: ctx)
         XCTAssertEqual(out, "AB")
     }
+
+    // MARK: selection-edit sanitizer
+
+    func testSanitizeEditKeepsTheUsersOwnQuotes() {
+        // The selection itself is quoted — the quotes are content, not chatter.
+        XCTAssertEqual(CleanupSanitizer.sanitizeEdit("\"hi there\"", original: "\"hi tehre\""),
+                       "\"hi there\"")
+    }
+
+    func testSanitizeEditStillStripsModelAddedQuotes() {
+        XCTAssertEqual(CleanupSanitizer.sanitizeEdit("\"hi there\"", original: "hi tehre"),
+                       "hi there")
+    }
+
+    func testSanitizeEditPreservesSelectedBoundaryWhitespace() {
+        // An unchanged result must compare equal to the selection, indentation
+        // and trailing newline included — else "no changes" still retypes.
+        XCTAssertEqual(CleanupSanitizer.sanitizeEdit("  hi there\n", original: "  hi tehre\n"),
+                       "  hi there\n")
+    }
+
+    func testSanitizeEditRestoresBoundaryWhitespaceTheModelDropped() {
+        // Models routinely trim output; selected indentation and the trailing
+        // newline must come back regardless, or the edit merges lines.
+        XCTAssertEqual(CleanupSanitizer.sanitizeEdit("hi there", original: "  hi tehre\n"),
+                       "  hi there\n")
+    }
+
+    func testSanitizeEditQuotedCoreInsideBoundaryWhitespace() {
+        XCTAssertEqual(CleanupSanitizer.sanitizeEdit("\"hi there\"", original: " \"hi tehre\" "),
+                       " \"hi there\" ")
+    }
+
+    func testSanitizeEditWhitespaceOnlySelectionUnchanged() {
+        XCTAssertEqual(CleanupSanitizer.sanitizeEdit("anything", original: "  \n"), "  \n")
+    }
+
+    // MARK: polish-button instruction
+
+    func testPolishInstructionRidesTheTransformPrompt() {
+        // Polish is command mode with a built-in instruction: the instruction is
+        // the user-message head, the selection stays delimited data after <text>.
+        let ctx = CleanupContext(dictionary: [], snippets: [:], appName: nil,
+                                 selection: "teh text")
+        let user = PromptBuilder.user(transcript: Polish.instruction, context: ctx)
+        XCTAssertTrue(user.hasPrefix(Polish.instruction))
+        XCTAssertTrue(user.hasSuffix("<text>\nteh text"))
+    }
+
+    func testPolishInstructionPreservesTheWriterVoice() {
+        // Contract pinned by design: proofread-only, never a rewrite.
+        for word in ["voice", "tone", "unchanged"] {
+            XCTAssertTrue(Polish.instruction.contains(word), "missing \"\(word)\"")
+        }
+    }
 }
