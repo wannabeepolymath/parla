@@ -2114,14 +2114,26 @@ impl App {
         })
         .await
         {
-            Ok(t) => t,
+            Ok(Ok(t)) => t,
+            // Whisper itself failed. This must NOT be reported as "Nothing
+            // heard" — that tells the user their microphone was silent when in
+            // fact the model errored, and they would go looking in the wrong
+            // place. `transcribe` returns Result precisely so these two cases
+            // stay distinguishable.
+            Ok(Err(e)) => {
+                eprintln!("parlad: transcription failed: {e}");
+                deliver::notify("Parla", "Transcription failed");
+                return;
+            }
+            // The blocking task panicked. Same user-facing message, different
+            // log line, and never silence.
             Err(e) => {
-                // A panic inside whisper must not leave the user with silence.
-                eprintln!("parlad: transcription task failed: {e}");
+                eprintln!("parlad: transcription task panicked: {e}");
                 deliver::notify("Parla", "Transcription failed");
                 return;
             }
         };
+        // Empty is the genuine "no speech in the audio" case.
         if raw.is_empty() {
             deliver::notify("Parla", "Nothing heard");
             return;
