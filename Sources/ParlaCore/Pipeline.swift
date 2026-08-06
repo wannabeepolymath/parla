@@ -63,6 +63,20 @@ public struct Pipeline {
                 NSLog("Parla cleanup output degenerate (\(cleaned.count) chars for \(transcript.count)-char transcript), keeping raw transcript")
                 return (transcript, "cleanup returned invalid text")
             }
+            // Floor. The ceiling above only catches runaway EXPANSION; a model
+            // that answers the transcript, summarises it, or refuses in one line
+            // comes back far SHORTER, and that was typed straight over the
+            // user's words with nothing to stop it. Cleanup legitimately shrinks
+            // filler-heavy speech ("um, so, like, the thing is…"), so the floor
+            // is deliberately generous and only applies once the transcript is
+            // long enough for a ratio to mean anything.
+            // ponytail: a length ratio, not a relatedness check — proving the
+            // output still says what the user said needs a second model call.
+            // Upgrade only if drift is observed above this floor.
+            if transcript.count >= 80, cleaned.count < transcript.count / 5 {
+                NSLog("Parla cleanup output truncated (\(cleaned.count) chars for \(transcript.count)-char transcript), keeping raw transcript")
+                return (transcript, "cleanup returned truncated text")
+            }
             return (cleaned, nil)
         } catch let error as CleanupError {
             NSLog("%@", "Parla cleanup failed, keeping raw transcript: \(error)")

@@ -25,7 +25,7 @@ final class OpenAICompatTests: XCTestCase {
         XCTAssertEqual(messages[0]["role"] as? String, "system")
         XCTAssertEqual(messages[0]["content"] as? String, PromptBuilder.system(context: ctx))
         XCTAssertEqual(messages[1]["role"] as? String, "user")
-        XCTAssertEqual(messages[1]["content"] as? String, "um hi")
+        XCTAssertEqual(messages[1]["content"] as? String, "<transcript>\num hi")
     }
 
     func testArrayContentDecodesJoinedText() async throws {

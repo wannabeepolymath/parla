@@ -121,6 +121,38 @@ final class PipelineTests: XCTestCase {
         XCTAssertNotNil(result.failure)
     }
 
+    // The ceiling only catches runaway expansion. A model that ANSWERS or
+    // summarises the transcript comes back far shorter, and that was typed
+    // straight over the user's words.
+    func testDrasticallyShorterOutputFallsBackToRaw() async {
+        let raw = String(repeating: "word ", count: 30) // 150 chars
+        let p = makePipeline(transcript: raw) { _, _ in "Sure!" }
+        let result = await p.clean(transcript: raw)
+        XCTAssertEqual(result.text, raw)
+        XCTAssertEqual(result.failure, "cleanup returned truncated text")
+    }
+
+    // Heavy but legitimate filler removal must NOT trip the floor — this is the
+    // exact case cleanup exists for.
+    func testHeavyFillerRemovalSurvivesTheFloor() async {
+        let raw = "um so like you know the thing is basically that I think we should "
+            + "probably just go ahead and ship it on friday I guess"  // 129 chars
+        let cleaned = "We should ship it on Friday."                    // 28 chars, 21%
+        let p = makePipeline(transcript: raw) { _, _ in cleaned }
+        let result = await p.clean(transcript: raw)
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(result.text, cleaned)
+    }
+
+    // Short utterances shrink by large ratios all the time ("um, yeah" -> "Yeah.")
+    // so the floor deliberately does not apply to them.
+    func testShortTranscriptExemptFromFloor() async {
+        let p = makePipeline(transcript: "um yeah ok sure") { _, _ in "OK." }
+        let result = await p.clean(transcript: "um yeah ok sure")
+        XCTAssertNil(result.failure)
+        XCTAssertEqual(result.text, "OK.")
+    }
+
     // A bare quote pair sanitizes to nothing — success with empty text would
     // pass swapPlan's non-empty check upstream, so it must report failure here.
     func testSanitizedToEmptyFallsBackToRaw() async {

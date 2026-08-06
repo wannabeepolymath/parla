@@ -651,7 +651,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             let out = try await makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
                 .clean(transcript: instruction, context: ctx)
-            transformed = CleanupSanitizer.sanitize(out)
+            // Trim only — NOT sanitize(). Its wrapping-quote strip would undo a
+            // transform the user explicitly asked for ("put this in quotes"),
+            // silently retyping the selection unchanged under a "✓ Pasted".
+            // The transform prompt already forbids commentary and quoting.
+            transformed = out.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             NSLog("%@", "Parla transform failed: \(error)")
             DispatchQueue.main.async { hud.show(.error("Transform failed")) }
