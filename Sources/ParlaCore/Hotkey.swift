@@ -39,6 +39,12 @@ public final class HotkeyMonitor {
     /// keyCode of the last keyDown we swallowed, so its autorepeats can be
     /// swallowed too. nil once a keyDown passes through.
     private var lastSwallowedKeyCode: UInt16?
+    /// Liveness poll for the tap — see ensureAlive().
+    private var watchdog: Timer?
+    /// App Nap opt-out, held for the process lifetime. Releasing it ends it.
+    private var activity: NSObjectProtocol?
+    /// How often to check that the tap is still alive.
+    public var watchdogInterval: TimeInterval = 5
 
     public init() {}
 
@@ -148,12 +154,66 @@ public final class HotkeyMonitor {
         self.tap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+
+        // Parla is LSUIElement with no windows, which makes it a prime App Nap
+        // target. A napped process gets its run loop throttled, the tap callback
+        // misses its deadline, and macOS disables the tap for being slow — the
+        // very thing the watchdog below then has to undo. Opt out.
+        // AllowingIdleSystemSleep matters: plain .userInitiated would also keep
+        // the Mac from sleeping, which a dictation app has no business doing.
+        if activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep],
+                reason: "global dictation hotkey")
+        }
+        startWatchdog()
+    }
+
+    /// The tap's only other recovery path lives INSIDE the tap callback, so it
+    /// can only run if macOS still delivers events to us — which is exactly what
+    /// stops happening when the tap dies. Screen lock and secure input silence a
+    /// session keyboard tap outright, and sleep/wake can leave it disabled with
+    /// no notification we ever see. Without an external check the hotkey stays
+    /// dead until the app is relaunched, which is the "left it alone for a while
+    /// and fn stopped working" report.
+    ///
+    /// ponytail: a 5s poll of one WindowServer bool, not a set of wake/unlock/
+    /// session observers — same recovery, a fraction of the surface. Add the
+    /// notifications only if a 5s worst-case recovery ever feels slow.
+    private func startWatchdog() {
+        guard watchdog == nil else { return }
+        let timer = Timer(timeInterval: watchdogInterval, repeats: true) { [weak self] _ in
+            self?.ensureAlive()
+        }
+        // .common so it keeps firing while a menu is open or a drag loop runs.
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
+    }
+
+    /// Re-enable a tap macOS turned off behind our back; recreate it if the port
+    /// itself died. No-op in the normal case (one bool check).
+    private func ensureAlive() {
+        guard let tap else { return } // never created: start()'s own retry owns that
+        guard CFMachPortIsValid(tap) else {
+            NSLog("Parla: hotkey tap port went invalid, recreating")
+            self.tap = nil
+            start()
+            return
+        }
+        guard !CGEvent.tapIsEnabled(tap: tap) else { return }
+        NSLog("Parla: hotkey tap was found disabled, re-enabling")
+        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     private func process(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let pass = Unmanaged.passUnretained(event)
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            // Logged so a "the hotkey died" report can be traced to which
+            // mechanism disabled it — this path, or the silent kind the
+            // watchdog catches (see ensureAlive).
+            NSLog("Parla: hotkey tap disabled by %@, re-enabling",
+                  type == .tapDisabledByTimeout ? "timeout" : "user input")
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) } // macOS disables slow taps; revive
             return pass
         case .flagsChanged:
@@ -194,6 +254,8 @@ public final class HotkeyMonitor {
     }
 
     deinit {
+        watchdog?.invalidate()
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap) // also invalidates the run-loop source
