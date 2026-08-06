@@ -11,25 +11,40 @@ pub struct Outcome {
     pub failure: Option<String>,
 }
 
-/// Models sometimes wrap output in quotes or prepend a preamble despite the
-/// system prompt. Strip both; leave everything else untouched.
+/// Quote pairs a model may wrap its answer in. Curly quotes are fair game: the
+/// system prompt forbids Markdown but says nothing about quote style.
+const PAIRS: [(char, char); 3] = [('"', '"'), ('\'', '\''), ('\u{201C}', '\u{201D}')];
+
+/// Strip ONE wrapping quote pair, only when the first and last chars are a
+/// matching pair and the pair does not recur inside. Port of
+/// `CleanupSanitizer.sanitize` in `Sources/ParlaCore/Cleanup.swift:137-158`.
+// ponytail: no preamble stripping ("Sure, here's..." etc.) — too risky to guess
+// where the model's chatter ends and the user's text begins; upgrade only if a
+// provider proves reliably chatty. This is a deliberate refusal, not an
+// oversight: a "short lead-in ending in a colon" heuristic silently eats the
+// first clause of dictated sentences like "Here's the deal: we ship Friday",
+// and losing the user's words is far worse than leaving a preamble in. The
+// system prompt already says "no preamble"; guessing after the fact is the risk
+// the macOS original declined to take.
 pub fn sanitize(text: &str) -> String {
-    let mut t = text.trim();
-    // Only a *wrapping* pair. A quote inside the candidate body means the outer
-    // ones are punctuation, not packaging — `"a" and "b"` must survive intact.
-    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') && !t[1..t.len() - 1].contains('"') {
-        t = t[1..t.len() - 1].trim();
-    }
-    // A preamble is a short lead-in ending in ": ", e.g. "Here is the text: ".
-    // Guard on length so an ordinary sentence containing a colon survives.
-    if let Some(i) = t.find(": ") {
-        let head = &t[..i];
-        let lower = head.to_ascii_lowercase();
-        if head.len() <= 40 && (lower.contains("text") || lower.contains("here")) {
-            t = &t[i + 2..];
+    let t = text.trim();
+    let mut c = t.chars();
+    // Needs two chars to have a distinct first and last; one char is never a pair.
+    let (Some(first), Some(last)) = (c.next(), c.next_back()) else {
+        return t.to_string();
+    };
+    for (open, close) in PAIRS {
+        if first == open && last == close {
+            let inner = &t[open.len_utf8()..t.len() - close.len_utf8()];
+            // A quote inside the body means the outer ones are punctuation, not
+            // packaging — `"a" and "b"` must survive intact.
+            if inner.contains(open) || inner.contains(close) {
+                return t.to_string();
+            }
+            return inner.trim().to_string();
         }
     }
-    t.trim().to_string()
+    t.to_string()
 }
 
 /// Character ceiling for a cleaned result. Cleanup legitimately grows text a
@@ -197,16 +212,52 @@ mod tests {
         assert_eq!(sanitize("\"hello"), "\"hello");
     }
 
+    /// Replaces an earlier `sanitizer_strips_a_leading_preamble`, which asserted
+    /// a heuristic this port had no business carrying: it truncated at a short
+    /// lead-in ending in ": ", silently eating the first clause of ordinary
+    /// dictated sentences. Losing the user's words beats any preamble it caught.
     #[test]
-    fn sanitizer_strips_a_leading_preamble() {
-        assert_eq!(sanitize("Here is the cleaned text: hello there"), "hello there");
-        assert_eq!(sanitize("Cleaned text: hello"), "hello");
+    fn a_dictated_sentence_with_a_colon_survives_intact() {
+        // The case that silently lost data: "Here's the deal" is the user's own
+        // words, not model chatter, and a preamble stripper cannot tell.
+        assert_eq!(
+            sanitize("Here's the deal: we ship Friday"),
+            "Here's the deal: we ship Friday"
+        );
         assert_eq!(sanitize("hello: world"), "hello: world");
+        // Even the shape a preamble stripper was built for stays whole. If a
+        // provider ever proves reliably chatty, fix the prompt, not the output.
+        assert_eq!(sanitize("Here is the text: hello"), "Here is the text: hello");
     }
 
     #[test]
     fn sanitizer_leaves_ordinary_text_alone() {
         assert_eq!(sanitize("The meeting is at 6."), "The meeting is at 6.");
+    }
+
+    #[test]
+    fn every_quote_pair_is_stripped() {
+        assert_eq!(sanitize("\"hello\""), "hello");
+        assert_eq!(sanitize("'hello'"), "hello");
+        assert_eq!(sanitize("\u{201C}hello\u{201D}"), "hello");
+        // Inner whitespace goes too, matching Cleanup.swift:154.
+        assert_eq!(sanitize("\u{201C} hello \u{201D}"), "hello");
+        // One pair only, never peeled recursively.
+        assert_eq!(sanitize("\"'hi'\""), "'hi'");
+        // A lone quote is not a pair.
+        assert_eq!(sanitize("\""), "\"");
+    }
+
+    #[test]
+    fn the_interior_guard_applies_to_every_pair() {
+        assert_eq!(sanitize("\"a\" and \"b\""), "\"a\" and \"b\"");
+        assert_eq!(sanitize("'a' and 'b'"), "'a' and 'b'");
+        assert_eq!(
+            sanitize("\u{201C}a\u{201D} and \u{201C}b\u{201D}"),
+            "\u{201C}a\u{201D} and \u{201C}b\u{201D}"
+        );
+        // Mismatched curly pair: open at both ends is not open+close.
+        assert_eq!(sanitize("\u{201C}hello\u{201C}"), "\u{201C}hello\u{201C}");
     }
 
     #[test]
@@ -244,13 +295,6 @@ mod tests {
         let mut s = BTreeMap::new();
         s.insert(String::new(), "x".to_string());
         assert_eq!(allowance("hello", &s), 2 * 5 + 200);
-    }
-
-    #[test]
-    fn quoted_speech_inside_the_reply_is_not_treated_as_a_wrapper() {
-        // Matches Sources/ParlaCore/Cleanup.swift's CleanupSanitizer: an inner
-        // quote means the outer ones are punctuation, so stripping would corrupt.
-        assert_eq!(sanitize("\"a\" and \"b\""), "\"a\" and \"b\"");
     }
 
     #[test]
