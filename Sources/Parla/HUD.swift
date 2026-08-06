@@ -27,6 +27,10 @@ final class HUD: @unchecked Sendable {
     private var hideItem: DispatchWorkItem?
     // Currently collapsed to the mini idle capsule (vs. the full active pill).
     private var isIdle = false
+    // Whether the pill is showing a finished-state toast (which auto-hides)
+    // rather than work still in progress. Esc may dismiss the former; dismissing
+    // the latter would claim a cancel that never happened.
+    private var showingToast = false
 
     /// Which screen edge the pill docks to, and where along it (0…1). A drag
     /// snaps to the nearest edge; both persist across sessions.
@@ -224,6 +228,10 @@ final class HUD: @unchecked Sendable {
             label.frame = NSRect(x: 16, y: 12, width: 228, height: 20)
         }
         switch state {
+        case .listening, .handsFree, .transcribing, .polishing: showingToast = false
+        default: showingToast = true
+        }
+        switch state {
         case .listening(let command):
             dot.isHidden = false
             waveform.isHidden = false
@@ -291,8 +299,13 @@ final class HUD: @unchecked Sendable {
 
     /// Esc while idle: dismiss a visible toast without disturbing the idle bar
     /// (Esc fires constantly in normal use — this must be a no-op then).
+    ///
+    /// In-progress states are NOT dismissible. Hiding the pill during
+    /// "Transcribing…" or "polishing…" read as a successful cancel, and then the
+    /// unwanted transcript typed itself in anyway moments later. Esc between
+    /// fn-up and landing has nothing to cancel — so it must not pretend.
     func dismiss() {
-        guard panel.isVisible, !isIdle else { return }
+        guard panel.isVisible, !isIdle, showingToast else { return }
         settle()
     }
 
