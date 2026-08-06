@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Cleanup {
     /// "anthropic" | "openai-compatible" | "none"
@@ -16,6 +16,22 @@ pub struct Cleanup {
     pub api_key_env: Option<String>,
     /// Inline fallback when no env var is set.
     pub api_key: Option<String>,
+}
+
+/// Hand-written so `api_key` can never reach a log. The daemon in Tasks 5-9
+/// logs to stderr and the journal, and one `{:?}` of a `Config` — which derives
+/// `Debug` and picks this up — would publish the user's key. `Serialize` is
+/// deliberately left alone: `Config::save` must round-trip the real value.
+impl std::fmt::Debug for Cleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cleanup")
+            .field("provider", &self.provider)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key_env", &self.api_key_env)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for Cleanup {
@@ -163,6 +179,40 @@ mod tests {
         c.save(&p).unwrap();
         assert_eq!(Config::load(&p), c);
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn debug_never_prints_the_api_key() {
+        let secret = "sk-ant-SECRET-VALUE";
+        let c = Cleanup {
+            provider: "openai-compatible".into(),
+            base_url: Some("https://api.groq.com/openai/v1".into()),
+            model: Some("llama-3.3-70b".into()),
+            api_key_env: Some("GROQ_API_KEY".into()),
+            api_key: Some(secret.into()),
+        };
+        let shown = format!("{c:?}");
+        assert!(!shown.contains(secret), "api_key leaked into Debug: {shown}");
+        assert!(shown.contains(r#"api_key: Some("<redacted>")"#));
+        // Every other field still passes through — redaction, not blanking.
+        assert!(shown.contains("openai-compatible"));
+        assert!(shown.contains("https://api.groq.com/openai/v1"));
+        assert!(shown.contains("llama-3.3-70b"));
+        assert!(shown.contains("GROQ_API_KEY"));
+        // An absent key reads as absent, not as a redacted one.
+        assert!(format!("{:?}", Cleanup { api_key: None, ..c }).contains("api_key: None"));
+    }
+
+    #[test]
+    fn config_debug_inherits_the_redaction() {
+        // Config derives Debug, so the daemon logging a whole Config is covered
+        // by Cleanup's impl rather than needing its own.
+        let secret = "sk-ant-SECRET-VALUE";
+        let c = Config {
+            cleanup: Cleanup { api_key: Some(secret.into()), ..Default::default() },
+            ..Default::default()
+        };
+        assert!(!format!("{c:?}").contains(secret));
     }
 
     #[test]

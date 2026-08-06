@@ -103,11 +103,16 @@ fn reply_text(json: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
-/// Turns the model's raw reply into an Outcome. Split from `clean` so the two
-/// guards ported from Swift — the sanitizer and the degenerate-output ceiling —
-/// are testable without standing up an HTTP server.
-fn finish(content: &str, transcript: &str, ctx: &Context) -> Outcome {
-    let cleaned = sanitize(content);
+/// Turns the model's decoded reply into an Outcome. Split from `clean` so the
+/// two guards ported from Swift — the sanitizer and the degenerate-output
+/// ceiling — are testable without standing up an HTTP server.
+///
+/// Takes the raw `Value` rather than the extracted text on purpose: with two
+/// adjacent `&str` parameters, `finish(transcript, reply_text(&json), ctx)`
+/// compiled, passed every test, and made *every* cleanup silently return the
+/// raw transcript with `failure: None`. Differing types make that unwriteable.
+fn finish(json: &serde_json::Value, transcript: &str, ctx: &Context) -> Outcome {
+    let cleaned = sanitize(reply_text(json));
     let keep_raw = |why: &str| Outcome {
         text: transcript.to_string(),
         failure: Some(why.into()),
@@ -184,6 +189,11 @@ pub async fn clean(transcript: &str, ctx: &Context, cfg: &Cleanup) -> Outcome {
 
     let response = match response {
         Ok(r) => r,
+        // Nothing left the machine: a malformed base_url, or a key the header
+        // encoder rejects — a key pasted into config.toml with a trailing
+        // newline is the common one. Blaming the network sends the user to fix
+        // the wrong thing.
+        Err(e) if e.is_builder() => return fail("cleanup config invalid: check api_key and base_url"),
         Err(e) if e.is_timeout() => return fail("cleanup timed out"),
         Err(_) => return fail("cleanup network unavailable"),
     };
@@ -194,7 +204,7 @@ pub async fn clean(transcript: &str, ctx: &Context, cfg: &Cleanup) -> Outcome {
         return fail("cleanup returned invalid JSON");
     };
 
-    finish(reply_text(&json), transcript, ctx)
+    finish(&json, transcript, ctx)
 }
 
 #[cfg(test)]
@@ -309,26 +319,31 @@ mod tests {
         assert_eq!(reply_text(&serde_json::json!({ "error": "nope" })), "");
     }
 
+    /// An OpenAI-compatible reply carrying `content`.
+    fn openai(content: &str) -> serde_json::Value {
+        serde_json::json!({ "choices": [{ "message": { "role": "assistant", "content": content } }] })
+    }
+
     #[test]
     fn degenerate_output_keeps_the_raw_transcript() {
         let ctx = Context::default();
         let t = "hello";
         let loop_output = "hello ".repeat(100); // 600 chars, ceiling is 210
-        let out = finish(&loop_output, t, &ctx);
+        let out = finish(&openai(&loop_output), t, &ctx);
         assert_eq!(out.text, t);
         assert_eq!(out.failure.as_deref(), Some("cleanup returned invalid text"));
     }
 
     #[test]
     fn output_within_the_ceiling_is_accepted() {
-        let out = finish("\"Hello there.\"", "um hello there", &Context::default());
+        let out = finish(&openai("\"Hello there.\""), "um hello there", &Context::default());
         assert_eq!(out.text, "Hello there.");
         assert_eq!(out.failure, None);
     }
 
     #[test]
     fn empty_output_keeps_the_raw_transcript() {
-        let out = finish("   ", "hello", &Context::default());
+        let out = finish(&openai("   "), "hello", &Context::default());
         assert_eq!(out.text, "hello");
         assert_eq!(out.failure.as_deref(), Some("cleanup returned no text"));
     }
@@ -390,6 +405,110 @@ mod tests {
         assert_eq!(out.failure.as_deref(), Some("cleanup base_url not set"));
     }
 
+    /// Serves exactly one canned HTTP response on a fresh loopback port and
+    /// returns the `base_url` to point `clean` at. Everything in `clean` after
+    /// `send()` — the status check, the JSON decode, and the handoff to
+    /// `finish` — is unreachable without a real response on the wire.
+    // ponytail: 12 lines of TcpStream instead of a mock-HTTP dev-dependency.
+    // Reach for wiremock only if these ever need to assert on the request.
+    async fn one_shot(status: &str, body: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // Drain the request first: answering mid-write can hand the client a
+            // reset instead of the response this test exists to deliver.
+            let _ = sock.read(&mut [0u8; 8192]).await;
+            sock.write_all(response.as_bytes()).await.unwrap();
+            let _ = sock.shutdown().await;
+        });
+        format!("http://{addr}/v1")
+    }
+
+    fn loopback(base: String, model: Option<&str>) -> Cleanup {
+        Cleanup {
+            provider: "openai-compatible".into(),
+            base_url: Some(base),
+            api_key: Some("k".into()),
+            api_key_env: None,
+            model: model.map(Into::into),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_reply_is_cleaned_and_returned() {
+        let url = one_shot("200 OK", &openai("Hello there.").to_string()).await;
+        let out = clean("um hello there", &Context::default(), &loopback(url, Some("m"))).await;
+        // The transcript went in, the model's text came out. If `finish` ever
+        // takes its reply and its fallback in the wrong order, this is the
+        // assertion that notices — every other test would still pass.
+        assert_eq!(out.text, "Hello there.");
+        assert_eq!(out.failure, None);
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_shaped_reply_is_understood_end_to_end() {
+        // Served over the openai-compatible path because the anthropic branch
+        // hardcodes api.anthropic.com. That covers the reply shape through the
+        // real decode path; the anthropic branch's own URL and headers stay
+        // untested here by construction.
+        let body = serde_json::json!({ "content": [{ "type": "text", "text": "Hello there." }] });
+        let url = one_shot("200 OK", &body.to_string()).await;
+        let out = clean("um hello there", &Context::default(), &loopback(url, Some("m"))).await;
+        assert_eq!(out.text, "Hello there.");
+        assert_eq!(out.failure, None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_reply_keeps_the_transcript() {
+        let url = one_shot("200 OK", &openai("").to_string()).await;
+        let out = clean("um hello there", &Context::default(), &loopback(url, Some("m"))).await;
+        assert_eq!(out.text, "um hello there");
+        assert_eq!(out.failure.as_deref(), Some("cleanup returned no text"));
+    }
+
+    #[tokio::test]
+    async fn a_degenerate_reply_keeps_the_transcript() {
+        let url = one_shot("200 OK", &openai(&"hello ".repeat(100)).to_string()).await;
+        let out = clean("hello", &Context::default(), &loopback(url, Some("m"))).await;
+        assert_eq!(out.text, "hello");
+        assert_eq!(out.failure.as_deref(), Some("cleanup returned invalid text"));
+    }
+
+    #[tokio::test]
+    async fn a_non_json_body_keeps_the_transcript() {
+        let url = one_shot("200 OK", "<html>gateway</html>").await;
+        let out = clean("hello", &Context::default(), &loopback(url, Some("m"))).await;
+        assert_eq!(out.text, "hello");
+        assert_eq!(out.failure.as_deref(), Some("cleanup returned invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn a_401_reports_the_key_not_the_network() {
+        let url = one_shot("401 Unauthorized", r#"{"error":"bad key"}"#).await;
+        let out = clean("hello", &Context::default(), &loopback(url, Some("m"))).await;
+        assert_eq!(out.text, "hello");
+        assert_eq!(out.failure.as_deref(), Some("invalid API key"));
+    }
+
+    #[tokio::test]
+    async fn a_400_with_no_model_configured_says_so() {
+        // What Groq and OpenAI actually answer when `model` is missing.
+        let url = one_shot("400 Bad Request", r#"{"error":{"message":"model required"}}"#).await;
+        let out = clean("hello", &Context::default(), &loopback(url, None)).await;
+        assert_eq!(out.text, "hello");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("cleanup rejected the request: set cleanup.model")
+        );
+    }
+
     #[tokio::test]
     async fn provider_none_returns_the_raw_transcript_with_no_failure() {
         let cfg = Cleanup { provider: "none".into(), ..Default::default() };
@@ -423,7 +542,28 @@ mod tests {
         };
         let out = clean("hello", &Context::default(), &cfg).await;
         assert_eq!(out.text, "hello", "a dead endpoint must never lose the transcript");
-        assert!(out.failure.is_some());
+        // Exact, not just is_some(): this test costs the full 20s client
+        // timeout, so it should at least prove *which* arm it lands on.
+        assert_eq!(out.failure.as_deref(), Some("cleanup timed out"));
+    }
+
+    #[tokio::test]
+    async fn a_key_with_a_trailing_newline_blames_the_config_not_the_network() {
+        // The classic config.toml paste. The header encoder rejects it before
+        // anything is sent, so base_url here is never dialled.
+        let cfg = Cleanup {
+            provider: "openai-compatible".into(),
+            base_url: Some("http://127.0.0.1:1/v1".into()),
+            api_key: Some("sk-secret\n".into()),
+            api_key_env: None,
+            model: Some("m".into()),
+        };
+        let out = clean("hello", &Context::default(), &cfg).await;
+        assert_eq!(out.text, "hello");
+        assert_eq!(
+            out.failure.as_deref(),
+            Some("cleanup config invalid: check api_key and base_url")
+        );
     }
 
     /// The test above reaches `clean` through the *timeout* arm — a TEST-NET-1
