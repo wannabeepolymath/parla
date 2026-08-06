@@ -2091,7 +2091,15 @@ struct App {
 
 impl App {
     /// Runs after the key is released: transcribe, clean, deliver.
-    async fn finish(&self) {
+    ///
+    /// Takes `Arc<Self>` rather than `&self` so the whisper pass can be moved
+    /// onto a blocking thread. `transcribe` is CPU-bound C code that runs for
+    /// hundreds of milliseconds to seconds; calling it directly inside a
+    /// `tokio::spawn` occupies a runtime worker for its whole duration and
+    /// starves everything sharing that runtime — including the once-a-second
+    /// watchdog tick, which is the one thing guaranteed to be needed if a
+    /// dictation goes wrong.
+    async fn finish(self: Arc<Self>) {
         let samples = self.capture.take_since_mark();
         // Whisper hallucinates on sub-0.4s or silent buffers — never send them.
         if !audio_worth_transcribing(samples.len(), rms(&samples)) {
@@ -2100,7 +2108,20 @@ impl App {
         }
 
         let prompt = whisper::initial_prompt(&self.cfg.dictionary);
-        let raw = self.transcriber.transcribe(&samples, prompt.as_deref());
+        let me = self.clone();
+        let raw = match tokio::task::spawn_blocking(move || {
+            me.transcriber.transcribe(&samples, prompt.as_deref())
+        })
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                // A panic inside whisper must not leave the user with silence.
+                eprintln!("parlad: transcription task failed: {e}");
+                deliver::notify("Parla", "Transcription failed");
+                return;
+            }
+        };
         if raw.is_empty() {
             deliver::notify("Parla", "Nothing heard");
             return;
@@ -2201,7 +2222,7 @@ async fn main() -> anyhow::Result<()> {
                 Edge::Finished => {
                     // Reply immediately so parlactl (and the compositor) never
                     // block on whisper; do the work behind it.
-                    tokio::spawn(async move { app.finish().await });
+                    tokio::spawn(app.clone().finish());
                     "processing".into()
                 }
                 Edge::Cancelled => {
