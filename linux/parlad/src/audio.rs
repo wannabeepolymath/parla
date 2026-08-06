@@ -57,6 +57,20 @@ fn downmix_to_mono_into(interleaved: &[f32], channels: usize, out: &mut Vec<f32>
     );
 }
 
+/// Widen one device callback to `f32`, in the same shape as the two helpers
+/// around it. A free function rather than two lines inside the stream closure
+/// purely so the `clear()` is reachable from a test: the closure needs a
+/// `cpal::Device` to exist, and forgetting this particular clear is the worst
+/// failure this module has — the scratch grows without bound and the ring fills
+/// with duplicated audio, which whisper then hallucinates over.
+fn convert_into<T: cpal::SizedSample>(data: &[T], out: &mut Vec<f32>)
+where
+    f32: cpal::FromSample<T>,
+{
+    out.clear();
+    out.extend(data.iter().map(|s| f32::from_sample_(*s)));
+}
+
 fn resample_linear_into(input: &[f32], from: u32, to: u32, out: &mut Vec<f32>) {
     out.clear();
     // Both early-outs are behaviour-neutral — the general path below already
@@ -295,8 +309,7 @@ where
     Ok(device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            conv.clear();
-            conv.extend(data.iter().map(|s| f32::from_sample_(*s)));
+            convert_into(data, &mut conv);
             lock(&sink).push(&conv, channels, rate);
         },
         |e| eprintln!("parlad: audio stream error: {e}"),
@@ -470,6 +483,22 @@ mod tests {
         let stereo: Vec<f32> = [1.0f32, 0.0].iter().cycle().take(96).copied().collect();
         r.push(&stereo, 2, 48_000);
         assert!((r.level - 0.5).abs() < 1e-6, "level was {}", r.level);
+    }
+
+    #[test]
+    fn the_conversion_scratch_carries_nothing_from_the_previous_callback() {
+        // The stream closure reuses one buffer for the process lifetime. Without
+        // the clear it grows without bound and every callback re-pushes all the
+        // audio before it — measured on hardware as 3 s of speech filling the
+        // whole 300 s ring, which whisper then hallucinated over. This is the
+        // regression guard for that; the other two scratch clears are pinned by
+        // the capacity test below.
+        let mut out = Vec::new();
+        convert_into(&[i16::MAX, 0, i16::MIN, 0, i16::MAX], &mut out);
+        assert_eq!(out.len(), 5);
+        assert!((out[0] - 1.0).abs() < 1e-4, "conversion is wrong: {out:?}");
+        convert_into(&[0i16, 0], &mut out);
+        assert_eq!(out, vec![0.0, 0.0], "the previous callback's tail survived");
     }
 
     #[test]
