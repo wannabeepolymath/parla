@@ -155,11 +155,13 @@ fn delivered(copied: anyhow::Result<()>, out: Outcome) -> (&'static str, String,
             // Nothing landed anywhere, so this notification is the last copy of
             // the user's words: the whole text rather than a preview, and it
             // stays up until dismissed. Four seconds is not enough to read a
-            // paragraph, let alone retype one — and the journal line above is
-            // the only other place it survives, so the body says where.
+            // paragraph, let alone retype one — and the log line above is the
+            // only other place it survives, so the body says where. "log", the
+            // same word `TRANSCRIPTION_FAILED` uses: one place, one name, and
+            // it is true whether that is journald or a terminal.
             (
                 "Parla — clipboard failed",
-                format!("{} (also in the journal)", out.text),
+                format!("{} (also in the log)", out.text),
                 deliver::Timeout::Never,
             )
         }
@@ -355,7 +357,7 @@ mod tests {
         );
         assert_eq!(summary, "Parla — clipboard failed");
         assert!(body.starts_with(long), "the untruncated text is the only copy left: {body}");
-        assert!(body.contains("journal"), "no recovery route offered: {body}");
+        assert!(body.contains("log"), "no recovery route offered: {body}");
         // ...and it must not time out. Four seconds is not enough to read a
         // paragraph out of a toast, let alone retype one.
         assert_eq!(timeout, deliver::Timeout::Never);

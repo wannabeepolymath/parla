@@ -1,8 +1,18 @@
+use std::time::Duration;
 use wl_clipboard_rs::copy::{MimeType, Options, Source};
 
 /// Re-exported so the pipeline can say how long a notification stays up without
 /// taking a direct dependency on the notification crate.
 pub use notify_rust::Timeout;
+
+/// Longest the pipeline waits for the compositor to take the selection. An
+/// *absent* compositor errors in microseconds; a *wedged* one never answers at
+/// all, and an unbounded wait there means `dictate` never returns, no
+/// notification ever fires, and the transcript is lost in silence — the one
+/// outcome this pipeline exists to prevent. Generous, because it is not a
+/// latency budget: anything under it is invisible, and past it the desktop has
+/// bigger problems than this dictation.
+const HANDOVER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hands the text to the Wayland clipboard.
 ///
@@ -21,19 +31,25 @@ pub use notify_rust::Timeout;
 /// lives — it is not a fork, and it does not outlive the daemon.
 pub async fn to_clipboard(text: &str) -> anyhow::Result<()> {
     let text = text.to_string();
-    tokio::task::spawn_blocking(move || {
+    let handover = tokio::task::spawn_blocking(move || {
         let mut opts = Options::new();
         // Already the default; pinned explicitly because the other setting makes
         // `copy` block until someone else takes the selection — in a daemon,
-        // that is forever.
+        // that is forever. Inside `spawn_blocking` that would hang a pool
+        // thread silently, so it is pinned rather than left to the default.
         opts.foreground(false);
         opts.copy(
             Source::Bytes(text.into_bytes().into_boxed_slice()),
             MimeType::Text,
         )?;
         anyhow::Ok(())
-    })
-    .await?
+    });
+    // On timeout the blocking thread is NOT cancelled — it keeps waiting and may
+    // still land the text later, which is harmless. What matters is that the
+    // caller gets an answer it can show the user rather than waiting forever.
+    tokio::time::timeout(HANDOVER_TIMEOUT, handover)
+        .await
+        .map_err(|_| anyhow::anyhow!("the compositor did not take the clipboard within {HANDOVER_TIMEOUT:?}"))??
 }
 
 /// Fire-and-forget. `notify_rust::show()` is a BLOCKING D-Bus round trip, so it
