@@ -559,9 +559,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 if Inserter.canEraseTyped(insertText) {
-                    NSLog("Parla swap path: ax-verified tail swap (erase %d)", plan.eraseTail.count)
-                    Inserter.typeBackspaces(plan.eraseTail.count)
-                    Inserter.typeUnicode(plan.replacement)
+                    // Same precondition as before — the field must still end
+                    // with everything we landed — but prefer an atomic AX write
+                    // to the backspace burst. The prefix-only diff makes
+                    // eraseTail the WHOLE transcript whenever cleanup touched
+                    // the first word, so the old path erased a long dictation
+                    // one character at a time (~3s, visible, main-thread) and
+                    // could eat a character the user typed mid-burst.
+                    if Inserter.replaceTypedTail(plan.eraseTail, with: plan.replacement) {
+                        NSLog("Parla swap path: atomic ax tail swap (%d chars)", plan.eraseTail.count)
+                    } else {
+                        NSLog("Parla swap path: keystroke tail swap (erase %d)", plan.eraseTail.count)
+                        Inserter.typeBackspaces(plan.eraseTail.count)
+                        Inserter.typeUnicode(plan.replacement)
+                    }
                     hud.show(.done)
                 } else {
                     // AX can't prove the field still ends with our text — leave
