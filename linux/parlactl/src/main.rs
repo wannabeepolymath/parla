@@ -1,7 +1,16 @@
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// A wedged parlad must never pin this process. The compositor spawns one
+/// parlactl per key edge, so an unbounded wait leaks a process and a descriptor
+/// on *every* keypress until the user runs out of both.
+///
+/// Generous next to any legitimate reply: parlad answers on the socket before
+/// it starts transcribing, so nothing on this path is ever slow by design.
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Deliberately duplicated from `parlad::socket::socket_path_from` rather than
 /// shared: this crate takes no dependencies at all, because the compositor
@@ -18,19 +27,13 @@ fn socket_path_from(xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
         .join("parla.sock")
 }
 
-fn main() -> std::io::Result<()> {
-    let cmd = std::env::args().nth(1).unwrap_or_else(|| "status".into());
-    let path = socket_path_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
-    // Blocking std sockets on purpose: no async runtime to start up. This
-    // process is spawned by the compositor on every key press and release.
-    // Exits here rather than `?`-ing out, so the user gets this one line and not
-    // this line followed by Termination's `Error: Os { code: 2, .. }`. The errno
-    // is kept inline: ENOENT ("not running") and EACCES ("wrong $XDG_RUNTIME_DIR
-    // / another user's socket") need very different fixes.
-    let mut stream = UnixStream::connect(&path).unwrap_or_else(|e| {
-        eprintln!("parlactl: cannot reach parlad at {} ({e}) — is parlad running?", path.display());
-        std::process::exit(1);
-    });
+/// One command, one reply, every step bounded in time.
+///
+/// Blocking std sockets on purpose: no async runtime to start up.
+fn ask(path: &Path, cmd: &str) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.write_all(cmd.as_bytes())?;
     stream.write_all(b"\n")?;
     // Half-close. parlad reads one line and so never waits on this EOF, which
@@ -41,16 +44,48 @@ fn main() -> std::io::Result<()> {
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;
+    Ok(reply)
+}
+
+/// Every failure ends here: one line on stderr, exit 1. The compositor discards
+/// stdout, so a diagnostic that lands only there is indistinguishable from a
+/// keybinding that works and does nothing.
+fn die(msg: String) -> ! {
+    eprintln!("parlactl: {msg}");
+    std::process::exit(1)
+}
+
+fn main() {
+    let cmd = std::env::args().nth(1).unwrap_or_else(|| "status".into());
+    let path = socket_path_from(std::env::var_os("XDG_RUNTIME_DIR").as_deref());
+
+    let reply = ask(&path, &cmd).unwrap_or_else(|e| {
+        die(match e.kind() {
+            ErrorKind::NotFound | ErrorKind::ConnectionRefused => {
+                format!("cannot reach parlad at {} ({e}) — is parlad running?", path.display())
+            }
+            // SO_RCVTIMEO/SO_SNDTIMEO surface as WouldBlock on Linux and
+            // TimedOut on some other unices; both mean the same thing here.
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => format!(
+                "parlad accepted the connection but went quiet for {IO_TIMEOUT:?} — wedged? ({})",
+                path.display()
+            ),
+            _ => format!("talking to parlad at {} failed ({e})", path.display()),
+        })
+    });
+
     // Wire contract with parlad's socket handler: an `error:`-prefixed reply is
-    // a failure. The compositor throws stdout away, so a bad binding would look
-    // like nothing happening at all unless it also shows up on stderr and in the
-    // exit status.
+    // a failure.
     if let Some(msg) = reply.strip_prefix("error: ") {
-        eprint!("parlactl: {msg}");
-        std::process::exit(1);
+        die(msg.trim_end().to_string());
+    }
+    // parlad always answers. Nothing at all means it hit an error before it
+    // could reply — a malformed line, or a crash mid-connection. Printing
+    // nothing and exiting 0 would make that indistinguishable from success.
+    if reply.trim().is_empty() {
+        die(format!("parlad closed the connection without replying ({})", path.display()));
     }
     print!("{reply}");
-    Ok(())
 }
 
 #[cfg(test)]

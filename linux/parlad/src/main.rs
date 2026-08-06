@@ -10,6 +10,12 @@ use tokio::sync::Mutex;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(&config_path());
+    if cfg.watchdog_secs == 0 {
+        // Session::new clamps it. Say so rather than silently rewriting the
+        // user's config — that is the same silent degradation Config::load
+        // refuses to do for a malformed file.
+        eprintln!("parlad: watchdog_secs = 0 does not disable the watchdog; using 1s");
+    }
     let sess = Arc::new(Mutex::new(Session::new(Duration::from_secs(cfg.watchdog_secs))));
 
     // Watchdog: sway drops the --release edge if another key is pressed while
@@ -19,10 +25,19 @@ async fn main() -> anyhow::Result<()> {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
-            let mut s = watch.lock().await;
-            if s.watchdog_expired(Instant::now()) {
+            let fired = {
+                let mut s = watch.lock().await;
+                let fired = s.watchdog_expired(Instant::now());
+                if fired {
+                    s.handle(Command::Cancel, Instant::now());
+                }
+                fired
+            };
+            // Logged after the guard is dropped: a blocking write to a wedged
+            // journald would otherwise stall the one lock every hotkey press
+            // needs. Same defect shape as holding it across a D-Bus notify.
+            if fired {
                 eprintln!("parlad: watchdog fired, discarding recording");
-                s.handle(Command::Cancel, Instant::now());
             }
         }
     });

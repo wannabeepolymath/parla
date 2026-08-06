@@ -1,7 +1,9 @@
 use std::ffi::OsStr;
 use std::future::Future;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
@@ -9,6 +11,15 @@ use tokio::net::{UnixListener, UnixStream};
 /// unbounded `read_line` lets a client that never sends a newline grow the
 /// daemon's heap until the OOM killer arrives.
 const MAX_COMMAND_BYTES: u64 = 256;
+
+/// A connection that sends nothing must not hold its task and fd forever.
+/// `MAX_COMMAND_BYTES` bounds a client in bytes; this bounds it in time.
+const COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Pause before retrying an `accept` that failed on fd pressure. Long enough
+/// not to spin a core against a full descriptor table, short enough that the
+/// next hotkey press after the pressure clears still lands.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Serve one command per connection: read a line, hand it to `handler`, write
 /// the reply. `parlactl` connects, sends, reads, and exits on every key edge,
@@ -40,30 +51,72 @@ fn bind(path: &Path) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
+/// How long to wait before accepting again after a failure, or `None` when the
+/// listener is beyond recovery and the daemon should exit.
+///
+/// Split out from the loop so the policy — including the backoff length — is
+/// testable against synthetic errors; inducing a real EMFILE in a test would
+/// mean exhausting the whole process's descriptor table.
+fn accept_retry_delay(e: &std::io::Error) -> Option<Duration> {
+    match e.kind() {
+        // Per-connection: the client vanished between connect and accept, or a
+        // signal landed. POSIX says to ignore both and carry on.
+        ErrorKind::ConnectionAborted | ErrorKind::Interrupted => Some(Duration::ZERO),
+        // EMFILE (24) and ENFILE (23): same values on Linux and macOS, and std
+        // has no stable `ErrorKind` for either, so they arrive uncategorised.
+        // Transient, but retrying flat out burns a core against a full table.
+        _ if matches!(e.raw_os_error(), Some(23 | 24)) => Some(ACCEPT_BACKOFF),
+        _ => None,
+    }
+}
+
 async fn accept_loop<F, Fut>(listener: UnixListener, handler: F) -> anyhow::Result<()>
 where
     F: Fn(String) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = String> + Send + 'static,
 {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            // A dropped connection or a moment of fd pressure must not end
+            // dictation. Restarting the daemon is not an equivalent recovery:
+            // it also drops the warm capture stream Tasks 6-8 depend on, so the
+            // first syllable of the next dictation is gone.
+            Err(e) => match accept_retry_delay(&e) {
+                Some(delay) => {
+                    eprintln!("parlad: accept failed, retrying in {delay:?}: {e}");
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                // Exiting loudly is the honest outcome here: the socket is dead
+                // and every further hotkey press would be a silent no-op.
+                None => return Err(e.into()),
+            },
+        };
         let handler = handler.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, handler).await {
+            if let Err(e) = handle_conn(stream, handler, COMMAND_READ_TIMEOUT).await {
                 eprintln!("parlad: connection error: {e}");
             }
         });
     }
 }
 
-async fn handle_conn<F, Fut>(stream: UnixStream, handler: F) -> anyhow::Result<()>
+async fn handle_conn<F, Fut>(
+    stream: UnixStream,
+    handler: F,
+    read_timeout: Duration,
+) -> anyhow::Result<()>
 where
     F: Fn(String) -> Fut,
     Fut: Future<Output = String>,
 {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
-    BufReader::new(read.take(MAX_COMMAND_BYTES)).read_line(&mut line).await?;
+    let mut reader = BufReader::new(read.take(MAX_COMMAND_BYTES));
+    tokio::time::timeout(read_timeout, reader.read_line(&mut line))
+        .await
+        .map_err(|_| anyhow::anyhow!("client sent no command within {read_timeout:?}"))??;
     let reply = handler(line).await;
     write.write_all(reply.as_bytes()).await?;
     write.write_all(b"\n").await?;
@@ -157,6 +210,55 @@ mod tests {
         let _listener = bind(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "socket mode was {:o}", mode & 0o777);
+    }
+
+    #[test]
+    fn a_transient_accept_error_does_not_end_the_daemon() {
+        use std::io::Error;
+        // ECONNABORTED: the client hung up between connect and accept. POSIX
+        // says ignore it; propagating it would end dictation until a restart,
+        // and a restart also drops the warm capture stream.
+        assert_eq!(
+            accept_retry_delay(&Error::from(ErrorKind::ConnectionAborted)),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            accept_retry_delay(&Error::from(ErrorKind::Interrupted)),
+            Some(Duration::ZERO)
+        );
+        // EMFILE / ENFILE: retry, but *paused* — a tight loop against a full
+        // descriptor table burns a core and recovers no faster for it.
+        assert_eq!(accept_retry_delay(&Error::from_raw_os_error(24)), Some(ACCEPT_BACKOFF));
+        assert_eq!(accept_retry_delay(&Error::from_raw_os_error(23)), Some(ACCEPT_BACKOFF));
+        assert!(ACCEPT_BACKOFF > Duration::ZERO, "the fd-pressure backoff must actually pause");
+        // A genuinely broken listener must still take the daemon down, rather
+        // than spin forever pretending to serve hotkeys.
+        assert_eq!(accept_retry_delay(&Error::from(ErrorKind::InvalidInput)), None);
+    }
+
+    #[tokio::test]
+    async fn a_client_that_never_sends_a_command_is_hung_up_on() {
+        let path = scratch("silent");
+        let listener = bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let handler = |_: String| async { unreachable!("no command was ever sent") };
+            let e = handle_conn(stream, handler, Duration::from_millis(50))
+                .await
+                .unwrap_err();
+            assert!(e.to_string().contains("no command within"), "{e}");
+        });
+
+        let mut c = UnixStream::connect(&path).await.unwrap();
+        // Connect and then say nothing at all. Without the read timeout this
+        // pins a task and an fd for the life of the daemon, and enough of them
+        // reach EMFILE.
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(5), c.read_to_string(&mut reply))
+            .await
+            .expect("daemon never hung up on a silent client")
+            .unwrap();
+        assert_eq!(reply, "", "a silent client should get no reply");
     }
 
     #[tokio::test]

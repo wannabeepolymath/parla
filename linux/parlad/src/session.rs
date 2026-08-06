@@ -45,6 +45,11 @@ pub enum Edge {
 /// Taps shorter than this are a fumbled key, not dictation.
 const SHORT_TAP: Duration = Duration::from_millis(200);
 
+/// Floor for the watchdog. `watchdog_secs = 0` in config.toml reads as
+/// "disabled" to anyone skimming the file, but taken literally it expires every
+/// recording on the daemon's first tick — dictation would never work again.
+const MIN_WATCHDOG: Duration = Duration::from_secs(1);
+
 pub struct Session {
     state: State,
     started: Option<Instant>,
@@ -52,8 +57,10 @@ pub struct Session {
 }
 
 impl Session {
+    /// Clamped here, at the one point every caller routes through, rather than
+    /// at each call site — see `MIN_WATCHDOG`.
     pub fn new(watchdog: Duration) -> Self {
-        Self { state: State::Idle, started: None, watchdog }
+        Self { state: State::Idle, started: None, watchdog: watchdog.max(MIN_WATCHDOG) }
     }
 
     pub fn state(&self) -> State {
@@ -186,6 +193,19 @@ mod tests {
                 "{end:?} left the watchdog armed"
             );
         }
+    }
+
+    #[test]
+    fn a_zero_watchdog_is_clamped_rather_than_cancelling_every_recording() {
+        // `watchdog_secs = 0` looks like "off" in a config file. Unclamped it
+        // expires on the daemon's first tick, so every dictation dies before
+        // the user finishes the first word — and the daemon logs once a second
+        // forever. Clamped, a surprising value is merely useless.
+        let mut s = Session::new(Duration::from_secs(0));
+        let t0 = Instant::now();
+        s.handle(Command::Start, t0);
+        assert!(!s.watchdog_expired(t0 + Duration::from_millis(900)));
+        assert!(s.watchdog_expired(t0 + Duration::from_millis(1_100)));
     }
 
     #[test]
