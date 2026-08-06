@@ -50,6 +50,12 @@ const SHORT_TAP: Duration = Duration::from_millis(200);
 /// recording on the daemon's first tick — dictation would never work again.
 const MIN_WATCHDOG: Duration = Duration::from_secs(1);
 
+/// Ceiling, and the symmetric case: the capture ring holds `RING_SECS` of audio
+/// and drops the oldest to make room, so a recording allowed to outlive it comes
+/// back with its opening words missing and nothing anywhere saying so. Derived
+/// from the ring rather than spelled out, so the two cannot drift apart.
+const MAX_WATCHDOG: Duration = Duration::from_secs(crate::audio::RING_SECS);
+
 pub struct Session {
     state: State,
     started: Option<Instant>,
@@ -57,10 +63,14 @@ pub struct Session {
 }
 
 impl Session {
-    /// Clamped here, at the one point every caller routes through, rather than
-    /// at each call site — see `MIN_WATCHDOG`.
+    /// Clamped at both ends here, at the one point every caller routes through,
+    /// rather than at each call site — see `MIN_WATCHDOG` and `MAX_WATCHDOG`.
     pub fn new(watchdog: Duration) -> Self {
-        Self { state: State::Idle, started: None, watchdog: watchdog.max(MIN_WATCHDOG) }
+        Self {
+            state: State::Idle,
+            started: None,
+            watchdog: watchdog.clamp(MIN_WATCHDOG, MAX_WATCHDOG),
+        }
     }
 
     pub fn state(&self) -> State {
@@ -206,6 +216,21 @@ mod tests {
         s.handle(Command::Start, t0);
         assert!(!s.watchdog_expired(t0 + Duration::from_millis(900)));
         assert!(s.watchdog_expired(t0 + Duration::from_millis(1_100)));
+    }
+
+    #[test]
+    fn a_watchdog_longer_than_the_capture_ring_is_clamped_to_it() {
+        // The README invites raising `watchdog_secs` for long dictations, so
+        // this is a value a user can actually reach. Unclamped, the recording
+        // outlives the ring and the front of it is dropped: the user gets a
+        // dictation missing its opening minutes, with no notification and no log
+        // line — the one failure shape this milestone exists to prevent.
+        let over = Duration::from_secs(crate::audio::RING_SECS * 2);
+        let mut s = Session::new(over);
+        let t0 = Instant::now();
+        s.handle(Command::Start, t0);
+        assert!(!s.watchdog_expired(t0 + Duration::from_secs(crate::audio::RING_SECS - 1)));
+        assert!(s.watchdog_expired(t0 + Duration::from_secs(crate::audio::RING_SECS + 1)));
     }
 
     #[test]

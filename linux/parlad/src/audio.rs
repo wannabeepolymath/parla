@@ -4,9 +4,14 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const TARGET_RATE: u32 = 16_000;
-/// Ring buffer capacity: 5 minutes at 16 kHz. A dictation longer than the
-/// watchdog can't happen, so this only ever holds the tail.
-const CAPACITY: usize = TARGET_RATE as usize * 300;
+/// Ring buffer span: 5 minutes. `Session::new` clamps the watchdog to this, so
+/// a dictation longer than the ring can't happen and the buffer only ever holds
+/// the tail of the idle audio before one. That premise used to be falsifiable
+/// from config.toml — `watchdog_secs = 600` dropped the front of a long
+/// dictation with nothing to show for it — which is why the clamp exists.
+pub const RING_SECS: u64 = 300;
+/// Ring buffer capacity at 16 kHz.
+const CAPACITY: usize = TARGET_RATE as usize * RING_SECS as usize;
 /// Slack above `capacity` so that the `extend` in `push` never reallocates: the
 /// ring is trimmed *after* appending, so it transiently holds one callback more
 /// than its capacity. One second is ~60x the largest realistic callback, and

@@ -57,8 +57,9 @@ pub struct Config {
     pub cleanup: Cleanup,
     /// None => $XDG_DATA_HOME/parla/models/ggml-base.en.bin
     pub whisper_model: Option<PathBuf>,
-    pub history_enabled: bool,
-    /// No `stop` within this many seconds => self-cancel. Guards sway#6456,
+    /// No `stop` within this many seconds => self-cancel. Clamped by
+    /// `Session::new` to 1s at the bottom and the capture ring's 300s at the
+    /// top. Guards sway#6456,
     /// which drops the --release edge if another key is pressed while held.
     pub watchdog_secs: u64,
 }
@@ -70,7 +71,6 @@ impl Default for Config {
             snippets: BTreeMap::new(),
             cleanup: Cleanup::default(),
             whisper_model: None,
-            history_enabled: true,
             watchdog_secs: 30,
         }
     }
@@ -89,7 +89,11 @@ impl Config {
         match toml::from_str(&text) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("parla: ignoring {}: {e}", path.display());
+                // `parla-core:`, not `parla:` — every other line in the daemon
+                // and the CLI is prefixed with the binary that emitted it, and a
+                // library cannot know which one is hosting it. Naming itself is
+                // the honest version of that convention, not an exception to it.
+                eprintln!("parla-core: ignoring {}: {e}", path.display());
                 Self::default()
             }
         }
@@ -141,7 +145,6 @@ mod tests {
         assert_eq!(c.cleanup.provider, "openai-compatible");
         // Untouched keys must keep their defaults, not reset the struct.
         assert_eq!(c.watchdog_secs, 30);
-        assert!(c.history_enabled);
         assert_eq!(c.cleanup.model, None);
     }
 

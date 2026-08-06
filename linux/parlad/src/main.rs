@@ -27,17 +27,28 @@ const PREVIEW_CHARS: usize = 60;
 /// Long enough to read a preview, short enough not to sit on the user's screen.
 const TOAST: deliver::Timeout = deliver::Timeout::Milliseconds(4_000);
 
+/// Deliberately does NOT hold the `Capture`. The ring is taken under the
+/// session lock, at the edge that authorises it, and the samples are handed to
+/// `finish`; giving this struct a `capture` field again would make reading the
+/// ring from inside the dictation task compile once more, which is exactly the
+/// race the handoff removes. Absent field, `error[E0609]`.
 struct App {
     cfg: Config,
-    capture: audio::Capture,
     transcriber: whisper::Transcriber,
 }
 
 impl App {
-    /// Runs after the key is released. The whole pipeline's single notification
-    /// is sent from here, and it is the only `notify` on this path.
-    async fn finish(self: Arc<Self>) {
-        let (summary, body, timeout) = self.dictate().await;
+    /// Runs after the key is released, on the samples the socket handler took
+    /// from the ring under the session lock. Handed in rather than read here:
+    /// `tokio::spawn` returns long before this task is first polled, and a
+    /// `mark` or a `take` landing from another connection in that window would
+    /// feed whisper the wrong audio — or, for a `Cancelled`, nothing at all,
+    /// reported as "Nothing heard" for speech that was captured fine.
+    ///
+    /// The whole pipeline's single notification is sent from here, and it is the
+    /// only `notify` on this path.
+    async fn finish(self: Arc<Self>, samples: Vec<f32>) {
+        let (summary, body, timeout) = self.dictate(samples).await;
         // Journalled as well as shown. A notification the user looked away from
         // — or that a dead notification daemon swallowed — is otherwise the only
         // record that the dictation happened at all.
@@ -61,8 +72,8 @@ impl App {
     /// starves everything sharing that runtime — including the once-a-second
     /// watchdog tick, which is the one thing guaranteed to be needed if a
     /// dictation goes wrong.
-    async fn dictate(self: Arc<Self>) -> (&'static str, String, deliver::Timeout) {
-        let samples = match worth_transcribing(self.capture.take_since_mark()) {
+    async fn dictate(self: Arc<Self>, samples: Vec<f32>) -> (&'static str, String, deliver::Timeout) {
+        let samples = match worth_transcribing(samples) {
             Ok(s) => s,
             Err(refusal) => return ("Parla", refusal.into(), TOAST),
         };
@@ -194,24 +205,37 @@ async fn main() -> anyhow::Result<()> {
         // refuses to do for a malformed file.
         eprintln!("parlad: watchdog_secs = 0 does not disable the watchdog; using 1s");
     }
+    if cfg.watchdog_secs > audio::RING_SECS {
+        // Same reasoning as the floor above, other end: `Session::new` clamps to
+        // the ring's own length, because a recording allowed to outlive the ring
+        // loses its opening words with nothing to show for it.
+        eprintln!(
+            "parlad: watchdog_secs = {} is longer than the {}s capture buffer; using {}s",
+            cfg.watchdog_secs,
+            audio::RING_SECS,
+            audio::RING_SECS
+        );
+    }
+    // Before the microphone on purpose. `Capture::start` goes through cpal's
+    // `default_host()`, which on Linux ends in `AlsaHost::new().expect(...)` — a
+    // box with no working ALSA panics there rather than returning an error. A
+    // first-run user who has not downloaded the model yet would then never see
+    // "whisper model not found at …", the one startup message that names both a
+    // path and a fix.
+    let transcriber = whisper::Transcriber::new(&whisper::model_path(&cfg))?;
     // Opened once, here, and never closed: `mark()` only stamps a position in
     // an already-running ring, because opening the mic on key-down clips the
     // first syllable.
-    let capture = audio::Capture::start()?;
-    let transcriber = whisper::Transcriber::new(&whisper::model_path(&cfg))?;
+    let capture = Arc::new(audio::Capture::start()?);
     let watchdog = Duration::from_secs(cfg.watchdog_secs);
 
-    let app = Arc::new(App {
-        cfg,
-        capture,
-        transcriber,
-    });
+    let app = Arc::new(App { cfg, transcriber });
     let sess = Arc::new(Mutex::new(Session::new(watchdog)));
 
     // Watchdog: sway drops the --release edge if another key is pressed while
     // the hotkey is held (sway#6456), so a stop may never arrive.
     let watch = sess.clone();
-    let watch_app = app.clone();
+    let watch_capture = capture.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
@@ -225,12 +249,15 @@ async fn main() -> anyhow::Result<()> {
                 let e = s.watchdog_expired(Instant::now());
                 if e {
                     s.handle(Command::Cancel, Instant::now());
+                    // Inside the guard, like every other ring operation: a take
+                    // out here races the `mark` of whatever dictation the user
+                    // starts the instant this one is cancelled.
+                    watch_capture.take_since_mark(); // drop the abandoned audio
                 }
                 e
             };
             if expired {
                 eprintln!("parlad: watchdog fired, discarding recording");
-                watch_app.capture.take_since_mark(); // drop the abandoned audio
                 deliver::notify("Parla", "Recording timed out — discarded", TOAST);
             }
         }
@@ -241,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
     socket::serve(&path, move |line| {
         let sess = sess.clone();
         let app = app.clone();
+        let capture = capture.clone();
         async move {
             // The `error:` prefix is the wire contract parlactl keys off to exit
             // non-zero; keep the two in step.
@@ -251,26 +279,38 @@ async fn main() -> anyhow::Result<()> {
             if cmd == Command::Status {
                 return format!("{:?}", s.state());
             }
-            let edge = s.handle(cmd, Instant::now());
-            drop(s); // release before the slow path
-
-            match edge {
+            // The ring operations happen under the same lock that authorised
+            // them. The session mutex serialises the state *transitions*, and
+            // the ring is the state those transitions are about — released in
+            // between, another connection can slip a `Finished` in ahead of this
+            // one's `mark()` and hand whisper the ring's whole idle tail (up to
+            // five minutes of room noise on the first dictation after startup),
+            // or a `Cancelled` can empty the ring out from under a `Finished`
+            // that has been spawned but not yet polled.
+            //
+            // Nothing below awaits: `mark` is one store, `take_since_mark` is a
+            // memcpy, and `spawn` returns immediately. The watchdog waits for
+            // that copy and nothing more — never for whisper.
+            let reply = match s.handle(cmd, Instant::now()) {
                 Edge::Began => {
-                    app.capture.mark();
-                    "recording".into()
+                    capture.mark();
+                    "recording"
                 }
                 Edge::Finished => {
                     // Reply immediately so parlactl (and the compositor) never
-                    // block on whisper; do the work behind it.
-                    tokio::spawn(app.clone().finish());
-                    "processing".into()
+                    // block on whisper; do the work behind it, on the samples
+                    // taken here rather than on whatever the ring happens to
+                    // hold once that task is scheduled.
+                    tokio::spawn(app.finish(capture.take_since_mark()));
+                    "processing"
                 }
                 Edge::Cancelled => {
-                    app.capture.take_since_mark(); // discard
-                    "cancelled".into()
+                    capture.take_since_mark(); // discard
+                    "cancelled"
                 }
-                Edge::Ignored => "ignored".into(),
-            }
+                Edge::Ignored => "ignored",
+            };
+            reply.into()
         }
     })
     .await

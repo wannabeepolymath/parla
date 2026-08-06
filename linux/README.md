@@ -114,7 +114,9 @@ sway [#6456](https://github.com/swaywm/sway/issues/6456): pressing another key
 while the hotkey is held can make sway drop the release edge, so the `stop`
 never arrives. `watchdog_secs` bounds that — the recording self-cancels and
 notifies rather than capturing until the disk fills. Raise it if you dictate in
-long stretches.
+long stretches — up to 300 seconds, the length of the capture buffer. Anything
+higher is clamped to that (and says so on stderr), because a recording that
+outlives the buffer loses its opening words.
 
 ## Known limitations in M1
 

@@ -63,7 +63,11 @@ pub fn allowance(transcript: &str, snippets: &BTreeMap<String, String>) -> usize
             lower.matches(&k.to_lowercase()).count() * v.chars().count()
         })
         .sum();
-    2 * transcript.len() + 200 + expansions
+    // `chars().count()`, not `len()`: every term in `Pipeline.swift:47-58` is a
+    // Swift `.count`, i.e. characters. Bytes are identical for ASCII and three
+    // times tighter for CJK, which would reject perfectly good cleanups of
+    // dictated Japanese as degenerate.
+    2 * transcript.chars().count() + 200 + expansions
 }
 
 fn api_key(cfg: &Cleanup) -> Option<String> {
@@ -120,7 +124,8 @@ fn finish(json: &serde_json::Value, transcript: &str, ctx: &Context) -> Outcome 
     if cleaned.is_empty() {
         return keep_raw("cleanup returned no text");
     }
-    if cleaned.len() > allowance(transcript, &ctx.snippets) {
+    // Characters on both sides of the comparison; see `allowance`.
+    if cleaned.chars().count() > allowance(transcript, &ctx.snippets) {
         return keep_raw("cleanup returned invalid text");
     }
     Outcome { text: cleaned, failure: None }
@@ -274,6 +279,23 @@ mod tests {
     fn allowance_scales_with_transcript_length() {
         let empty = BTreeMap::new();
         assert_eq!(allowance("hello", &empty), 2 * 5 + 200);
+    }
+
+    #[test]
+    fn the_ceiling_is_counted_in_characters_not_bytes() {
+        // Swift counts characters on all four terms. A byte count here makes the
+        // ceiling three times tighter for CJK than the reference implementation
+        // — a difference no ASCII test can see.
+        let empty = BTreeMap::new();
+        assert_eq!(allowance("日本語", &empty), 2 * 3 + 200);
+        // ...and the cleaned side of the comparison too: 100 characters is well
+        // inside a 206-character ceiling, but 300 bytes is not, so a byte
+        // comparison throws away a good cleanup and hands back raw speech.
+        let cleaned = "あ".repeat(100);
+        assert!(cleaned.len() > allowance("日本語", &empty), "the test needs a byte/char gap");
+        let out = finish(&openai(&cleaned), "日本語", &Context::default());
+        assert_eq!(out.text, cleaned);
+        assert_eq!(out.failure, None);
     }
 
     #[test]
