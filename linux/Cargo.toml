@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["parla-core"]
+members = ["parla-core", "parlad", "parlactl"]
 
 [workspace.package]
 version = "0.1.0"
