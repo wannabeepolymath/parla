@@ -770,10 +770,26 @@ mod tests {
     }
 
     #[test]
-    fn sanitizer_strips_a_leading_preamble() {
-        assert_eq!(sanitize("Here is the cleaned text: hello there"), "hello there");
-        assert_eq!(sanitize("Cleaned text: hello"), "hello");
+    fn sanitizer_never_strips_a_leading_clause() {
+        // Deliberate: Swift's CleanupSanitizer refuses preamble stripping because
+        // the heuristic eats the user's own words. This case lost four words to a
+        // ": " truncation before the refusal was ported.
+        assert_eq!(sanitize("Here's the deal: we ship Friday"), "Here's the deal: we ship Friday");
+        assert_eq!(sanitize("Here is the cleaned text: hello there"), "Here is the cleaned text: hello there");
         assert_eq!(sanitize("hello: world"), "hello: world");
+    }
+
+    #[test]
+    fn sanitizer_strips_all_three_quote_pairs() {
+        assert_eq!(sanitize("'hello'"), "hello");
+        assert_eq!(sanitize("\u{201C}hello\u{201D}"), "hello");
+    }
+
+    #[test]
+    fn interior_guard_applies_to_every_pair() {
+        // An interior quote of the same kind means these are not wrappers.
+        assert_eq!(sanitize("'a' and 'b'"), "'a' and 'b'");
+        assert_eq!(sanitize("\u{201C}a\u{201D} and \u{201C}b\u{201D}"), "\u{201C}a\u{201D} and \u{201C}b\u{201D}");
     }
 
     #[test]
@@ -879,23 +895,35 @@ pub struct Outcome {
     pub failure: Option<String>,
 }
 
-/// Models sometimes wrap output in quotes or prepend a preamble despite the
-/// system prompt. Strip both; leave everything else untouched.
+/// Strip ONE wrapping quote pair, only when the first and last characters are a
+/// matching pair AND the interior contains neither — otherwise `"a" and "b"`
+/// would be mangled into `a" and "b`. Port of `CleanupSanitizer` in
+/// `Sources/ParlaCore/Cleanup.swift:137-158`, including its three pairs.
+// ponytail: no preamble stripping ("Sure, here's..." etc.) — too risky to guess
+// where the model's chatter ends and the user's text begins. A heuristic that
+// truncates at ": " eats the user's own words: "Here's the deal: we ship Friday"
+// becomes "we ship Friday". The system prompt already forbids preambles; upgrade
+// only if a provider proves reliably chatty.
 pub fn sanitize(text: &str) -> String {
-    let mut t = text.trim();
-    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
-        t = &t[1..t.len() - 1];
+    const PAIRS: [(char, char); 3] = [('"', '"'), ('\'', '\''), ('\u{201C}', '\u{201D}')];
+    let t = text.trim();
+    let mut chars = t.chars();
+    let (Some(first), Some(last)) = (chars.next(), t.chars().next_back()) else {
+        return t.to_string();
+    };
+    if t.chars().count() < 2 {
+        return t.to_string();
     }
-    // A preamble is a short lead-in ending in ": ", e.g. "Here is the text: ".
-    // Guard on length so an ordinary sentence containing a colon survives.
-    if let Some(i) = t.find(": ") {
-        let head = &t[..i];
-        let lower = head.to_ascii_lowercase();
-        if head.len() <= 40 && (lower.contains("text") || lower.contains("here")) {
-            t = &t[i + 2..];
+    for (open, close) in PAIRS {
+        if first == open && last == close {
+            let inner: String = t.chars().skip(1).take(t.chars().count() - 2).collect();
+            if inner.contains(open) || inner.contains(close) {
+                return t.to_string();
+            }
+            return inner.trim().to_string();
         }
     }
-    t.trim().to_string()
+    t.to_string()
 }
 
 /// Character ceiling for a cleaned result. Cleanup legitimately grows text a
