@@ -99,6 +99,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.hud.push(level: level) }
         }
 
+        // The mic went away mid-dictation (AirPods disconnecting, hub unplugged).
+        // Buffers stop arriving silently, so without this the pill would keep
+        // saying "Listening…" over a frozen waveform while the user talks into
+        // nothing. Say so; audio captured before the break still finalizes on
+        // release through the normal path.
+        recorder.onCaptureInterrupted = { [weak self] in
+            guard let self, self.isRecording else { return }
+            NSLog("Parla: capture interrupted mid-dictation")
+            self.hud.show(.error("Mic disconnected"))
+        }
+
         hotkey.onEdge = { [weak self] edge in
             guard let self else { return }
             NSLog("Parla: fn edge %@", "\(edge)")

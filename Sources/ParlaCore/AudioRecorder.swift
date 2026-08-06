@@ -2,6 +2,10 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 
+public struct AudioRecorderError: Error, CustomStringConvertible {
+    public let description: String
+}
+
 public final class AudioRecorder {
     public static let targetFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
@@ -10,16 +14,40 @@ public final class AudioRecorder {
     private let engine = AVAudioEngine()
     private var samples: [Float] = []
     private let lock = NSLock()
+    /// True between a successful start() and stop(). Read on main.
+    private var capturing = false
+    /// Whether a tap is currently installed on input bus 0. Tracked separately
+    /// from `capturing` because a configuration change clears `capturing` while
+    /// leaving the tap in place — stop() still has to remove it.
+    private var tapInstalled = false
 
     /// Called with each converted buffer's RMS level. Fires on the audio
     /// thread — callers must hop to main before touching UI.
     public var onLevel: ((Float) -> Void)?
 
+    /// Fired on the main queue when the capture graph broke mid-recording — the
+    /// input device was unplugged (AirPods disconnecting), or its format changed.
+    /// Without this the engine stops itself, buffers simply stop arriving, and
+    /// the UI goes on claiming it is listening while the user keeps talking into
+    /// nothing. Audio captured before the break is still in the buffer.
+    public var onCaptureInterrupted: (() -> Void)?
+
     /// Core Audio UID of the mic to record from. nil (or an unresolvable UID)
     /// ⇒ system default input. Applied at each start() while the engine is idle.
     public var inputDeviceUID: String?
 
-    public init() {}
+    public init() {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            // Only a change that actually took the engine down is a lost
+            // dictation; a benign reconfiguration that keeps it running is not.
+            guard let self, self.capturing, !self.engine.isRunning else { return }
+            NSLog("Parla: audio engine stopped by a configuration change (input device lost?)")
+            self.capturing = false
+            self.onCaptureInterrupted?()
+        }
+    }
 
     // MARK: - Input device selection (macOS Core Audio HAL)
 
@@ -82,6 +110,24 @@ public final class AudioRecorder {
         return str as String
     }
 
+    /// The current system default input. Needed to explicitly UNPIN the AUHAL:
+    /// once it has been pointed at a specific device it stops tracking the
+    /// default, so merely skipping the set (the old behaviour when
+    /// inputDeviceUID was nil) silently kept recording from the previously
+    /// chosen mic after the user picked "System Default" again.
+    private static func defaultInputDevice() -> AudioDeviceID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var device = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &device) == noErr,
+            device != kAudioObjectUnknown else { return nil }
+        return device
+    }
+
     private static func deviceID(forUID uid: String) -> AudioDeviceID? {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
@@ -132,20 +178,39 @@ public final class AudioRecorder {
     }
 
     public func start() throws {
+        // Under the lock: the audio thread's tap block appends here, and
+        // removeTap/engine.stop() do not prove an already-dispatched block has
+        // finished. An unsynchronized Array mutation racing a locked append is
+        // undefined behaviour, not just stale audio.
+        lock.lock()
         samples.removeAll()
+        lock.unlock()
+
         let input = engine.inputNode
         // Point the AUHAL input unit at the chosen device before reading its
-        // format. Engine is idle here (start is only called after stop). An
-        // unresolvable UID leaves the unit on the system default. ponytail: set
-        // per-start so unplugging the selected mic self-heals to default.
-        if let uid = inputDeviceUID, let device = AudioRecorder.deviceID(forUID: uid),
-           let unit = input.audioUnit {
-            var dev = device
+        // format. Engine is idle here (start is only called after stop).
+        // ALWAYS set it — resolving nil/unknown UIDs to the current system
+        // default — because an AUHAL pinned on an earlier start() keeps that
+        // device until told otherwise.
+        if let unit = input.audioUnit,
+           var dev = inputDeviceUID.flatMap({ AudioRecorder.deviceID(forUID: $0) })
+               ?? AudioRecorder.defaultInputDevice() {
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
                                  kAudioUnitScope_Global, 0, &dev,
                                  UInt32(MemoryLayout<AudioDeviceID>.size))
         }
+
         let format = input.outputFormat(forBus: 0)
+        // No usable input device (a desktop Mac with nothing plugged in) reports
+        // a 0 Hz format, and installTap raises an Objective-C exception on it —
+        // uncatchable from Swift, so the process dies instead of showing the
+        // caller's "Mic failed" toast. Refuse as a Swift error first.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw AudioRecorderError(description:
+                "no usable audio input device (format \(format.sampleRate)Hz × \(format.channelCount)ch)")
+        }
+
+        if tapInstalled { input.removeTap(onBus: 0); tapInstalled = false } // defensive: never double-tap a bus
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
             guard let self else { return }
             let chunk = AudioRecorder.convert(buf)
@@ -154,14 +219,17 @@ public final class AudioRecorder {
             self.lock.unlock()
             self.onLevel?(AudioRecorder.rms(chunk))
         }
+        tapInstalled = true
         do {
             try engine.start()
         } catch {
             // A failed start must leave the recorder restartable.
             input.removeTap(onBus: 0)
+            tapInstalled = false
             engine.stop()
             throw error
         }
+        capturing = true
     }
 
     /// Copy of the samples captured so far, under the lock. Safe to call
@@ -172,9 +240,17 @@ public final class AudioRecorder {
         return samples
     }
 
+    /// Stop capture and hand back everything recorded. Safe to call when start()
+    /// never succeeded or when a configuration change already downed the engine —
+    /// the tap is removed exactly once either way, so the next start() can never
+    /// hit AVAudioEngine's "may not have more than one tap" exception.
     public func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
         engine.stop()
+        capturing = false
         lock.lock()
         defer { lock.unlock() }
         return samples
