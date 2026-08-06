@@ -536,7 +536,9 @@ git commit -m "feat(linux): port PromptBuilder verbatim from ParlaCore"
 - Consumes: nothing
 - Produces: `parla_core::text::{audio_worth_transcribing, strip_non_speech, flatten_newlines, rms}`. Signatures: `audio_worth_transcribing(sample_count: usize, rms: f32) -> bool`, `strip_non_speech(text: &str) -> String`, `flatten_newlines(text: &str) -> String`, `rms(samples: &[f32]) -> f32`.
 
-Port of `Sources/ParlaCore/TextRules.swift` plus `AudioRecorder.rms`. The macOS bundle-ID tables do not port — `app_id` matching arrives with the focus oracle in M2. What ports now is the pure logic these rules sit on.
+Port of `Sources/ParlaCore/TextRules.swift` (`audioWorthTranscribing`, `flattenForTerminal`), plus `AudioRecorder.rms` and `WhisperTranscriber.stripNonSpeech` — the last lives in `Transcriber.swift:84-91`, not `TextRules.swift`. The macOS bundle-ID tables do not port — `app_id` matching arrives with the focus oracle in M2. What ports now is the pure logic these rules sit on.
+
+Note on `strip_non_speech`: the `!words.is_empty()` guard means a whitespace-only input returns unchanged, where Swift's `allSatisfy` is vacuously true and returns `""`. Unreachable in practice — both callers trim first (`Transcriber.swift:78`, and Task 8's pipeline) — so keep the guard rather than adding a special case for input that cannot arrive.
 
 - [ ] **Step 1: Write the failing test**
 
