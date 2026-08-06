@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,11 +63,20 @@ impl Default for Config {
 impl Config {
     /// Never fails: a missing or malformed file yields defaults, so a typo in
     /// config.toml degrades to stock behaviour instead of bricking the daemon.
+    /// A malformed file is still reported on stderr — degrading is fine, doing
+    /// it silently would leave the user with no way to see why their settings
+    /// stopped applying.
     pub fn load(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        toml::from_str(&text).unwrap_or_default()
+        match toml::from_str(&text) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("parla: ignoring {}: {e}", path.display());
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -79,13 +89,23 @@ impl Config {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
+/// Split out from `config_path` so the env-var precedence is testable without
+/// `set_var`, which races cargo's threaded test harness. An exported-but-empty
+/// `XDG_CONFIG_HOME` counts as unset, per the XDG basedir spec — otherwise it
+/// yields a *relative* path, and a daemon whose CWD is `/` reads the wrong file.
+pub fn config_path_from(xdg_config_home: Option<&OsStr>, home: &OsStr) -> PathBuf {
+    let base = match xdg_config_home.filter(|x| !x.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => PathBuf::from(home).join(".config"),
+    };
     base.join("parla/config.toml")
+}
+
+pub fn config_path() -> PathBuf {
+    config_path_from(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        &std::env::var_os("HOME").unwrap_or_default(),
+    )
 }
 
 #[cfg(test)]
@@ -110,14 +130,16 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_config_yields_defaults_not_panic() {
+    fn missing_config_yields_defaults_not_panic() {
         let c = Config::load(std::path::Path::new("/nonexistent/parla/config.toml"));
         assert_eq!(c, Config::default());
     }
 
     #[test]
     fn garbage_config_yields_defaults() {
-        let dir = std::env::temp_dir().join("parla-test-garbage");
+        // PID-scoped: concurrent worktrees share /tmp, and a fixed name lets one
+        // run's remove_file land inside another's save/load window.
+        let dir = std::env::temp_dir().join(format!("parla-test-garbage-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
         std::fs::write(&p, "this is not valid toml {{{").unwrap();
@@ -127,7 +149,7 @@ mod tests {
 
     #[test]
     fn roundtrips_through_save_and_load() {
-        let dir = std::env::temp_dir().join("parla-test-roundtrip");
+        let dir = std::env::temp_dir().join(format!("parla-test-roundtrip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
         let c = Config {
@@ -141,5 +163,16 @@ mod tests {
         c.save(&p).unwrap();
         assert_eq!(Config::load(&p), c);
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn empty_xdg_config_home_falls_back_to_home_like_an_unset_one() {
+        let unset = config_path_from(None, "/home/u".as_ref());
+        assert_eq!(unset, PathBuf::from("/home/u/.config/parla/config.toml"));
+        assert_eq!(config_path_from(Some("".as_ref()), "/home/u".as_ref()), unset);
+        assert_eq!(
+            config_path_from(Some("/xdg".as_ref()), "/home/u".as_ref()),
+            PathBuf::from("/xdg/parla/config.toml")
+        );
     }
 }
