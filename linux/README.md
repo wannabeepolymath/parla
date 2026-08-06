@@ -10,12 +10,10 @@ straight into the focused window arrives in M2.
 ## Build
 
 whisper.cpp is compiled from source and its bindings are generated at build
-time, so the native toolchain has to be present:
-
-    # Debian/Ubuntu
-    sudo apt install build-essential cmake libclang-dev libpipewire-0.3-dev libpulse-dev
-    # Arch
-    sudo pacman -S base-devel cmake clang pipewire libpulse
+time, so this needs cmake, a C/C++ toolchain, libclang, and the development
+headers for your audio stack — ALSA, plus PipeWire and PulseAudio. That is what
+the build links against, derived from the crates rather than from an install
+anyone has run here, so expect to translate it into your distro's package names.
 
     cd linux && cargo build --release
 
@@ -101,9 +99,10 @@ of printing a snippet that would silently do nothing.
     parlad
 
 It logs to stderr and must run inside your Wayland session — it needs
-`WAYLAND_DISPLAY` for the clipboard and a running notification daemon (mako,
-dunst, …) for the notifications. Then hold your hotkey, speak, release, and
-paste.
+`WAYLAND_DISPLAY` to reach the clipboard. A notification daemon (mako, dunst, …)
+is optional: without one you lose the "copied" and "nothing heard" toasts, but
+dictation still works and the failure is logged rather than fatal. Then hold
+your hotkey, speak, release, and paste.
 
 `parlactl status` reports what the daemon is doing; `parlactl start` and
 `parlactl stop` are the same commands the keybinding runs, useful for testing

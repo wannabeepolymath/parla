@@ -68,9 +68,8 @@ const HYPRLAND: &str = "\
 bind  = CTRL, Control_R, exec, parlactl start
 bindr = CTRL, Control_R, exec, parlactl stop
 #
-# Hyprland 0.55+ Lua config (~/.config/hypr/hyprland.lua) — the same two binds:
-#   hl.bind(\"CTRL + Control_R\", hl.dsp.exec_cmd(\"parlactl start\"))
-#   hl.bind(\"CTRL + Control_R\", hl.dsp.exec_cmd(\"parlactl stop\"), { release = true })
+# Hyprland 0.55+ also accepts a Lua config; the two lines above still work in
+# hyprland.conf. Check the wiki for the Lua equivalent if you use it.
 ";
 
 const RIVER: &str = "\
@@ -85,10 +84,11 @@ riverctl map -release normal Control Control_R spawn 'parlactl stop'
 /// Not a snippet, on purpose. Shipping lines that cannot work is worse than
 /// saying so: the user would paste them, reload, and get silence with no error.
 const NO_RELEASE_BINDING: &str = "\
-# niri and river >= 0.4 cannot express a key-release binding at all, so
-# push-to-talk on them needs the evdev backend, which is not in this milestone.
-# `parlactl start` and `parlactl stop` still work from a terminal or any other
-# launcher that can run two separate commands.
+# Only sway, Hyprland and river-classic 0.3.x are supported. niri, river >= 0.4,
+# GNOME and KDE cannot express a key-release binding at all, so push-to-talk
+# there needs the evdev backend, which is not in this milestone. `parlactl start`
+# and `parlactl stop` still work from a terminal or any other launcher that can
+# run two separate commands.
 ";
 
 /// Split from the env lookup so the detection is testable without `set_var`,
@@ -288,8 +288,13 @@ mod tests {
             niri.lines().all(|l| l.trim().is_empty() || l.trim_start().starts_with('#')),
             "{niri}"
         );
+        // The fallback also fires for GNOME, KDE and anything unrecognised, so
+        // the note has to name the supported set rather than only niri: three
+        // wlroots snippets and no caveat reads as "one of these is for you".
+        let all = setup_snippet_from(None);
+        assert!(all.contains("Only sway, Hyprland and river-classic"), "{all}");
         // river's version split cannot be detected, so the caveat has to travel
         // with the river snippet.
-        assert!(setup_snippet_from(None).contains("river >= 0.4"));
+        assert!(all.contains("river >= 0.4"), "{all}");
     }
 }
