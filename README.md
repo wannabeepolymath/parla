@@ -78,8 +78,7 @@ The menu also shows live Microphone/Accessibility permission status
 (click an unfulfilled one to jump to System Settings), a one-click
 **Download model (base.en)** item when no model is loaded, a
 **⚠️ settings.json invalid** item when the config fails to parse, a
-**Launch at Login** toggle, a **Set API Key…** box (paste your Anthropic key
-without touching the terminal or the settings file), and **Paste Last
+**Launch at Login** toggle, a **Microphone** picker, and **Paste Last
 Dictation** / a **Recent**
 submenu (last 8 dictations, backed by a local 50-entry history) with
 **Clear History** — see `historyEnabled` below.
@@ -130,14 +129,14 @@ fields" — nothing is typed, stored in history, or sent to the cleanup model.
 ## Configuration
 
 Settings live at `~/Library/Application Support/Parla/settings.json` — use the
-menu-bar **Open Settings File** item to create and edit it. A file that fails
+Hub's **General → Settings file → Open File** button to create and edit it. A file that fails
 to parse is never silently overwritten; the menu shows the decode error until
 you fix it. Fields:
 
 - `dictionary` — array of exact spellings (names, jargon) to bias transcription and cleanup, e.g. `["Parla", "whisper.cpp"]`.
 - `snippets` — object mapping a spoken trigger phrase to its expansion, e.g. `{"my address": "123 Main St"}`.
-- `cleanupModel` — Anthropic model id for cleanup (default `claude-haiku-4-5`).
-- `anthropicApiKey` — API key for cleanup; the menu-bar **Set API Key…** item writes this field for you. The `ANTHROPIC_API_KEY` environment variable takes precedence; if neither is set, Parla inserts the raw transcript.
+- `cleanupModel` — Anthropic model id for cleanup (default `claude-sonnet-5`).
+- `anthropicApiKey` — API key for cleanup; the Hub's **AI Cleanup** page writes this field for you. The `ANTHROPIC_API_KEY` environment variable takes precedence; if neither is set, Parla inserts the raw transcript.
 - `whisperModelPath` — absolute path to a ggml whisper model. Defaults to the model downloaded by `scripts/download-model.sh`.
 - `showHudAlways` — keep the dictation pill floating on screen as a small idle capsule at all times, expanding into the full pill during dictation. Default `true`; set `false` for a transient pill shown only while dictating.
 - `historyEnabled` — keep a local log of the last 50 dictations (raw + cleaned + app name) at `~/Library/Application Support/Parla/history.json`, for the menu's Paste Last Dictation / Recent. Default `true`. Secure-field and cancelled dictations are never recorded regardless of this setting.
