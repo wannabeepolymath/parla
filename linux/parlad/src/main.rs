@@ -1,3 +1,4 @@
+mod audio;
 mod session;
 mod socket;
 
@@ -16,6 +17,28 @@ async fn main() -> anyhow::Result<()> {
         // refuses to do for a malformed file.
         eprintln!("parlad: watchdog_secs = 0 does not disable the watchdog; using 1s");
     }
+    // Opened once, here, and never closed: `mark()` only stamps a position in
+    // an already-running ring, because opening the mic on key-down clips the
+    // first syllable.
+    let capture = audio::Capture::start()?;
+    eprintln!("parlad: capture started");
+
+    // ponytail: Task 6's manual verification, behind a flag so it costs the
+    // daemon nothing. Task 8 replaces this file wholesale and deletes it.
+    if std::env::args().any(|a| a == "--check-capture") {
+        capture.mark();
+        std::thread::sleep(Duration::from_secs(3));
+        let s = capture.take_since_mark();
+        eprintln!(
+            "parlad: captured {} samples ({:.2}s at {} Hz), level {:.4}",
+            s.len(),
+            s.len() as f32 / audio::TARGET_RATE as f32,
+            audio::TARGET_RATE,
+            capture.level()
+        );
+        return Ok(());
+    }
+
     let sess = Arc::new(Mutex::new(Session::new(Duration::from_secs(cfg.watchdog_secs))));
 
     // Watchdog: sway drops the --release edge if another key is pressed while

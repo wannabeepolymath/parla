@@ -8,3 +8,4 @@ rust-version.workspace = true
 parla-core = { path = "../parla-core" }
 tokio.workspace = true
 anyhow.workspace = true
+cpal = { version = "0.18", features = ["pipewire", "pulseaudio"] }
