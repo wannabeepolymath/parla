@@ -238,11 +238,21 @@ impl Default for Config {
 impl Config {
     /// Never fails: a missing or malformed file yields defaults, so a typo in
     /// config.toml degrades to stock behaviour instead of bricking the daemon.
+    /// A malformed file is still reported on stderr — degrading is fine, doing
+    /// it silently would leave the user with no way to see why their settings
+    /// stopped applying, which the Global Constraints forbid. A *missing* file
+    /// stays silent: having no config is normal, not a failure.
     pub fn load(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        toml::from_str(&text).unwrap_or_default()
+        match toml::from_str(&text) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("parla: ignoring {}: {e}", path.display());
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -255,13 +265,24 @@ impl Config {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
+/// Split out from `config_path` so env-var precedence is testable without
+/// `set_var`, which races cargo's threaded test harness. An exported-but-empty
+/// `XDG_CONFIG_HOME` counts as unset, per the XDG basedir spec — otherwise it
+/// yields a *relative* path, and a daemon whose CWD is `/` reads the wrong file.
+/// Same shape as Task 7's `default_model_path`; keep the two consistent.
+pub fn config_path_from(xdg_config_home: Option<&std::ffi::OsStr>, home: &std::ffi::OsStr) -> PathBuf {
+    let base = match xdg_config_home.filter(|x| !x.is_empty()) {
+        Some(x) => PathBuf::from(x),
+        None => PathBuf::from(home).join(".config"),
+    };
     base.join("parla/config.toml")
+}
+
+pub fn config_path() -> PathBuf {
+    config_path_from(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        &std::env::var_os("HOME").unwrap_or_default(),
+    )
 }
 ```
 
@@ -1761,6 +1782,16 @@ mod tests {
     }
 
     #[test]
+    fn empty_xdg_data_home_falls_back_like_an_unset_one() {
+        // Same rule as config::config_path_from — an exported-but-empty var is
+        // unset per the XDG spec, and treating it as set yields a relative path.
+        assert_eq!(
+            default_model_path(Some("".as_ref()), "/home/u".as_ref()),
+            default_model_path(None, "/home/u".as_ref())
+        );
+    }
+
+    #[test]
     fn missing_model_is_an_error_not_a_panic() {
         assert!(Transcriber::new(std::path::Path::new("/nonexistent/model.bin")).is_err());
     }
@@ -1789,9 +1820,13 @@ use std::path::{Path, PathBuf};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Pure, so it can be tested without mutating process env (cargo runs tests on
-/// parallel threads, where set_var races every other test).
+/// parallel threads, where set_var races every other test). An exported-but-empty
+/// XDG_DATA_HOME counts as unset, per the XDG basedir spec — otherwise it yields
+/// a *relative* model path and a daemon whose CWD is `/` looks in the wrong
+/// place. Deliberately the same shape as `config::config_path_from`; keep them
+/// consistent.
 pub fn default_model_path(xdg_data_home: Option<&std::ffi::OsStr>, home: &std::ffi::OsStr) -> PathBuf {
-    let base = match xdg_data_home {
+    let base = match xdg_data_home.filter(|x| !x.is_empty()) {
         Some(x) => PathBuf::from(x),
         None => PathBuf::from(home).join(".local/share"),
     };
