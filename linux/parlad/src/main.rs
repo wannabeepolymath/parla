@@ -18,11 +18,14 @@ use tokio::task::JoinError;
 /// each is produced from two places and the *difference* between them is the
 /// point: one sends the user to look at their microphone, the other at the log.
 const NOTHING_HEARD: &str = "Nothing heard";
-const TRANSCRIPTION_FAILED: &str = "Transcription failed";
+const TRANSCRIPTION_FAILED: &str = "Transcription failed — see log";
 
 /// How much of the result a notification body shows. A dictation is often a
 /// paragraph; a toast is one line.
 const PREVIEW_CHARS: usize = 60;
+
+/// Long enough to read a preview, short enough not to sit on the user's screen.
+const TOAST: deliver::Timeout = deliver::Timeout::Milliseconds(4_000);
 
 struct App {
     cfg: Config,
@@ -34,20 +37,22 @@ impl App {
     /// Runs after the key is released. The whole pipeline's single notification
     /// is sent from here, and it is the only `notify` on this path.
     async fn finish(self: Arc<Self>) {
-        let (summary, body) = self.dictate().await;
+        let (summary, body, timeout) = self.dictate().await;
         // Journalled as well as shown. A notification the user looked away from
         // — or that a dead notification daemon swallowed — is otherwise the only
         // record that the dictation happened at all.
         eprintln!("parlad: {summary} — {body}");
-        deliver::notify(summary, &body);
+        deliver::notify(summary, &body, timeout);
     }
 
     /// Transcribe, clean, deliver — and *return* what the user should be told
-    /// rather than showing it. That return type is what makes "every failure
-    /// path ends in clipboard text or an explicit refusal, never a silent
-    /// no-op" a property of the compiler rather than of review: a new early
-    /// return with nothing to say is `error[E0308]`, not a dictation that
-    /// quietly evaporates.
+    /// rather than showing it, so that a new early return with nothing to say
+    /// is `error[E0069]` rather than a dictation that quietly evaporates.
+    ///
+    /// That is a guard rail, not a proof: the type says a message exists, not
+    /// that it is meaningful (`return ("Parla", String::new(), TOAST)` compiles
+    /// fine), and it says nothing about `finish` actually showing it. Deleting
+    /// the `notify` call above passes every test in this file.
     ///
     /// Takes `Arc<Self>` rather than `&self` so the whisper pass can be moved
     /// onto a blocking thread. `transcribe` is CPU-bound C code that runs for
@@ -56,10 +61,10 @@ impl App {
     /// starves everything sharing that runtime — including the once-a-second
     /// watchdog tick, which is the one thing guaranteed to be needed if a
     /// dictation goes wrong.
-    async fn dictate(self: Arc<Self>) -> (&'static str, String) {
+    async fn dictate(self: Arc<Self>) -> (&'static str, String, deliver::Timeout) {
         let samples = match worth_transcribing(self.capture.take_since_mark()) {
             Ok(s) => s,
-            Err(refusal) => return ("Parla", refusal.into()),
+            Err(refusal) => return ("Parla", refusal.into(), TOAST),
         };
 
         // The one number that says whether the ring was marked on key-down:
@@ -75,7 +80,7 @@ impl App {
         let pass = move || me.transcriber.transcribe(&samples, prompt.as_deref());
         let raw = match transcript(tokio::task::spawn_blocking(pass).await) {
             Ok(t) => t,
-            Err(refusal) => return ("Parla", refusal.into()),
+            Err(refusal) => return ("Parla", refusal.into(), TOAST),
         };
 
         let ctx = Context {
@@ -88,7 +93,7 @@ impl App {
         // transcript plus a reason, so the user always gets their words.
         let out = cleanup::clean(&raw, &ctx, &self.cfg.cleanup).await;
 
-        delivered(deliver::to_clipboard(&out.text), out)
+        delivered(deliver::to_clipboard(&out.text).await, out)
     }
 }
 
@@ -132,7 +137,7 @@ fn transcript(done: Result<anyhow::Result<String>, JoinError>) -> Result<String,
 /// clipboard's own `Result` as an argument so both halves can be asserted here
 /// — including the half that only happens when there is no Wayland clipboard to
 /// write to, which is the one path where the user's words exist nowhere else.
-fn delivered(copied: anyhow::Result<()>, out: Outcome) -> (&'static str, String) {
+fn delivered(copied: anyhow::Result<()>, out: Outcome) -> (&'static str, String, deliver::Timeout) {
     match copied {
         // `Outcome.failure` is surfaced rather than dropped: cleanup failing
         // means what landed on the clipboard is the raw transcript, and a user
@@ -141,14 +146,22 @@ fn delivered(copied: anyhow::Result<()>, out: Outcome) -> (&'static str, String)
             Some(why) => (
                 "Parla",
                 format!("Copied (raw — {why}): {}", preview(&out.text)),
+                TOAST,
             ),
-            None => ("Parla", format!("Copied: {}", preview(&out.text))),
+            None => ("Parla", format!("Copied: {}", preview(&out.text)), TOAST),
         },
         Err(e) => {
             eprintln!("parlad: clipboard failed: {e}");
-            // Nothing landed anywhere. The body is the whole text, not a
-            // preview — it is the only copy of the dictation left.
-            ("Parla — clipboard failed", out.text)
+            // Nothing landed anywhere, so this notification is the last copy of
+            // the user's words: the whole text rather than a preview, and it
+            // stays up until dismissed. Four seconds is not enough to read a
+            // paragraph, let alone retype one — and the journal line above is
+            // the only other place it survives, so the body says where.
+            (
+                "Parla — clipboard failed",
+                format!("{} (also in the journal)", out.text),
+                deliver::Timeout::Never,
+            )
         }
     }
 }
@@ -216,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
             if expired {
                 eprintln!("parlad: watchdog fired, discarding recording");
                 watch_app.capture.take_since_mark(); // drop the abandoned audio
-                deliver::notify("Parla", "Recording timed out — discarded");
+                deliver::notify("Parla", "Recording timed out — discarded", TOAST);
             }
         }
     });
@@ -286,9 +299,10 @@ mod tests {
     fn a_broken_whisper_is_never_reported_as_silence() {
         // The whole reason `transcribe` returns Result. "Nothing heard" tells
         // the user their microphone was silent; if the model actually errored,
-        // they would spend the evening in their audio settings.
+        // they would spend the evening in their audio settings. The message
+        // names where the detail is, because the notification cannot carry it.
         let e = transcript(Ok(Err(anyhow::anyhow!("failed to decode the recording"))));
-        assert_eq!(e, Err("Transcription failed"));
+        assert_eq!(e, Err("Transcription failed — see log"));
         assert_ne!(e, Err("Nothing heard"));
     }
 
@@ -302,14 +316,14 @@ mod tests {
         })
         .await;
         assert!(panicked.is_err(), "the test needs a genuine JoinError");
-        assert_eq!(transcript(panicked), Err("Transcription failed"));
+        assert_eq!(transcript(panicked), Err("Transcription failed — see log"));
     }
 
     #[test]
     fn a_clean_result_is_announced_as_copied() {
         assert_eq!(
             delivered(Ok(()), outcome("Ship it on Friday.", None)),
-            ("Parla", "Copied: Ship it on Friday.".to_string())
+            ("Parla", "Copied: Ship it on Friday.".to_string(), TOAST)
         );
     }
 
@@ -320,7 +334,11 @@ mod tests {
         // on the clipboard and no idea that cleanup is misconfigured.
         assert_eq!(
             delivered(Ok(()), outcome("ship it friday", Some("no API key"))),
-            ("Parla", "Copied (raw — no API key): ship it friday".to_string())
+            (
+                "Parla",
+                "Copied (raw — no API key): ship it friday".to_string(),
+                TOAST
+            )
         );
     }
 
@@ -331,12 +349,17 @@ mod tests {
         // user's dictation into oblivion, and silence would lose it outright.
         let long = "one two three four five six seven eight nine ten eleven twelve";
         assert!(long.chars().count() > PREVIEW_CHARS);
-        let (summary, body) = delivered(
+        let (summary, body, timeout) = delivered(
             Err(anyhow::anyhow!("no wayland display")),
             outcome(long, None),
         );
         assert_eq!(summary, "Parla — clipboard failed");
-        assert_eq!(body, long, "the untruncated text is the only copy left");
+        assert!(body.starts_with(long), "the untruncated text is the only copy left: {body}");
+        assert!(body.contains("journal"), "no recovery route offered: {body}");
+        // ...and it must not time out. Four seconds is not enough to read a
+        // paragraph out of a toast, let alone retype one.
+        assert_eq!(timeout, deliver::Timeout::Never);
+        assert_ne!(timeout, TOAST);
     }
 
     #[test]
