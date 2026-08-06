@@ -360,7 +360,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     tail,
                     initialPrompt: StreamWindow.tailPrompt(dictionary: settings.dictionary,
                                                            confirmed: win.confirmedText))
-                let joined = StreamWindow.join(win.confirmedText, tailText)
+                // nil = the tail pass failed. That must not discard the confirmed
+                // prefix the stream already earned — fall back to it, exactly as a
+                // below-floor tail does.
+                if tailText == nil { NSLog("Parla finish: tail pass failed, using confirmed prefix") }
+                let joined = StreamWindow.join(win.confirmedText, tailText ?? "")
                 raw = joined.isEmpty ? nil : joined
             } else {
                 raw = win.confirmedText.isEmpty ? nil : win.confirmedText
@@ -591,8 +595,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let prompt = settings.dictionary.isEmpty ? nil : settings.dictionary.joined(separator: ", ")
-        let instruction = transcriber.transcribe(samples, initialPrompt: prompt)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // nil = the whisper pass failed outright; that is a different user-facing
+        // problem from "you didn't say anything", so don't blame the user for it.
+        guard let heard = transcriber.transcribe(samples, initialPrompt: prompt) else {
+            NSLog("Parla transform: transcription failed")
+            DispatchQueue.main.async { hud.show(.error("Transcription failed")) }
+            return
+        }
+        let instruction = heard.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty else {
             NSLog("Parla transform: empty instruction")
             DispatchQueue.main.async { hud.show(.error("No command heard")) }
@@ -715,9 +725,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     Array(tail[..<rel]),
                     initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
                     shouldAbort: { !self.isRecording })
-                // Aborted head pass returns "": committing the cut would silently
-                // drop the head's text from confirmed. Only commit a completed pass.
-                guard self.isRecording else { break }
+                // A head pass that did not complete returns nil — abort OR whisper
+                // error. Committing either would advance `cut` past audio whose text
+                // was never captured, silently deleting ~10s from the transcript.
+                // Only a completed pass may be committed; finish() re-transcribes
+                // from the unchanged cut otherwise.
+                guard self.isRecording, let head else { break }
                 confirmed = StreamWindow.join(confirmed, head)
                 cut += rel
                 tail = Array(tail[rel...])
@@ -728,9 +741,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 tail,
                 initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
                 shouldAbort: { !self.isRecording })
-            // Aborted pass returns "": never treat it as a new hypothesis —
+            // An incomplete pass returns nil — never treat it as a new hypothesis:
             // live typing would erase everything the user sees. finish() takes over.
-            guard self.isRecording else { break }
+            guard self.isRecording, let tailText else { break }
             let text = StreamWindow.join(confirmed, tailText)
             await MainActor.run {
                 // Shadow mode: window-building only, never touch the field.

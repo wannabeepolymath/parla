@@ -88,7 +88,12 @@ for c in cases {
     }
 
     let t0 = Date()
-    let raw = transcriber.transcribe(samples, initialPrompt: prompt)
+    guard let raw = transcriber.transcribe(samples, initialPrompt: prompt) else {
+        print("FAIL \(name)")
+        print("  error: transcription failed")
+        anyFailed = true
+        continue
+    }
     let asr = Date().timeIntervalSince(t0)
 
     let ctx = CleanupContext(dictionary: settings.dictionary, snippets: settings.snippets, appName: nil)

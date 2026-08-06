@@ -27,7 +27,13 @@ public final class WhisperTranscriber {
 
     deinit { whisper_free(ctx) }
 
-    public func transcribe(_ samples: [Float], initialPrompt: String?, shouldAbort: (() -> Bool)? = nil) -> String {
+    /// Returns nil when the pass did NOT complete — a whisper error, or a
+    /// cooperative abort via `shouldAbort`. That is distinct from "", which is a
+    /// completed pass that found no speech. The difference matters: the
+    /// streaming loop freezes a confirmed prefix and advances its sample cut
+    /// from a pass's result, so committing a failure as if it were silence
+    /// permanently deletes that span of audio from the transcript.
+    public func transcribe(_ samples: [Float], initialPrompt: String?, shouldAbort: (() -> Bool)? = nil) -> String? {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         params.print_progress = false
         params.print_realtime = false
@@ -79,15 +85,22 @@ public final class WhisperTranscriber {
     }
 
     /// Whisper emits bracketed markers on non-speech audio — "[BLANK_AUDIO]",
-    /// "[MUSIC]", "(silence)", "*sigh*" — which must never be typed or pasted.
-    /// A transcript that is nothing but such markers becomes "".
+    /// "[MUSIC]", "(silence)", "*sigh*", and multi-word forms like
+    /// "(upbeat music)" or "[typing sounds]" — which must never be typed or
+    /// pasted. A transcript that is nothing BUT such markers becomes "".
+    ///
+    /// Marker spans are matched whole rather than per space-separated word: the
+    /// old per-word test required every token to both open and close, so
+    /// "(upbeat music)" tokenized to ["(upbeat", "music)"], neither of which is
+    /// a marker, and the whole thing was typed into the user's field.
+    /// The stripping is only used to decide emptiness — when real words survive,
+    /// the ORIGINAL text is returned untouched, so "Array [0] is empty" is safe.
     public static func stripNonSpeech(_ text: String) -> String {
-        let wrapped = ["[": "]", "(": ")", "*": "*"]
-        let isMarker = { (word: Substring) -> Bool in
-            guard let first = word.first, let close = wrapped[String(first)] else { return false }
-            return word.hasSuffix(close) && word.count > 1
-        }
-        return text.split(separator: " ").allSatisfy(isMarker) ? "" : text
+        let markerSpan = #"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*"#
+        let remainder = text
+            .replacingOccurrences(of: markerSpan, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return remainder.isEmpty ? "" : text
     }
 }
 
