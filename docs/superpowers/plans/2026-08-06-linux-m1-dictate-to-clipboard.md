@@ -1478,7 +1478,23 @@ Expected: `parlad: listening on /run/user/1000/parla.sock`
 Run in another: `cd linux && cargo run -p parlactl -- status`
 Expected: `Idle`
 
-Then: `cargo run -p parlactl -- start` → `recording`, `cargo run -p parlactl -- status` → `Recording`, `cargo run -p parlactl -- stop` → `processing`.
+Then:
+
+```sh
+cargo run -p parlactl -- start    # -> recording
+cargo run -p parlactl -- status   # -> Recording
+sleep 0.4                         # REQUIRED, see below
+cargo run -p parlactl -- stop     # -> processing
+```
+
+**The `sleep` is not optional in this check.** Two back-to-back `parlactl` spawns
+complete in about 4 ms total, which is well inside the 200 ms `SHORT_TAP` window,
+so without a pause `stop` correctly returns `cancelled` — the accidental-tap
+guard doing its job. Anyone hand-verifying Tasks 6-9 who omits the pause will
+conclude the pipeline is broken when it is working exactly as designed.
+
+(That 4 ms round trip is also the evidence for keeping `parlactl` dependency-free:
+the compositor spawns it on every key press and release.)
 
 Then verify the watchdog: `cargo run -p parlactl -- start`, wait 31 seconds, and confirm the daemon logs `watchdog fired` and `status` reports `Idle`.
 
@@ -2025,17 +2041,25 @@ pub fn to_clipboard(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fire-and-forget. `notify_rust::show()` is a BLOCKING D-Bus round trip, so it
+/// runs on a blocking thread rather than inline: a wedged notification daemon
+/// must never stall the hotkey path or occupy a tokio worker. Handling that here
+/// rather than at each call site means no caller can get it wrong.
+/// Requires a tokio runtime context — both call sites are async.
 pub fn notify(summary: &str, body: &str) {
-    // A missing notification daemon must never take down a dictation.
-    if let Err(e) = notify_rust::Notification::new()
-        .summary(summary)
-        .body(body)
-        .appname("Parla")
-        .timeout(notify_rust::Timeout::Milliseconds(4000))
-        .show()
-    {
-        eprintln!("parlad: notify failed: {e}");
-    }
+    let (summary, body) = (summary.to_string(), body.to_string());
+    tokio::task::spawn_blocking(move || {
+        // A missing notification daemon must never take down a dictation.
+        if let Err(e) = notify_rust::Notification::new()
+            .summary(&summary)
+            .body(&body)
+            .appname("Parla")
+            .timeout(notify_rust::Timeout::Milliseconds(4000))
+            .show()
+        {
+            eprintln!("parlad: notify failed: {e}");
+        }
+    });
 }
 ```
 
@@ -2128,14 +2152,26 @@ async fn main() -> anyhow::Result<()> {
     // Watchdog: sway drops the --release edge if another key is pressed while
     // the hotkey is held (sway#6456), so a stop may never arrive.
     let watch = sess.clone();
+    let watch_app = app.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
-            let mut s = watch.lock().await;
-            if s.watchdog_expired(Instant::now()) {
+            // Scoped so the guard is DROPPED before anything slow runs below.
+            // Holding the session lock across a notification would let a wedged
+            // D-Bus daemon stall every hotkey press, since the socket handler
+            // needs this same lock.
+            let expired = {
+                let mut s = watch.lock().await;
+                let e = s.watchdog_expired(Instant::now());
+                if e {
+                    s.handle(Command::Cancel, Instant::now());
+                }
+                e
+            };
+            if expired {
                 eprintln!("parlad: watchdog fired, discarding recording");
-                s.handle(Command::Cancel, Instant::now());
+                watch_app.capture.take_since_mark(); // drop the abandoned audio
                 deliver::notify("Parla", "Recording timed out — discarded");
             }
         }
