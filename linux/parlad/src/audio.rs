@@ -1,22 +1,30 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::FromSample;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const TARGET_RATE: u32 = 16_000;
 /// Ring buffer capacity: 5 minutes at 16 kHz. A dictation longer than the
 /// watchdog can't happen, so this only ever holds the tail.
 const CAPACITY: usize = TARGET_RATE as usize * 300;
+/// Slack above `capacity` so that the `extend` in `push` never reallocates: the
+/// ring is trimmed *after* appending, so it transiently holds one callback more
+/// than its capacity. One second is ~60x the largest realistic callback, and
+/// costs 64 kB against the ring's 19 MB. Reallocating 19 MB on the realtime
+/// audio thread would be an xrun.
+const CALLBACK_HEADROOM: usize = TARGET_RATE as usize;
 
 /// Average interleaved channels down to mono. A trailing partial frame is
 /// dropped rather than averaged against silence.
+///
+/// The allocating form. It is the brief's declared interface and what the tests
+/// and any non-realtime caller want; the audio thread uses the `_into` version
+/// below, so this currently has no caller in the binary.
+#[allow(dead_code)]
 pub fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return interleaved.to_vec();
-    }
-    interleaved
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
-        .collect()
+    let mut out = Vec::new();
+    downmix_to_mono_into(interleaved, channels, &mut out);
+    out
 }
 
 /// Linear resample. No device offers 16 kHz directly — CoreAudio and WASAPI
@@ -24,7 +32,33 @@ pub fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
 // ponytail: linear interpolation, not a windowed-sinc — whisper's own frontend
 // low-passes to a mel spectrogram, so the aliasing is inaudible to it. Swap in
 // `rubato` if measured WER ever shows a difference.
+//
+// Allocating form, same rationale as `downmix_to_mono` above.
+#[allow(dead_code)]
 pub fn resample_linear(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+    let mut out = Vec::new();
+    resample_linear_into(input, from, to, &mut out);
+    out
+}
+
+/// The real implementations write into a caller-owned buffer, because the only
+/// production caller is the realtime audio thread and it must not allocate. The
+/// returning versions above are thin wrappers for everywhere else.
+fn downmix_to_mono_into(interleaved: &[f32], channels: usize, out: &mut Vec<f32>) {
+    out.clear();
+    if channels <= 1 {
+        out.extend_from_slice(interleaved);
+        return;
+    }
+    out.extend(
+        interleaved
+            .chunks_exact(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+    );
+}
+
+fn resample_linear_into(input: &[f32], from: u32, to: u32, out: &mut Vec<f32>) {
+    out.clear();
     // Both early-outs are behaviour-neutral — the general path below already
     // yields the same answer for an empty input (`out_len` is 0, so the loop
     // never runs) and for an equal rate (`frac` is always 0). They are kept as
@@ -32,22 +66,21 @@ pub fn resample_linear(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     // loop on the audio thread, not as behaviour, so no test can distinguish
     // them from their absence. Mutating either produces an equivalent mutant.
     if input.is_empty() {
-        return Vec::new();
+        return;
     }
     if from == to {
-        return input.to_vec();
+        out.extend_from_slice(input);
+        return;
     }
     let ratio = from as f64 / to as f64;
     let out_len = (input.len() as f64 / ratio).floor() as usize;
-    (0..out_len)
-        .map(|i| {
-            let pos = i as f64 * ratio;
-            let a = pos.floor() as usize;
-            let b = (a + 1).min(input.len() - 1);
-            let frac = (pos - a as f64) as f32;
-            input[a] * (1.0 - frac) + input[b] * frac
-        })
-        .collect()
+    out.extend((0..out_len).map(|i| {
+        let pos = i as f64 * ratio;
+        let a = pos.floor() as usize;
+        let b = (a + 1).min(input.len() - 1);
+        let frac = (pos - a as f64) as f32;
+        input[a] * (1.0 - frac) + input[b] * frac
+    }));
 }
 
 /// The capture ring, split out from `Capture` so that every behaviour below can
@@ -56,7 +89,19 @@ pub fn resample_linear(input: &[f32], from: u32, to: u32) -> Vec<f32> {
 /// constant purely so the overflow tests can use a four-sample ring instead of a
 /// five-minute one.
 struct Ring {
-    samples: Vec<f32>,
+    /// `VecDeque`, not `Vec`. The trim below runs on the realtime audio thread
+    /// on every callback once the ring is full — which is the daemon's resting
+    /// state, since `take_since_mark` empties it and 300 s of idle refills it.
+    /// `Vec::drain(..excess)` is O(len − excess), i.e. a 19 MB memmove per
+    /// callback: measured at 485 µs mean / 4.28 ms worst on Apple silicon,
+    /// against a 2.7 ms callback budget at 48 kHz/128. A front drain on a
+    /// `VecDeque` is O(excess) instead.
+    samples: VecDeque<f32>,
+    /// Scratch, reused every callback so the audio thread never allocates. Two
+    /// buffers rather than one because the resampler reads the downmix while
+    /// writing its own output.
+    mono: Vec<f32>,
+    resampled: Vec<f32>,
     mark: usize,
     level: f32,
     capacity: usize,
@@ -65,7 +110,9 @@ struct Ring {
 impl Ring {
     fn new(capacity: usize) -> Self {
         Self {
-            samples: Vec::with_capacity(capacity),
+            samples: VecDeque::with_capacity(capacity + CALLBACK_HEADROOM),
+            mono: Vec::new(),
+            resampled: Vec::new(),
             mark: 0,
             level: 0.0,
             capacity,
@@ -73,12 +120,12 @@ impl Ring {
     }
 
     /// One device callback's worth of interleaved samples, at the device's own
-    /// rate. Runs on the audio thread.
+    /// rate. Runs on the audio thread: no allocation, no syscall, bounded work.
     fn push(&mut self, interleaved: &[f32], channels: usize, rate: u32) {
-        let mono = downmix_to_mono(interleaved, channels);
-        let resampled = resample_linear(&mono, rate, TARGET_RATE);
-        self.level = parla_core::text::rms(&resampled);
-        self.samples.extend_from_slice(&resampled);
+        downmix_to_mono_into(interleaved, channels, &mut self.mono);
+        resample_linear_into(&self.mono, rate, TARGET_RATE, &mut self.resampled);
+        self.level = parla_core::text::rms(&self.resampled);
+        self.samples.extend(self.resampled.iter().copied());
         // Ring behaviour: drop the oldest audio rather than grow without bound,
         // and move the mark with it so the current dictation stays intact.
         if self.samples.len() > self.capacity {
@@ -97,7 +144,13 @@ impl Ring {
         // overflow path decrements both together, so it cannot exceed `len`
         // today. Kept because returning too much audio is a better failure than
         // panicking the daemon on a slice out of range.
-        let out = self.samples[self.mark.min(self.samples.len())..].to_vec();
+        let out = self
+            .samples
+            .range(self.mark.min(self.samples.len())..)
+            .copied()
+            .collect();
+        // `clear` keeps the allocation, so the audio thread's next `extend`
+        // still cannot reallocate.
         self.samples.clear();
         self.mark = 0;
         out
@@ -109,6 +162,14 @@ impl Ring {
 /// (`if let Ok`) or panic every later dictation (`unwrap`); neither is a
 /// failure mode worth having for a buffer whose invariants are restored by the
 /// next `mark()`.
+// ponytail: a plain mutex on the realtime audio thread. Deliberate, and bounded:
+// the critical section is an amortised-O(1) `extend` into a pre-reserved buffer,
+// an O(excess) front drain and one float store — no allocation and no syscall.
+// The only other holders are `mark` (one store) and `take_since_mark` (one O(n)
+// copy, once per dictation). The residual risk is priority inversion if the
+// tokio thread is preempted mid-copy, which would stall capture for the length
+// of that copy. Upgrade path if that ever shows up as an xrun: an SPSC ring
+// (`ringbuf`, already in cpal's dev-deps) and no lock at all.
 fn lock(ring: &Mutex<Ring>) -> MutexGuard<'_, Ring> {
     ring.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -152,18 +213,22 @@ impl Capture {
         // conversion is `FromSample`, not a hand-rolled divisor, so 24-bit —
         // which is stored in an i32 but only 24 bits wide — scales correctly.
         let stream = match format {
-            cpal::SampleFormat::F32 => build::<f32>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::F64 => build::<f64>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::I8 => build::<i8>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::I16 => build::<i16>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::I24 => build::<cpal::I24>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::I32 => build::<i32>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::I64 => build::<i64>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::U8 => build::<u8>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::U16 => build::<u16>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::U24 => build::<cpal::U24>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::U32 => build::<u32>(&device, config, &ring, channels, rate),
-            cpal::SampleFormat::U64 => build::<u64>(&device, config, &ring, channels, rate),
+            cpal::SampleFormat::F32 => build::<f32>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::F64 => build::<f64>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::I8 => build::<i8>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::I16 => build::<i16>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::I24 => {
+                build::<cpal::I24>(&device, config, &ring, channels, rate, format)
+            }
+            cpal::SampleFormat::I32 => build::<i32>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::I64 => build::<i64>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::U8 => build::<u8>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::U16 => build::<u16>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::U24 => {
+                build::<cpal::U24>(&device, config, &ring, channels, rate, format)
+            }
+            cpal::SampleFormat::U32 => build::<u32>(&device, config, &ring, channels, rate, format),
+            cpal::SampleFormat::U64 => build::<u64>(&device, config, &ring, channels, rate, format),
             // `SampleFormat` is `#[non_exhaustive]`, so this arm cannot be
             // replaced with explicit ones. The DSD variants land here: they are
             // 1-bit bitstreams with no sized sample type, so there is nothing to
@@ -206,17 +271,33 @@ fn build<T>(
     ring: &Arc<Mutex<Ring>>,
     channels: usize,
     rate: u32,
+    format: cpal::SampleFormat,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
+    // `build_input_stream::<T>` sends `T::FORMAT` to the driver, so an arm whose
+    // type disagrees with the pattern it was matched on asks the device for a
+    // different format than the caller believes — `I24 => build::<i32>` compiles
+    // and produces silent 256x-scaled garbage. Threading the matched format
+    // through makes that a startup error with a legible message instead.
+    anyhow::ensure!(
+        T::FORMAT == format,
+        "sample-format table bug: the {format:?} arm builds {:?}",
+        T::FORMAT
+    );
     let sink = ring.clone();
+    // Owned by this closure alone, so it needs no lock. It grows to the device's
+    // callback size within the first few callbacks and is reused thereafter, so
+    // steady-state capture allocates nothing.
+    let mut conv: Vec<f32> = Vec::new();
     Ok(device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            let f: Vec<f32> = data.iter().map(|s| f32::from_sample_(*s)).collect();
-            lock(&sink).push(&f, channels, rate);
+            conv.clear();
+            conv.extend(data.iter().map(|s| f32::from_sample_(*s)));
+            lock(&sink).push(&conv, channels, rate);
         },
         |e| eprintln!("parlad: audio stream error: {e}"),
         None,
@@ -389,6 +470,64 @@ mod tests {
         let stereo: Vec<f32> = [1.0f32, 0.0].iter().cycle().take(96).copied().collect();
         r.push(&stereo, 2, 48_000);
         assert!((r.level - 0.5).abs() < 1e-6, "level was {}", r.level);
+    }
+
+    #[test]
+    fn every_format_arm_uses_the_type_that_matches_its_pattern() {
+        // `build_input_stream::<T>` passes `T::FORMAT` to the raw builder, so a
+        // transposed arm (`I24 => build::<i32>`) compiles and silently asks the
+        // device for the wrong format. This mirrors the table in `start` and is
+        // the only defect class in it that a machine with no sound card can
+        // catch — `build`'s own `ensure!` catches the rest, but only at startup.
+        fn pins<T: cpal::SizedSample>(f: cpal::SampleFormat) {
+            assert_eq!(T::FORMAT, f);
+        }
+        use cpal::SampleFormat as F;
+        pins::<f32>(F::F32);
+        pins::<f64>(F::F64);
+        pins::<i8>(F::I8);
+        pins::<i16>(F::I16);
+        pins::<cpal::I24>(F::I24);
+        pins::<i32>(F::I32);
+        pins::<i64>(F::I64);
+        pins::<u8>(F::U8);
+        pins::<u16>(F::U16);
+        pins::<cpal::U24>(F::U24);
+        pins::<u32>(F::U32);
+        pins::<u64>(F::U64);
+    }
+
+    #[test]
+    fn a_full_ring_never_reallocates_on_the_audio_thread() {
+        // The realtime half of the VecDeque fix. Reallocating 19 MB inside a
+        // 2.7 ms callback is an xrun; `clear()` on take must keep the
+        // allocation, and the headroom must cover the append-then-trim window.
+        // Deterministic, unlike anything that would time the drain itself.
+        let mut r = ring(64);
+        // One callback to size the two scratch buffers. They cannot be reserved
+        // up front — the device's callback length is not known until the stream
+        // exists — so the guarantee is steady-state, from the second callback on.
+        r.push(&[0.5; 48], 2, 48_000);
+        let (samples, mono, resampled) = (
+            r.samples.capacity(),
+            r.mono.capacity(),
+            r.resampled.capacity(),
+        );
+        for i in 0..200 {
+            r.push(&[0.5; 48], 2, 48_000);
+            if i % 50 == 0 {
+                r.mark();
+                r.take_since_mark();
+            }
+        }
+        assert!(r.samples.len() <= 64, "ring overran its capacity");
+        assert_eq!(r.samples.capacity(), samples, "the ring reallocated");
+        assert_eq!(r.mono.capacity(), mono, "the downmix scratch reallocated");
+        assert_eq!(
+            r.resampled.capacity(),
+            resampled,
+            "the resample scratch reallocated"
+        );
     }
 
     #[test]

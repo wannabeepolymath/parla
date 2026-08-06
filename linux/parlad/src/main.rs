@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         let prompt = whisper::initial_prompt(&cfg.dictionary);
         eprintln!(
             "parlad: transcript {:?}",
-            transcriber.transcribe(&samples, prompt.as_deref())
+            transcriber.transcribe(&samples, prompt.as_deref())?
         );
         return Ok(());
     }

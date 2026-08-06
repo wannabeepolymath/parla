@@ -1,3 +1,4 @@
+use anyhow::Context;
 use parla_core::config::Config;
 use parla_core::text::strip_non_speech;
 use std::path::{Path, PathBuf};
@@ -75,8 +76,9 @@ fn threads(available: usize) -> i32 {
 /// Whisper returns one string per segment, each already carrying its own
 /// leading space, so they concatenate with no separator. The trim is what makes
 /// `strip_non_speech` see `"[BLANK_AUDIO]"` rather than `" [BLANK_AUDIO]"`, and
-/// an empty return is Task 8's "Nothing heard" signal — so this is the function
-/// that decides whether silence reaches the clipboard.
+/// an empty return becomes `Ok("")` — Task 8's "Nothing heard", as distinct from
+/// the `Err` a broken whisper produces. So this is the function that decides
+/// whether silence reaches the clipboard.
 fn assemble(segments: &[String]) -> String {
     strip_non_speech(segments.concat().trim())
 }
@@ -102,7 +104,15 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
-    pub fn transcribe(&self, samples: &[f32], initial_prompt: Option<&str>) -> String {
+    /// `Ok("")` means whisper ran and found no speech. `Err` means whisper
+    /// itself failed. Collapsing the two into an empty string would report a
+    /// broken transcriber to the user as "Nothing heard", which is the silent
+    /// degradation the whole pipeline is built to avoid.
+    pub fn transcribe(
+        &self,
+        samples: &[f32],
+        initial_prompt: Option<&str>,
+    ) -> anyhow::Result<String> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -117,29 +127,27 @@ impl Transcriber {
             params.set_initial_prompt(p);
         }
 
-        let mut state = match self.ctx.create_state() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("parlad: whisper state failed: {e}");
-                return String::new();
-            }
-        };
-        if let Err(e) = state.full(params, samples) {
-            eprintln!("parlad: whisper failed: {e}");
-            return String::new();
-        }
+        let mut state = self
+            .ctx
+            .create_state()
+            .context("whisper failed to create a decoding state")?;
+        state
+            .full(params, samples)
+            .context("whisper failed to decode the recording")?;
 
         let mut segments = Vec::new();
         for seg in state.as_iter() {
             // `to_str_lossy`, not `to_str`: one bad byte would otherwise drop
             // the whole segment, losing a sentence of the user's dictation with
-            // nothing to show for it. A null pointer is still reported.
+            // nothing to show for it. Not an `Err` either — the rest of the
+            // transcript is still good, and discarding it would be worse than
+            // handing back what survived plus a journal line naming the gap.
             match seg.to_str_lossy() {
                 Ok(s) => segments.push(s.into_owned()),
                 Err(e) => eprintln!("parlad: whisper segment {} unreadable: {e}", seg.segment_index()),
             }
         }
-        assemble(&segments)
+        Ok(assemble(&segments))
     }
 }
 
