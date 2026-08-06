@@ -71,10 +71,14 @@ The Swift `Settings` type hand-writes a tolerant `init(from decoder:)` so that a
 
 `linux/Cargo.toml`:
 
+Only `parla-core` is listed as a member — cargo errors with "workspace member not
+found" for a path that does not exist yet, so Task 5 adds the other two when it
+creates them.
+
 ```toml
 [workspace]
 resolver = "2"
-members = ["parla-core", "parlad", "parlactl"]
+members = ["parla-core"]
 
 [workspace.package]
 version = "0.1.0"
@@ -477,9 +481,15 @@ Expected: PASS, 8 tests.
 
 - [ ] **Step 5: Verify the port against the Swift original**
 
-Run: `diff <(sed -n '19,89p' ../Sources/ParlaCore/Cleanup.swift) /dev/null | head -80`
+Read `Sources/ParlaCore/Cleanup.swift` lines 19-89 and compare every prompt line
+against the `DICTATION` and `TRANSFORM` constants in `prompt.rs`, word for word.
 
-Read the Swift source alongside `prompt.rs` and confirm every rule line matches word for word. This is a manual check — there is no automated diff between Swift string literals and Rust ones. If any line differs, fix the Rust to match the Swift.
+This is a manual read, not a command — Swift multi-line literals use `\` line
+continuations that Rust's `\`-continued strings render differently, so a textual
+diff produces noise, not signal. What must match is the *rendered* prompt text.
+
+If any line differs, fix the Rust to match the Swift. Report in your report file
+which lines you compared and that they matched.
 
 - [ ] **Step 6: Commit**
 
@@ -1208,6 +1218,13 @@ Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Write the socket server**
 
+First add the two new crates to the workspace. In `linux/Cargo.toml`, change the
+members line to:
+
+```toml
+members = ["parla-core", "parlad", "parlactl"]
+```
+
 `linux/parlad/Cargo.toml`:
 
 ```toml
@@ -1726,10 +1743,17 @@ mod tests {
 
     #[test]
     fn model_path_defaults_under_xdg_data_home() {
-        std::env::set_var("XDG_DATA_HOME", "/tmp/xdgdata");
-        let p = model_path(&Config::default());
+        // Takes the env values as arguments rather than calling set_var: cargo
+        // runs tests on parallel threads, and mutating process env from one of
+        // them races every other test that reads it.
+        let p = default_model_path(Some("/tmp/xdgdata".as_ref()), "/home/u".as_ref());
         assert_eq!(p, std::path::PathBuf::from("/tmp/xdgdata/parla/models/ggml-base.en.bin"));
-        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn model_path_falls_back_to_home_local_share() {
+        let p = default_model_path(None, "/home/u".as_ref());
+        assert_eq!(p, std::path::PathBuf::from("/home/u/.local/share/parla/models/ggml-base.en.bin"));
     }
 
     #[test]
@@ -1760,16 +1784,24 @@ use parla_core::text::strip_non_speech;
 use std::path::{Path, PathBuf};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Pure, so it can be tested without mutating process env (cargo runs tests on
+/// parallel threads, where set_var races every other test).
+pub fn default_model_path(xdg_data_home: Option<&std::ffi::OsStr>, home: &std::ffi::OsStr) -> PathBuf {
+    let base = match xdg_data_home {
+        Some(x) => PathBuf::from(x),
+        None => PathBuf::from(home).join(".local/share"),
+    };
+    base.join("parla/models/ggml-base.en.bin")
+}
+
 pub fn model_path(cfg: &Config) -> PathBuf {
     if let Some(p) = &cfg.whisper_model {
         return p.clone();
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
-        });
-    base.join("parla/models/ggml-base.en.bin")
+    default_model_path(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        &std::env::var_os("HOME").unwrap_or_default(),
+    )
 }
 
 /// Dictionary terms become whisper's initial_prompt, which biases decoding
