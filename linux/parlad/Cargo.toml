@@ -9,3 +9,6 @@ parla-core = { path = "../parla-core" }
 tokio.workspace = true
 anyhow.workspace = true
 cpal = { version = "0.18", features = ["pipewire", "pulseaudio"] }
+# CPU baseline. whisper-rs 0.16's `default` feature set is empty, so this only
+# documents the intent; Vulkan/CUDA are opt-in flags for a later milestone.
+whisper-rs = { version = "0.16", default-features = false }

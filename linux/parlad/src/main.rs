@@ -1,6 +1,7 @@
 mod audio;
 mod session;
 mod socket;
+mod whisper;
 
 use parla_core::config::{config_path, Config};
 use session::{Command, Edge, Session};
@@ -23,18 +24,35 @@ async fn main() -> anyhow::Result<()> {
     let capture = audio::Capture::start()?;
     eprintln!("parlad: capture started");
 
-    // ponytail: Task 6's manual verification, behind a flag so it costs the
-    // daemon nothing. Task 8 replaces this file wholesale and deletes it.
-    if std::env::args().any(|a| a == "--check-capture") {
-        capture.mark();
-        std::thread::sleep(Duration::from_secs(3));
-        let s = capture.take_since_mark();
+    // ponytail: Tasks 6 and 7's manual verification, behind a flag so it costs
+    // the daemon nothing. `--check` transcribes three seconds of microphone;
+    // `--check --stdin` transcribes 16 kHz mono f32 read from stdin, which is
+    // how the eval/cases goldens are replayed without pulling in a WAV parser.
+    // Task 8 replaces this file wholesale and deletes all of it.
+    if std::env::args().any(|a| a == "--check") {
+        let transcriber = whisper::Transcriber::new(&whisper::model_path(&cfg))?;
+        let samples: Vec<f32> = if std::env::args().any(|a| a == "--stdin") {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+            buf.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        } else {
+            capture.mark();
+            std::thread::sleep(Duration::from_secs(3));
+            capture.take_since_mark()
+        };
         eprintln!(
-            "parlad: captured {} samples ({:.2}s at {} Hz), level {:.4}",
-            s.len(),
-            s.len() as f32 / audio::TARGET_RATE as f32,
+            "parlad: {} samples ({:.2}s at {} Hz), mic level {:.4}",
+            samples.len(),
+            samples.len() as f32 / audio::TARGET_RATE as f32,
             audio::TARGET_RATE,
             capture.level()
+        );
+        let prompt = whisper::initial_prompt(&cfg.dictionary);
+        eprintln!(
+            "parlad: transcript {:?}",
+            transcriber.transcribe(&samples, prompt.as_deref())
         );
         return Ok(());
     }

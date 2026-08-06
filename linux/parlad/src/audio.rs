@@ -189,7 +189,9 @@ impl Capture {
         lock(&self.ring).take_since_mark()
     }
 
-    /// Most recent RMS level, for the future pill meter.
+    /// Most recent RMS level. Its only consumer is M3's pill meter — Task 8's
+    /// pipeline never reads it — so it has no caller in the binary yet.
+    #[allow(dead_code)]
     pub fn level(&self) -> f32 {
         lock(&self.ring).level
     }
