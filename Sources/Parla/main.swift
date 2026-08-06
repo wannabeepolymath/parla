@@ -42,6 +42,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Bumped on every fn-down; a pending cleaned-swap compares its captured
     // value on the main actor and never fires keystrokes into a newer session.
     var generation = 0
+    // Value of `generation` before the current press bumped it. A press that
+    // turns out to be a sub-threshold tap restores it: shortness is only known
+    // at fn-up, so without this an accidental brush of the Globe key orphaned
+    // the previous dictation's still-pending cleaned swap.
+    var generationBeforePress = 0
+    // Frontmost app at command fn-down. A transform must not be typed over an
+    // identical-looking selection in a DIFFERENT app.
+    var commandAppPID: pid_t?
     // Confirmed-prefix window for long dictations: written by stream(), consumed
     // by the finish() queued right after it — the processTask chain serializes.
     var window: StreamWindow?
@@ -131,9 +139,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.hotkey.reset()
                         self.hud.show(.error("Select text first")); return
                     }
+                    // Same per-dictation refresh the plain path does. Skipping it
+                    // meant a transform recorded from a stale mic device and paid
+                    // full TLS setup on every LLM call.
+                    let settings = self.store.load()
+                    self.settings = settings
+                    self.hud.idleBarSize = HUD.idleSize(settings.hudIdleSize)
+                    self.hud.showAlways = settings.showHudAlways
+                    self.recorder.inputDeviceUID = settings.inputDeviceUID
+                    self.warmCleanupConnection(settings: settings)
+                    self.generationBeforePress = self.generation
                     self.generation += 1 // invalidates any pending cleaned-swap
                     self.commandMode = true
                     self.commandSelection = selection
+                    self.commandAppPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
                     self.focus = focus
                     self.liveTyping = false // never stream a transform
                     do { try self.recorder.start() }
@@ -154,13 +173,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.hud.idleBarSize = HUD.idleSize(settings.hudIdleSize)
                 self.hud.showAlways = settings.showHudAlways
                 self.recorder.inputDeviceUID = settings.inputDeviceUID
-                if let url = cleanupWarmURL(
-                    settings: settings, env: ProcessInfo.processInfo.environment) {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "HEAD"
-                    request.timeoutInterval = 5
-                    URLSession.shared.dataTask(with: request).resume()
-                }
+                self.warmCleanupConnection(settings: settings)
+                self.generationBeforePress = self.generation
                 self.generation += 1 // invalidates any pending cleaned-swap
                 self.isRecording = true
                 // typed is NOT reset here: a still-queued finish from the previous
@@ -203,9 +217,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let transcriber = self.transcriber {
                     // Chain onto the previous finish so partial passes never run
                     // concurrently with the final pass (whisper ctx isn't reentrant).
+                    // gen scopes the loop to THIS dictation — see stream().
+                    let gen = self.generation
+                    let dictionary = settings.dictionary
                     self.processTask = Task { [prev = self.processTask] in
                         await prev?.value
-                        await self.stream(transcriber: transcriber)
+                        await self.stream(transcriber: transcriber, gen: gen, dictionary: dictionary)
                     }
                 }
             case .up(let short):
@@ -217,6 +234,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // so we don't clip speech onset; we just discard it here.
                 if short {
                     NSLog("Parla: short tap, discarding")
+                    // Shortness is only knowable here, but fn-down already bumped
+                    // generation. Put it back: an accidental brush of the Globe
+                    // key starts no dictation, so it must not orphan a previous
+                    // dictation's still-pending cleaned swap (which would then be
+                    // silently dropped by the gen guard, with no toast at all).
+                    self.generation = self.generationBeforePress
                     self.cancelDictation(silent: true)
                     return
                 }
@@ -289,6 +312,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
+    /// Open the TLS connection to the cleanup provider while the user is still
+    /// speaking, so the polish call doesn't pay handshake latency.
+    private func warmCleanupConnection(settings: Settings) {
+        guard let url = cleanupWarmURL(
+            settings: settings, env: ProcessInfo.processInfo.environment) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
     /// ⌃⌘V is still physically held when the pasteLast edge fires; typing while
     /// real modifiers are down risks the app reading them alongside our events.
     /// Wait for release (max ~1s), then insert; give up with a toast — the text
@@ -309,6 +343,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// then flatten newlines where Return would fire: terminals run commands,
     /// chat apps (Slack, Discord, etc.) send the message.
     private func insertStoredText(_ text: String) {
+        // This was the ONE insertion path with no secure-field check, so
+        // ⌃⌘V (and the menu items) would type a stored transcript straight into
+        // a password field — the single invariant the rest of the app never
+        // breaks. The text stays in history for a retry somewhere sane.
+        guard Inserter.focusTarget() != .secure else {
+            NSLog("Parla paste-last: focus is a secure field, refused")
+            hud.show(.error("Not supported in password fields"))
+            return
+        }
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Inserter.insert(TextRules.flattensNewlines(bundleID: bundleID) ? TextRules.flattenForTerminal(text) : text)
     }
@@ -322,7 +365,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = false          // stops the stream loop
         _ = recorder.stop()          // discard captured audio
         if !silent { Sound.cancel() }
-        let hud = self.hud
+        // The HUD updates NOW rather than on the chain. Queued behind an
+        // in-flight pass the pill kept saying "Listening…" over a dead waveform
+        // long after the cancel sound played, which reads as a hung app. Nothing
+        // later repaints over it: the stale-generation guard keeps the previous
+        // finish() off the HUD.
+        if silent { hud.hide() } else { hud.show(.cancelled) }
         processTask = Task { [prev = self.processTask] in
             await prev?.value        // wait out any in-flight streaming pass
             await MainActor.run {
@@ -334,7 +382,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.typed = ""
                 self.window = nil    // discard any confirmed-prefix the stream handed off
-                if silent { hud.hide() } else { hud.show(.cancelled) }
             }
         }
         showIdle()
@@ -423,16 +470,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Instant finalize: land the raw transcript NOW; the LLM polish swaps in
         // behind it without blocking the user. nil = dropped (secure field).
-        let landingResult: (landing: Landing, insertText: String, bundleID: String?)? = await MainActor.run {
+        let landingResult: (landing: Landing, insertText: String, bundleID: String?, current: Bool)? = await MainActor.run {
             let typedCount = self.typed.count // graphemes streamed live so far
             defer { self.typed = "" }
-            // `focus` was latched at fn-down; re-check BEFORE the transcript is
-            // logged so a password dictated into a moved-into secure field never
-            // reaches unified logging. Same semantics as the (_, .secure) arm
-            // below: never type, never log, never store — drop it.
-            if Inserter.focusTarget() == .secure {
+            // HUD and sound belong to whatever dictation owns the screen NOW. A
+            // previous finish() landing while a newer one is recording must not
+            // relabel the pill to a finished state (and schedule it to hide) or
+            // chime over the user's speech. The insert itself is unconditional —
+            // that text still has to land, in order.
+            let current = gen == self.generation
+            let toast = { (state: HUD.State) in if current { hud.show(state) } }
+            // Resolve focus AT INSERT TIME. The latch from fn-down is only a
+            // prediction: the event tap sees no mouse events, so a click never
+            // cancels a dictation, and hands-free exists precisely so the user
+            // can move around while speaking. Inserter.insert posts global
+            // CGEvents with no target, so branching on the stale latch could
+            // fire a whole transcript as keystrokes into a web page or a file
+            // list (where single letters are shortcuts), or withhold it from a
+            // field the user is looking at. Only .secure used to be re-checked.
+            let liveFocus = Inserter.focusTarget()
+            // Re-check BEFORE the transcript is logged so a password dictated
+            // into a moved-into secure field never reaches unified logging.
+            // Never type, never log, never store — drop it.
+            if liveFocus == .secure {
                 NSLog("Parla finish path: focus moved to secure field, dropped")
-                hud.show(.error("Not supported in password fields"))
+                toast(.error("Not supported in password fields"))
                 return nil
             }
             let landingBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -442,20 +504,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ? TextRules.flattenForTerminal(raw) : raw
             // Never log the transcript for a secure field — it's plausibly a
             // password, and unified logging is readable in Console.
-            NSLog("Parla finish: raw=%@ live=%d focus=%d typed=%d",
-                  focus == .secure ? "<secure>" : insertText, live ? 1 : 0, focus == .none ? 0 : 1, typedCount)
+            NSLog("Parla finish: raw=%@ live=%d focus=%d(latched %d) typed=%d",
+                  liveFocus == .secure ? "<secure>" : insertText, live ? 1 : 0,
+                  liveFocus == .none ? 0 : 1, focus == .none ? 0 : 1, typedCount)
             // Show "polishing…" only when a polish is actually coming; without
             // polish the raw transcript IS final — land the terminal HUD
             // state directly, no interstitial that nothing will ever resolve.
             let fieldHUD: HUD.State = willPolish ? .polishing : .done
-            let historyHUD: HUD.State = willPolish ? .polishing
+            // With history off and nothing landed in a field the cleaned text
+            // has nowhere to go, so no polish is issued (see below) — showing
+            // "polishing…" would be an interstitial nothing ever resolves.
+            let historyHUD: HUD.State = (willPolish && settings.historyEnabled) ? .polishing
                 : settings.historyEnabled ? .savedToHistory : .error("History off — text discarded")
-            switch (live, focus) {
+            switch (live, liveFocus) {
             case (_, .secure):
-                // Defensive: secure fields are refused at fn-down. Never type,
-                // never store — drop the transcript entirely.
+                // Defensive: already returned above.
                 NSLog("Parla finish path: secure field, dropped")
-                hud.show(.error("Not supported in password fields"))
+                toast(.error("Not supported in password fields"))
                 return nil
             case (true, _):
                 // Diff-based finalize: fix only the diverging tail of the
@@ -477,21 +542,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Can't prove the field still ends with our streamed text —
                     // leave it in place; history retains the final when enabled.
                     NSLog("Parla finish path: unverified, no safe finalize")
-                    hud.show(historyHUD)
-                    return (.history, insertText, landingBundleID)
+                    toast(historyHUD)
+                    return (.history, insertText, landingBundleID, current)
                 }
-                hud.show(fieldHUD)
-                return (.field, insertText, landingBundleID)
+                toast(fieldHUD)
+                return (.field, insertText, landingBundleID, current)
             case (false, .unknown), (false, .editable):
                 NSLog("Parla finish path: focused insert")
                 Inserter.insert(insertText) // insert at cursor
-                hud.show(fieldHUD)
-                return (.field, insertText, landingBundleID)
+                toast(fieldHUD)
+                return (.field, insertText, landingBundleID, current)
             case (false, .none):
                 // Nothing focused: never type into the void; history may retain it.
                 NSLog("Parla finish path: no focus, no insertion")
-                hud.show(historyHUD)
-                return (.history, insertText, landingBundleID)
+                toast(historyHUD)
+                return (.history, insertText, landingBundleID, current)
             }
         }
         guard let landingResult else { return } // dropped: no sound, no polish, no history
@@ -499,15 +564,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let insertText = landingResult.insertText
 
         // The POST starts after landing keystrokes; polish is async anyway.
-        let cleanTask: Task<(text: String, failure: String?), Never>? = willPolish
+        // Skip it entirely when its result is provably unusable: nothing of ours
+        // is in a field AND history is off, so the cleaned text would have
+        // nowhere to go. Issuing it burned a cloud round-trip on a guaranteed
+        // discard (and sent the transcript off the machine for nothing).
+        let polishIsUseful = landing == .field || settings.historyEnabled
+        let cleanTask: Task<(text: String, failure: String?), Never>? = (willPolish && polishIsUseful)
             ? Task { await pipeline.clean(transcript: raw) } : nil
-        switch landing {
-        case .field:
-            Sound.finish()
-        case .history where settings.historyEnabled:
-            Sound.finish()
-        case .history:
-            break
+        // Chime only for the dictation that owns the screen — otherwise a
+        // previous finish() lands its Glass over the user's live speech.
+        if landingResult.current {
+            switch landing {
+            case .field:
+                Sound.finish()
+            case .history where settings.historyEnabled:
+                Sound.finish()
+            case .history:
+                break
+            }
         }
 
         // With cleanup unconfigured, the raw transcript is final; retain it when
@@ -520,77 +594,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Async polish: cleanup, then swap raw → cleaned with the same
-        // verification machinery. Still on the processTask chain, so a queued
-        // next dictation starts only after this resolves (insertion order holds).
-        let cleanResult = await cleanTask.value
-        // Same terminal guard on the cleaned text — it replaces insertText in the
-        // field, so it must be flattened too, and the plan must diff flattened vs
-        // flattened (insertText) or the erase/verify counts won't match the field.
-        let cleaned = TextRules.flattensNewlines(bundleID: landingResult.bundleID)
-            ? TextRules.flattenForTerminal(cleanResult.text) : cleanResult.text
-        await MainActor.run {
-            let plan = LiveTyper.swapPlan(raw: insertText, cleaned: cleaned)
-            let failureHUD = cleanResult.failure.map(HUD.State.rawFallback)
-            guard gen == self.generation else {
-                // A newer dictation owns the field and HUD — no keystrokes, no
-                // HUD. History still records the result below when enabled.
-                NSLog("Parla swap: stale generation, no swap")
-                return
-            }
-            if case .field = landing, Inserter.focusTarget() == .secure {
-                // Same never-type-into-secure invariant as landing.
-                NSLog("Parla swap path: focus moved to secure field, no cleaned swap")
-                let secureHUD: HUD.State = failureHUD ?? (plan == nil ? .done
-                    : settings.historyEnabled ? .cleanedInHistory
-                    : .error("History off — cleanup discarded"))
-                hud.show(secureHUD)
-                return
-            }
-            switch landing {
-            case .history:
-                // Nothing of ours in a field — history is the only durable landing.
-                hud.show(settings.historyEnabled
-                    ? (failureHUD ?? .savedToHistory)
-                    : .error("History off — text discarded"))
-            case .field:
-                guard let plan else { // polish was a no-op: either cleanup failed, or the LLM agreed raw was fine
-                    hud.show(failureHUD ?? .done)
+        // Async polish, DETACHED from the processTask chain. Every whisper pass
+        // for this dictation is already done; this leg is a network call. Awaiting
+        // it on the chain made the next dictation's transcription, insertion and
+        // shadow streaming all wait out this request — up to 60s on a hung
+        // provider — to apply a swap that was then discarded anyway, because
+        // anything queued behind the await implies a newer fn-down, which bumped
+        // generation, which the guard below already rejects. Ordering is still
+        // safe: the guard keeps a stale swap off the field, and the landing
+        // keystrokes (the part that must stay ordered) already happened above.
+        Task { [self] in
+            let cleanResult = await cleanTask.value
+            // Same terminal guard on the cleaned text — it replaces insertText in the
+            // field, so it must be flattened too, and the plan must diff flattened vs
+            // flattened (insertText) or the erase/verify counts won't match the field.
+            let cleaned = TextRules.flattensNewlines(bundleID: landingResult.bundleID)
+                ? TextRules.flattenForTerminal(cleanResult.text) : cleanResult.text
+            await MainActor.run {
+                let plan = LiveTyper.swapPlan(raw: insertText, cleaned: cleaned)
+                let failureHUD = cleanResult.failure.map(HUD.State.rawFallback)
+                guard gen == self.generation else {
+                    // A newer dictation owns the field and HUD — no keystrokes, no
+                    // HUD. History still records the result below when enabled.
+                    NSLog("Parla swap: stale generation, no swap")
                     return
                 }
-                if Inserter.canEraseTyped(insertText) {
-                    // Same precondition as before — the field must still end
-                    // with everything we landed — but prefer an atomic AX write
-                    // to the backspace burst. The prefix-only diff makes
-                    // eraseTail the WHOLE transcript whenever cleanup touched
-                    // the first word, so the old path erased a long dictation
-                    // one character at a time (~3s, visible, main-thread) and
-                    // could eat a character the user typed mid-burst.
-                    if Inserter.replaceTypedTail(plan.eraseTail, with: plan.replacement) {
-                        NSLog("Parla swap path: atomic ax tail swap (%d chars)", plan.eraseTail.count)
-                    } else {
-                        NSLog("Parla swap path: keystroke tail swap (erase %d)", plan.eraseTail.count)
-                        Inserter.typeBackspaces(plan.eraseTail.count)
-                        Inserter.typeUnicode(plan.replacement)
-                    }
-                    hud.show(.done)
-                } else {
-                    // AX can't prove the field still ends with our text — leave
-                    // the raw alone; history retains the cleaned version when enabled.
-                    NSLog("Parla swap path: unverified, no cleaned swap")
-                    hud.show(settings.historyEnabled ? .cleanedInHistory
+                if case .field = landing, Inserter.focusTarget() == .secure {
+                    // Same never-type-into-secure invariant as landing.
+                    NSLog("Parla swap path: focus moved to secure field, no cleaned swap")
+                    let secureHUD: HUD.State = failureHUD ?? (plan == nil ? .done
+                        : settings.historyEnabled ? .cleanedInHistory
                         : .error("History off — cleanup discarded"))
+                    hud.show(secureHUD)
+                    return
+                }
+                switch landing {
+                case .history:
+                    // Nothing of ours in a field — history is the only durable landing.
+                    hud.show(settings.historyEnabled
+                        ? (failureHUD ?? .savedToHistory)
+                        : .error("History off — text discarded"))
+                case .field:
+                    guard let plan else { // polish was a no-op: either cleanup failed, or the LLM agreed raw was fine
+                        hud.show(failureHUD ?? .done)
+                        return
+                    }
+                    if Inserter.canEraseTyped(insertText) {
+                        // Same precondition as before — the field must still end
+                        // with everything we landed — but prefer an atomic AX write
+                        // to the backspace burst. The prefix-only diff makes
+                        // eraseTail the WHOLE transcript whenever cleanup touched
+                        // the first word, so the old path erased a long dictation
+                        // one character at a time (~3s, visible, main-thread) and
+                        // could eat a character the user typed mid-burst.
+                        if Inserter.replaceTypedTail(plan.eraseTail, with: plan.replacement) {
+                            NSLog("Parla swap path: atomic ax tail swap (%d chars)", plan.eraseTail.count)
+                        } else {
+                            NSLog("Parla swap path: keystroke tail swap (erase %d)", plan.eraseTail.count)
+                            Inserter.typeBackspaces(plan.eraseTail.count)
+                            Inserter.typeUnicode(plan.replacement)
+                        }
+                        hud.show(.done)
+                    } else {
+                        // AX can't prove the field still ends with our text — leave
+                        // the raw alone; history retains the cleaned version when enabled.
+                        NSLog("Parla swap path: unverified, no cleaned swap")
+                        hud.show(settings.historyEnabled ? .cleanedInHistory
+                            : .error("History off — cleanup discarded"))
+                    }
                 }
             }
-        }
 
-        // Record once per dictation (secure fields returned above; raw is
-        // non-nil past the guard). cleaned is dropped when cleanup failed or
-        // matched raw. Append on main to serialize with menu reads/Clear.
-        if settings.historyEnabled {
-            let cleanedForHistory = (cleanResult.failure == nil && cleanResult.text != raw) ? cleanResult.text : nil
-            let entry = HistoryEntry(raw: raw, cleaned: cleanedForHistory, appName: appName)
-            DispatchQueue.main.async { self.history.append(entry) }
+            // Record once per dictation (secure fields returned above; raw is
+            // non-nil past the guard). cleaned is dropped when cleanup failed or
+            // matched raw. Append on main to serialize with menu reads/Clear.
+            if settings.historyEnabled {
+                let cleanedForHistory = (cleanResult.failure == nil && cleanResult.text != raw) ? cleanResult.text : nil
+                let entry = HistoryEntry(raw: raw, cleaned: cleanedForHistory, appName: appName)
+                DispatchQueue.main.async { self.history.append(entry) }
+            }
         }
     }
 
@@ -641,6 +723,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { hud.show(.error("No command heard")) }
             return
         }
+
+        // The work from here is a network call, not transcription — say so, or a
+        // slow endpoint looks like whisper being stuck.
+        DispatchQueue.main.async { hud.show(.polishing) }
 
         // Transform via the cleanup client DIRECTLY (not Pipeline.clean): its
         // raw-transcript fallback would return the spoken instruction on failure,
@@ -698,9 +784,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hud.show(park("focus moved to secure field"))
                 return
             }
-            // Only replace if the selection is textually unchanged; otherwise
-            // never type over new context.
-            if Inserter.selectedText() == selection {
+            // Only replace if the selection is textually unchanged AND we are
+            // still in the app the selection came from. Text equality alone
+            // matched an identical-looking selection in a DIFFERENT app — select
+            // "this" in Notes, switch to Mail during the call, double-click
+            // "this" there, and the transform landed in the wrong document.
+            let sameApp = NSWorkspace.shared.frontmostApplication?.processIdentifier == self.commandAppPID
+            if sameApp, Inserter.selectedText() == selection {
                 NSLog("Parla transform: selection intact, replacing")
                 let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                 // Resolve terminal safety only for text actually being typed.
@@ -710,7 +800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Sound.finish()
                 hud.show(.done)
             } else {
-                hud.show(park("selection changed"))
+                hud.show(park(sameApp ? "selection changed" : "app changed"))
             }
         }
         // ponytail: transforms only attempt history on the fallback paths above —
@@ -720,9 +810,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ~300ms between streaming passes, sliced so fn-up (isRecording flipping
     /// false) unblocks the queued finish() within ~50ms instead of sitting out
     /// the full sleep as dead time.
-    private func pauseBetweenPasses() async {
+    private func pauseBetweenPasses(gen: Int) async {
         for _ in 0..<6 {
-            guard isRecording else { return }
+            guard isRecording, gen == generation else { return }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
@@ -740,16 +830,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the result is used, so an aborted "" is never committed as a hypothesis
     /// or a confirmed head. The handoff below still runs after a break: it only
     /// carries state from completed passes.
-    func stream(transcriber: WhisperTranscriber) async {
-        let dict = store.load().dictionary
+    func stream(transcriber: WhisperTranscriber, gen: Int, dictionary dict: [String]) async {
         var confirmed = "" // frozen transcript of snap[0..<cut]
         var cut = 0
         var lastCount = 0
-        // ponytail: isRecording is written on main, read here — benign stop-flag race.
-        while self.isRecording {
+        // Every stop condition is scoped to THIS dictation. isRecording alone is
+        // not enough: a fast re-press sets it true again, which revived the
+        // previous dictation's loop against the new dictation's (freshly
+        // cleared) buffer — stalling the old transcript until the new fn-up,
+        // costing the new dictation its shadow-streaming window, and splicing
+        // the new audio's text into the old confirmed prefix when the new
+        // dictation ran longer. generation is bumped on every fn-down, so
+        // comparing it makes the revival impossible.
+        // ponytail: both flags are written on main and read here — benign
+        // stop-flag races; the token only ever makes us stop earlier.
+        while self.isRecording, gen == self.generation {
             let snap = self.recorder.snapshot()
             guard snap.count - lastCount >= 8000 else { // <0.5s new audio, wait
-                await pauseBetweenPasses()
+                await pauseBetweenPasses(gen: gen)
                 continue
             }
             lastCount = snap.count
@@ -761,13 +859,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let head = transcriber.transcribe(
                     Array(tail[..<rel]),
                     initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
-                    shouldAbort: { !self.isRecording })
+                    shouldAbort: { !self.isRecording || gen != self.generation })
                 // A head pass that did not complete returns nil — abort OR whisper
                 // error. Committing either would advance `cut` past audio whose text
                 // was never captured, silently deleting ~10s from the transcript.
                 // Only a completed pass may be committed; finish() re-transcribes
                 // from the unchanged cut otherwise.
-                guard self.isRecording, let head else { break }
+                guard self.isRecording, gen == self.generation, let head else { break }
                 confirmed = StreamWindow.join(confirmed, head)
                 cut += rel
                 tail = Array(tail[rel...])
@@ -777,10 +875,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let tailText = transcriber.transcribe(
                 tail,
                 initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
-                shouldAbort: { !self.isRecording })
+                shouldAbort: { !self.isRecording || gen != self.generation })
             // An incomplete pass returns nil — never treat it as a new hypothesis:
             // live typing would erase everything the user sees. finish() takes over.
-            guard self.isRecording, let tailText else { break }
+            guard self.isRecording, gen == self.generation, let tailText else { break }
             let text = StreamWindow.join(confirmed, tailText)
             await MainActor.run {
                 // Shadow mode: window-building only, never touch the field.
@@ -800,34 +898,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.typed = text
             }
-            await pauseBetweenPasses()
+            await pauseBetweenPasses(gen: gen)
         }
         // Hand the window to this dictation's finish(), queued right after us on
-        // the processTask chain — the chain is the synchronization.
-        if !confirmed.isEmpty {
+        // the processTask chain — the chain is the synchronization. Only for OUR
+        // dictation: handing a stale window to a newer finish() would splice this
+        // utterance's text onto the next one and slice its samples at our offset.
+        if !confirmed.isEmpty, gen == self.generation {
             self.window = StreamWindow(confirmedText: confirmed, cutSample: cut)
         }
     }
 
     func loadModel() {
-        let path = store.load().whisperModelPath ?? WhisperTranscriber.defaultModelPath()
-        transcriber = try? WhisperTranscriber(modelPath: path)
-        hubModel.modelLoaded = transcriber != nil
-        showIdle()
-        if let transcriber {
-            // First whisper inference pays Metal shader/graph setup (hundreds of ms) —
-            // warm it now on throwaway silence so the user's first real dictation
-            // isn't the one paying it. Queued on processTask like every other
-            // transcribe call: the whisper ctx isn't reentrant, and loadModel() can
-            // also fire post-download while the app is already live.
-            processTask = Task { [prev = processTask] in
-                await prev?.value
-                // Preemptible: a dictation started before warmup finishes takes
-                // priority — it eats the cold start instead of queueing behind it.
-                _ = transcriber.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil,
-                                           shouldAbort: { self.isRecording })
-                NSLog("Parla: whisper warmup done")
+        let configured = store.load().whisperModelPath
+        let fallback = WhisperTranscriber.defaultModelPath()
+        let path = configured ?? fallback
+        // Everything here runs OFF the main thread on the processTask chain:
+        // whisper init reads and mmaps a 150MB+ model, which froze the UI and
+        // delayed hotkey edges when a download completed mid-dictation. The
+        // chain also keeps it away from a concurrent transcribe (the ctx isn't
+        // reentrant), and loadModel() can fire post-download while live.
+        processTask = Task { [prev = processTask] in
+            await prev?.value
+            var loaded = try? WhisperTranscriber(modelPath: path)
+            if loaded == nil, path != fallback {
+                // A custom whisperModelPath that no longer resolves made the
+                // one-click download a no-op loop forever: the download installs
+                // to the DEFAULT path, loadModel re-read the broken custom one,
+                // transcriber stayed nil, and the download button came back.
+                NSLog("Parla: whisperModelPath %@ failed to load, falling back to %@", path, fallback)
+                loaded = try? WhisperTranscriber(modelPath: fallback)
             }
+            let model = loaded
+            await MainActor.run {
+                self.transcriber = model
+                self.hubModel.modelLoaded = model != nil
+                self.showIdle()
+            }
+            guard let model else { return }
+            // First whisper inference pays Metal shader/graph setup (hundreds of
+            // ms) — warm it now on throwaway silence so the user's first real
+            // dictation isn't the one paying it. Preemptible: a dictation started
+            // before warmup finishes takes priority and eats the cold start.
+            _ = model.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil,
+                                 shouldAbort: { self.isRecording })
+            NSLog("Parla: whisper warmup done")
         }
     }
 
