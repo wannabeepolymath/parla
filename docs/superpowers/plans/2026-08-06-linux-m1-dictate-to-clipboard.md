@@ -197,7 +197,11 @@ impl Default for Cleanup {
         Self {
             provider: "anthropic".into(),
             base_url: None,
-            model: Some("claude-sonnet-5".into()),
+            // None, not a hardcoded model name: an openai-compatible config that
+            // omits `model` must let the server pick, not be sent an Anthropic
+            // model name. The anthropic path supplies its own default at call
+            // time (see Task 4).
+            model: None,
             api_key_env: Some("ANTHROPIC_API_KEY".into()),
             api_key: None,
         }
