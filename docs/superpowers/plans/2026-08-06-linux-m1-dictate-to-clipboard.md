@@ -718,6 +718,22 @@ Two guards from the Swift original must survive:
 
 M1 makes a single non-streaming call — there is nothing to stream into yet. Streaming arrives in M3 with the pill.
 
+Two notes carried in from the Task 2/3 review:
+
+- **Snippet key ordering diverges from Swift for non-ASCII triggers.** Swift sorts
+  with `$0.key < $1.key`, which is canonical-equivalence aware; Rust's `BTreeMap`
+  orders by UTF-8 bytes. Identical for ASCII keys. For NFC/NFD-varying keys the
+  line order inside the snippet block differs, and Swift's `[String: String]`
+  would additionally *merge* two keys that Rust keeps separate. This affects only
+  ordering within the prompt, not correctness of the expansion. Do not add
+  normalization — just do not assume the two platforms emit byte-identical
+  snippet blocks for non-ASCII triggers.
+- **`model = None` is optimistic for most OpenAI-compatible servers.** Groq and
+  OpenAI generally *require* `model` and answer 400 without it. The doc comment
+  says "the server's default model", which only some servers honour. Make sure
+  the 400 surfaces legibly rather than as a generic "cleanup API error" — a user
+  who omitted `model` should be able to tell that from the notification.
+
 - [ ] **Step 1: Add HTTP dependencies**
 
 In `linux/parla-core/Cargo.toml`:
