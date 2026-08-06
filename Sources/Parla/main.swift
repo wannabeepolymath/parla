@@ -118,11 +118,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if command {
                     // Command mode: capture the selection NOW; refuse early (no
                     // recording) when there's nothing safe to transform.
+                    // Every refusal below must roll the monitor back to idle:
+                    // handle() already committed session = .push, and a monitor
+                    // that believes a session exists eats the next Space/Return
+                    // or fires a phantom cancel on the next Esc.
                     let focus = Inserter.focusTarget()
                     guard focus != .secure else {
+                        self.hotkey.reset()
                         self.hud.show(.error("No transforms in password fields")); return
                     }
                     guard let selection = Inserter.selectedText() else {
+                        self.hotkey.reset()
                         self.hud.show(.error("Select text first")); return
                     }
                     self.generation += 1 // invalidates any pending cleaned-swap
@@ -132,6 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.liveTyping = false // never stream a transform
                     do { try self.recorder.start() }
                     catch {
+                        self.hotkey.reset()
                         self.setStatus("⚠️"); self.hud.show(.error("Mic failed"))
                         NSLog("%@", "Parla mic start failed: \(error)"); return
                     }
@@ -161,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 do { try self.recorder.start(); self.showRecording(); self.hud.show(.listening(command: false)); Sound.start() }
                 catch {
                     self.isRecording = false
+                    self.hotkey.reset()
                     self.setStatus("⚠️"); self.hud.show(.error("Mic failed"))
                     NSLog("%@", "Parla mic start failed: \(error)")
                     return
@@ -175,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // would immediately wipe the error toast. Nothing streamed yet.
                 guard self.focus != .secure else {
                     self.isRecording = false
+                    self.hotkey.reset() // refused: don't leave the monitor mid-session
                     _ = self.recorder.stop() // discard the captured audio
                     self.hud.show(.error("Not supported in password fields"))
                     self.showIdle()
@@ -249,7 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .handsFree:
                 // fn+Space latched: same recording, but tell the user Space took —
                 // the pill relabels and a pop confirms fn can be released.
-                guard self.isRecording else { return }
+                // Latching onto a refused fn-down leaves the monitor in a
+                // hands-free session with nothing recording — roll it back.
+                guard self.isRecording else { self.hotkey.reset(); return }
                 self.hud.show(.handsFree)
                 Sound.latch()
             case .pasteLast:

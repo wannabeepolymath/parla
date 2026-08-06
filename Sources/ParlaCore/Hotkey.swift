@@ -36,8 +36,22 @@ public final class HotkeyMonitor {
     private var session = Session.idle
     private var downAt: TimeInterval = 0
     private var tap: CFMachPort?
+    /// keyCode of the last keyDown we swallowed, so its autorepeats can be
+    /// swallowed too. nil once a keyDown passes through.
+    private var lastSwallowedKeyCode: UInt16?
 
     public init() {}
+
+    /// Drop back to idle. The delegate calls this whenever it REFUSES an fn-down
+    /// (password field, nothing selected to transform, mic failure): handle()
+    /// has already committed `session = .push` by then, so without a rollback
+    /// the monitor believes a dictation is running that never started — and the
+    /// next Space or Return is silently eaten, or the next Esc fires a phantom
+    /// cancel, by a session that does not exist.
+    public func reset() {
+        session = .idle
+        lastSwallowedKeyCode = nil
+    }
 
     // MARK: - Pure state machine (exercised by tests; `time` injected so tests never sleep)
 
@@ -64,7 +78,11 @@ public final class HotkeyMonitor {
 
     /// keyDown. Returns true when the event must be swallowed (never reach the
     /// front app). fnActive comes from the key event's own flags.
+    /// `opt`/`shift` are read so the ⌃⌘ chords match EXACTLY those modifiers —
+    /// otherwise ⌃⌥⌘V or ⌃⇧⌘V is swallowed and fires paste-last, stealing a
+    /// shortcut the user bound for something else.
     public func keyDown(keyCode: UInt16, fnActive: Bool = false, cmd: Bool = false, ctrl: Bool = false,
+                        opt: Bool = false, shift: Bool = false,
                         at time: TimeInterval) -> Bool {
         if keyCode == 49, fnActive { // fn+Space: hands-free latch / stop
             switch session {
@@ -95,11 +113,11 @@ public final class HotkeyMonitor {
             return true // swallow — a space/newline must not land in the field before the transcript
         }
         if session == .handsFree { return false } // other typing while hands-free is fine
-        if keyCode == 9, cmd, ctrl { // ⌃⌘V: paste last transcript
+        if keyCode == 9, cmd, ctrl, !opt, !shift { // ⌃⌘V exactly: paste last transcript
             onEdge?(.pasteLast)
             return true
         }
-        if keyCode == 1, cmd, ctrl { // ⌃⌘S: open the scratchpad
+        if keyCode == 1, cmd, ctrl, !opt, !shift { // ⌃⌘S exactly: open the scratchpad
             onEdge?(.openScratchpad)
             return true
         }
@@ -147,15 +165,28 @@ public final class HotkeyMonitor {
         case .keyDown:
             // Skip Parla's OWN synthetic keystrokes (typing/erasing while
             // streaming carries our marker — without this the tap would
-            // self-cancel), and key autorepeat (a held space must not
-            // latch-then-stop hands-free on its repeats).
-            guard event.getIntegerValueField(.eventSourceUserData) != Inserter.syntheticMarker,
-                  event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { return pass }
-            let swallow = keyDown(keyCode: UInt16(event.getIntegerValueField(.keyboardEventKeycode)),
+            // self-cancel).
+            guard event.getIntegerValueField(.eventSourceUserData) != Inserter.syntheticMarker
+            else { return pass }
+            let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            // Autorepeat must not re-drive the state machine (a held space would
+            // latch-then-stop hands-free on its repeats) — but it must still be
+            // SWALLOWED when we swallowed the keystroke that began it. macOS
+            // synthesizes repeats upstream of this tap regardless of whether the
+            // initiating keyDown was consumed, so passing them through leaked the
+            // very Return/Space we intercepted into the front app: holding Return
+            // to stop hands-free sent whatever draft was already in the composer.
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return code == lastSwallowedKeyCode ? nil : pass
+            }
+            let swallow = keyDown(keyCode: code,
                                   fnActive: event.flags.contains(.maskSecondaryFn),
                                   cmd: event.flags.contains(.maskCommand),
                                   ctrl: event.flags.contains(.maskControl),
+                                  opt: event.flags.contains(.maskAlternate),
+                                  shift: event.flags.contains(.maskShift),
                                   at: Double(event.timestamp) / 1_000_000_000)
+            lastSwallowedKeyCode = swallow ? code : nil
             return swallow ? nil : pass
         default:
             return pass

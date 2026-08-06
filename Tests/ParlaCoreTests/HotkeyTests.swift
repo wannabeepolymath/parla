@@ -196,4 +196,54 @@ final class HotkeyTests: XCTestCase {
         XCTAssertFalse(m.keyDown(keyCode: 9, cmd: true, at: 0))
         XCTAssertEqual(out, [])
     }
+
+    // ⌃⌥⌘V / ⌃⇧⌘V are somebody else's shortcut — matching them stole the key
+    // AND typed the last transcript into whatever had focus.
+    func testChordsRequireExactModifiers() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        XCTAssertFalse(m.keyDown(keyCode: 9, cmd: true, ctrl: true, opt: true, at: 0))
+        XCTAssertFalse(m.keyDown(keyCode: 9, cmd: true, ctrl: true, shift: true, at: 0))
+        XCTAssertFalse(m.keyDown(keyCode: 1, cmd: true, ctrl: true, opt: true, at: 0))
+        XCTAssertFalse(m.keyDown(keyCode: 1, cmd: true, ctrl: true, shift: true, at: 0))
+        XCTAssertEqual(out, [])
+        // The exact chords still work.
+        XCTAssertTrue(m.keyDown(keyCode: 9, cmd: true, ctrl: true, at: 1))
+        XCTAssertTrue(m.keyDown(keyCode: 1, cmd: true, ctrl: true, at: 2))
+        XCTAssertEqual(out, [.pasteLast, .openScratchpad])
+    }
+
+    // MARK: refusal rollback
+
+    // handle() commits session = .push before the delegate can refuse the
+    // fn-down (password field / nothing selected / mic failure). Without a
+    // rollback the monitor stays mid-session: the next Space is swallowed by a
+    // dictation that never started.
+    func testResetAfterRefusedDownRestoresIdle() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, fnActive: true, at: 0)   // .down — delegate will refuse
+        m.reset()                                      // delegate refused
+        // A plain Space must now pass through untouched, not be eaten.
+        XCTAssertFalse(m.keyDown(keyCode: 49, at: 0.5))
+        XCTAssertEqual(out, [.down(command: false)])   // no phantom .cancel
+        // Esc must dismiss a toast, not cancel a nonexistent dictation.
+        XCTAssertFalse(m.keyDown(keyCode: 53, at: 0.6))
+        XCTAssertEqual(out, [.down(command: false), .dismiss])
+    }
+
+    func testResetAfterRefusedDownThenHandsFreeLatch() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, fnActive: true, at: 0)             // .down — refused
+        XCTAssertTrue(m.keyDown(keyCode: 49, fnActive: true, at: 0.1)) // latched .handsFree
+        m.reset()                                                // delegate saw isRecording == false
+        XCTAssertFalse(m.keyDown(keyCode: 49, at: 1))            // Space is the user's again
+        XCTAssertEqual(out, [.down(command: false), .handsFree])
+        // And a fresh dictation still works.
+        m.handle(keyCode: 63, fnActive: true, at: 2)
+        m.handle(keyCode: 63, fnActive: false, at: 3)
+        XCTAssertEqual(out, [.down(command: false), .handsFree,
+                             .down(command: false), .up(short: false)])
+    }
 }
