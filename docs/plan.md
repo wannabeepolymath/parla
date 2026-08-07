@@ -1,5 +1,13 @@
 # Parla Flow UI Clone Spec
 
+> **What this file is:** static inspection of a competitor's shipped app —
+> Parla Flow 1.5.1146, read out of the installed Electron bundle — kept as
+> visual and reference material. It is not a Parla roadmap and nothing in it is
+> a commitment. In use: the Visual Identity tokens and the Flow Bar spec, which
+> the Hub window and the HUD pill were built from. Account, Teams,
+> Plans/Billing, Connectors, MCP, Notetaker/meetings, calendar reminders, and
+> the onboarding tour describe features Parla has no backing for.
+
 Source inspected locally:
 - Installed app: `/Applications/Parla Flow.app`
 - Version: 1.5.1146

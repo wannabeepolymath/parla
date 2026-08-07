@@ -1,5 +1,16 @@
 # Parla Hub — Management UI Design
 
+> **EXECUTED — kept as a record.** The Hub shipped as specified below, with
+> three details superseded. The menu's `Set API Key…` item referenced under
+> Architecture is gone — the key is edited on the Hub's AI Cleanup page
+> (`Sources/Parla/Hub/HubPages.swift:190-194`). The General page's shortcut
+> pills list six chords, not two: fn 🌐, fn 🌐 + Space, ⇧ fn, ⌃ ⌘ V, ⌃ ⌘ S,
+> esc (`HubPages.swift:83-105`). And two things listed here as out of scope /
+> dropped shipped anyway in the same 2026-07-10 batch: the Scratchpad
+> (`Sources/Parla/Scratchpad.swift`) and the mic device picker, which lives on
+> this window's General page (`HubPages.swift:68-73`). Current behavior is
+> documented in README.md.
+
 Scope: a SwiftUI dashboard window ("Hub") for Parla plus a restyle of the
 existing HUD pill, both following the visual identity in `docs/plan.md`
 (Parla Flow clone spec). Frontend only — no changes to ParlaCore behavior,
@@ -45,16 +56,20 @@ has no backing for those; they are explicitly out of scope).
    shortcut pills (fn = dictate, ⇧+fn = command mode); Open settings file.
 2. **AI Cleanup** — provider picker (Anthropic / OpenAI-compatible); model
    field; base URL field (OpenAI-compatible only); API key (secure field,
-   placeholder dots when set); key env-var field; short key-resolution note.
+   placeholder dots when set); short key-resolution note. The key env-var field
+   was dropped: `cleanup.apiKeyEnvVar` still works via settings.json but is
+   deliberately not surfaced in the Hub.
 3. **Dictionary** — add/remove/edit the `dictionary` spellings list.
 4. **Snippets** — add/remove trigger → expansion pairs (`snippets`).
 5. **History** — the local 50-entry log: search filter (frontend-only),
    rows with raw/cleaned text, app name, timestamp, per-row Copy,
    Clear History (danger). No per-row delete (HistoryStore has none; adding
    one is a backend change — out of scope).
-6. **Data & Privacy** — `historyEnabled` toggle, `restoreClipboard` toggle,
-   Clear History, static privacy notes (on-device transcription, secure
-   fields never sent to the cleanup LLM, history is local-only).
+6. **Data & Privacy** — `historyEnabled` toggle, Clear History, static privacy
+   notes (on-device transcription, secure fields never sent to the cleanup LLM,
+   history is local-only). No `restoreClipboard` toggle: the setting does not
+   exist and there is nothing to restore — Parla types the transcript as
+   keystrokes and never writes the clipboard.
 
 ## Dropped from plan.md
 

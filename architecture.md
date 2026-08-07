@@ -48,7 +48,7 @@ dictated. Building only A caps you at a single-user tool.
 
 ## Recommended architecture (phased)
 
-### Phase 1 — local-first Mac MVP (the actual next step)
+### Phase 1 — local-first Mac MVP (shipped)
 
 ```
 ┌────────────── macOS menu-bar app ──────────────────┐
@@ -59,55 +59,80 @@ dictated. Building only A caps you at a single-user tool.
 │  AVAudioEngine mic capture (16 kHz mono PCM)        │
 │      │ up                                           │
 │      ▼                                              │
-│  whisper.cpp (Metal, large-v3-turbo)                │
+│  whisper.cpp (Metal, base.en by default)            │
 │    initial_prompt = personal dictionary terms       │
+│    shadow passes run during capture; fn-up          │
+│      pays only for the unconfirmed tail             │
 │      │ raw transcript                               │
-│      ▼                                              │
-│  Cleanup LLM (one API call; local model later)      │
-│    prompt = transcript + dictionary + snippets      │
-│           + active app name (from AX API)           │
-│      │ polished text                                │
 │      ▼                                              │
 │  Insertion: CGEvent Unicode keystrokes              │
 │    no clipboard — transcripts stay in-app;          │
 │    failures recoverable from local history          │
+│      │ then, behind it                              │
+│      ▼                                              │
+│  Cleanup LLM (one API call; local or cloud)         │
+│    prompt = transcript + dictionary + snippets      │
+│           + active app name (from NSWorkspace)      │
+│      │ polished text                                │
+│      ▼                                              │
+│  Swap: one atomic AX write over the typed text,     │
+│    only when AX proves the text is still ours       │
 └─────────────────────────────────────────────────────┘
 
-Local state: JSON/SQLite — dictionary, snippets, settings, history.
-Permissions: Microphone + Accessibility (+ Input Monitoring if needed).
+Local state: JSON files — settings (incl. dictionary, snippets) and history —
+plus a plain-text scratchpad.
+Permissions: Microphone + Accessibility.
 ```
 
-Latency budget: hotkey-up → text inserted in <2s. Whisper turbo does ~10s of
+Latency budget: hotkey-up → text inserted in <2s. base.en does ~10s of
 audio in well under 1s on M-series; the LLM call is the long pole (~0.5–1s
-with a fast model). Good enough without streaming.
+with a fast model), which is why the raw transcript lands first and the
+polished version swaps in behind it.
 
-The upgrade when it isn't: **transcribe while the user is still talking** —
-run whisper.cpp incrementally on chunks during capture, so at hotkey-up the
-transcript is already done and only the LLM pass remains. This is how
-cloud incumbents make two model calls feel instant; it works identically
-on-device. (Phase 2+ optimization; for the Phase 3 cloud ASR path, also
-compress audio on the wire — Opus, not raw PCM.)
+**Transcribe while the user is still talking — shipped.** whisper.cpp runs
+incrementally on the buffer during capture ("shadow streaming"), so at
+hotkey-up only the unconfirmed tail is left to transcribe. Past ~15s of
+unconfirmed audio the head is frozen at the locally quietest spot into a
+confirmed prefix, so each pass stays O(tail) rather than O(whole utterance).
+(For the Phase 3 cloud ASR path, also compress audio on the wire — Opus, not
+raw PCM.)
 
 What Phase 1 deliberately skips:
-- streaming ASR / live partials — add when the pause after hotkey-up feels slow
-- VAD — add with hands-free toggle mode
+- live partials typed into the field — the streaming passes are shadow-only.
+  Keystrokes posted while the hotkey is physically held merge with the
+  modifier (fn+A opens the Dock), so the transcript lands as one insert on
+  release. Re-enable only with a verified fix for the modifier merge.
+- VAD — hands-free (fn+Space) shipped without it; the streaming cut point is
+  a plain RMS scan for the quietest window, not real voice-activity detection
 - Windows client — add after Mac UX is proven
 - any backend — add in Phase 3
 
 ### Phase 2 — the product features (still no backend)
 
-- **Personal dictionary UI** + auto-learn from user's post-insertion edits
-  (diff AX field content shortly after insert — this is the
-  feedback loop, all local).
-- **Snippets** — spoken cue → expansion, resolved in the LLM prompt.
-- **Command Mode / Transforms** — read selected text via AX API, apply spoken
-  instruction, write back. Same pipeline, different prompt.
-- **App-aware style** — active app bundle ID → tone hint (Slack casual,
-  Mail formal, IDE code-aware camelCase/snake_case).
-- **History + retry/copy fallback UI.**
-- **Local cleanup model option** (Ollama, ~3B) → true zero-network mode.
-  This is the differentiator cloud-only incumbents structurally can't offer:
-  their transcription always leaves the device.
+Everything below ships today except where noted.
+
+- **Personal dictionary UI** — shipped (Hub → Dictionary; terms go into the
+  whisper `initial_prompt` and the cleanup prompt). Auto-learn from the user's
+  post-insertion edits (diff AX field content shortly after insert — the local
+  feedback loop) is **not built**; the list is hand-edited.
+- **Snippets** — shipped. Spoken cue → expansion, resolved in the LLM prompt
+  (never by string replacement).
+- **Command Mode / Transforms** — shipped. ⇧+fn reads the selected text via
+  the AX API, applies the spoken instruction, writes back. Same pipeline,
+  different prompt.
+- **App-aware style** — shipped, in its cheap form: the frontmost app's name
+  goes into the cleanup prompt with a tone instruction (casual for chat,
+  formal for email, plain for code/terminals), and terminal/chat bundle IDs
+  get newlines flattened so nothing typed spans lines. Per-app rules
+  (camelCase/snake_case for IDEs) are not built.
+- **History + copy fallback UI** — shipped (Hub → History with search and a
+  Copy button; ⌃⌘V and the menu paste the last dictation). Re-running the
+  pipeline on a stored entry — "retry" — is not built.
+- **Local cleanup model option** — shipped, as the `openai-compatible`
+  provider: point `cleanup.baseURL` at Ollama (or any OpenAI-compatible
+  server, keyless is fine) → true zero-network mode. This is the
+  differentiator cloud-only incumbents structurally can't offer: their
+  transcription always leaves the device.
 
 ### Phase 3 — backend, only when multi-device/teams demand it
 
@@ -152,12 +177,14 @@ script, not a pipeline:
 ## Hard problems (ranked by when they bite)
 
 1. **Insertion reliability across apps** — Phase 1, day one. Secure input
-   fields, Electron apps, terminals all behave differently. Every transcript
-   is kept in local history as the escape hatch (no clipboard involvement).
+   fields, Electron apps, terminals all behave differently. Local history is
+   the escape hatch when a transcript can't be landed (on by default, capped
+   at 50 entries, and can be turned off — secure-field and cancelled
+   dictations are never recorded either way). No clipboard involvement.
 2. **Self-correction handling** ("at 5… actually 6") — prompt engineering +
    eval set; the LLM does this well if explicitly instructed.
-3. **Latency feel** — Phase 1–2. Push-to-talk + turbo model is fine; streaming
-   is the Phase 3 upgrade.
+3. **Latency feel** — Phase 1–2. Push-to-talk plus shadow streaming (shipped)
+   covers it on-device; cloud streaming ASR stays a Phase 3 concern.
 4. **Dictionary accuracy without retraining** — initial_prompt + LLM context
    covers most of it.
 5. **Permission loss recovery** (macOS revokes AX on updates) — detect and
@@ -166,6 +193,9 @@ script, not a pipeline:
    Phase 3+.
 
 ## Build order
+
+Steps 1–4 are shipped (no retry action, no dictionary auto-learn); 5 onward is
+still ahead.
 
 1. Mac MVP: hotkey → whisper.cpp → LLM cleanup → paste. (Phase 1)
 2. Dictionary, snippets, history, retry/copy fallback. (Phase 2)

@@ -1,6 +1,6 @@
 # Parla — Reported Issues Log
 
-User-reported issues, their root causes, and current status. (2026-07-05, updated 2026-07-10)
+User-reported issues, their root causes, and current status. (2026-07-05, updated 2026-08-07)
 
 ## 1. "I am not able to use the app. I wrote the key in .env" — FIXED
 The app never reads `.env`, and GUI apps don't inherit shell env vars.
@@ -38,6 +38,14 @@ verified identical across rebuilds. Grants survive rebuilds from now on.
   the raw or cleaned text landed and verified in the box, or a distinct HUD
   state ("✓ cleaned in clipboard") when it genuinely couldn't be proven safe
   to touch the field again.
+- SUPERSEDED (2026-08-07): there is no mid-speech append any more, so the
+  "~1 word/second cadence" above no longer describes the app. Typing into the
+  field while fn is physically held merges the keystrokes with the modifier
+  (fn+A opens the Dock), so `liveTyping` is assigned false on both dictation
+  entry paths and never set true anywhere. What survives is shadow streaming:
+  whisper still runs during speech to build the confirmed prefix, so fn-up only
+  pays for the tail — but the field is untouched until release, when the whole
+  transcript lands in one insert.
 
 ## 6. "It removed text that it didn't write" — FIXED (with a trade-off)
 Blind backspace counts could eat pre-existing text when the app dropped a
@@ -49,6 +57,19 @@ synthetic keystroke or autocorrected. Now every erase is verified first:
 - If neither verifies: never delete — append-only streaming, final to
   clipboard.
 Guarantee now: Parla cannot delete text it didn't write.
+- VIOLATED, then re-established on the atomic path (3359743, 2026-08-06): the
+  guarantee held for the streaming path but not for the raw→cleaned swap, which
+  posted one backspace per character over seconds against a single point-in-time
+  `canEraseTyped` check — a character the user physically typed during the burst
+  was eaten by the remaining backspaces. The swap now prefers one atomic AX value
+  write (whole field value, caret restored) with a read-back to confirm the app
+  accepted it: no window to type into. A field AX can read but not set, and an
+  app that accepts the write and ignores it, both fall back to the backspace
+  burst under the same single `canEraseTyped` check and still end in "✓ Pasted",
+  so the window remains open on that path.
+- The opaque-field select-back (⇧←×N + ⌘C) is gone with the clipboard (see
+  2026-07-10). Verification is AX-read-only: compare the characters immediately
+  before the cursor, and refuse rather than erase when they can't be read.
 
 ## 7. "Now it only writes to the clipboard" — ROOT CAUSE FOUND, PATCHED
 Reproduced from `/tmp/parla-stderr5.log`: live append worked, but finalization
@@ -67,12 +88,99 @@ depended on the Space keyDown carrying the fn modifier flag — and nothing in
 the UI documented the exit, so Esc (cancel, output discarded) looked like the
 only way out. Fix: any fn press during hands-free stops and transcribes, via
 the same flagsChanged detection push-to-talk uses; the stop-chord's Space is
-swallowed so it can't leak or restart a session. Tray menu and Hub now state
-the exit ("fn 🌐 stops").
+swallowed so it can't leak or restart a session. The Hub's shortcuts card now
+states the exit ("fn, Space, or Return finishes").
+
+## 2026-08-06 — dictation audit (branch fix/dictation-bugs)
+- Whisper hallucination markers were typed into the field and saved to history,
+  and a long dictation could lose a stretch out of the middle. `stripNonSpeech`
+  tested each space-separated token for being individually wrapped, so
+  "(upbeat music)" tokenised to `(upbeat` + `music)` and matched no marker;
+  separately `transcribe()` returned `""` both for a pass that found no speech
+  and for a whisper error or abort, so an errored head pass froze an empty
+  confirmed prefix and advanced the sample cut past audio nothing re-read. It
+  now returns nil for "did not complete", and no caller commits nil.
+- Mic trouble came out silent or fatal: unplugging AirPods mid-dictation left
+  the pill on "Listening…" over a frozen waveform while only pre-disconnect
+  audio was transcribed; choosing a specific input and switching back to
+  "System Default" kept recording from the old device for the rest of the run;
+  a Mac with no usable input killed the process. Nothing observed
+  `AVAudioEngineConfigurationChange` (now surfaced as "⚠️ Mic disconnected");
+  the AUHAL was only pointed at a device when an explicit UID resolved, and
+  once pinned it stops tracking the system default (it is now always set, with
+  nil resolved to the current default); and a 0 Hz input format makes
+  `installTap` raise an Objective-C exception, uncatchable from Swift, so the
+  format is checked first. `start()` also cleared the sample buffer outside the
+  lock the audio thread appends under.
+- After a refused dictation — password field, ⇧+fn with nothing selected, mic
+  failure — the next Space or Return anywhere vanished, or the next Esc fired a
+  phantom "✕ Cancelled". `handle()` commits `session = .push` at fn-down, before
+  the delegate can refuse, and nothing rolled it back; `reset()` now does, from
+  every refusal path. Same commit: ⌃⌥⌘V and ⌃⇧⌘V matched the paste-last chord,
+  which tested only cmd+ctrl, so the shortcut never reached the app it belonged
+  to and Parla typed the last transcript instead; and holding Return to stop
+  hands-free sent whatever draft was in the composer, because autorepeats were
+  passed through ahead of the state machine while macOS synthesises them
+  upstream of the tap whether or not the initiating keyDown was consumed.
+- On a long dictation the landed text visibly erased itself character by
+  character over seconds and retyped, and in web/Electron inputs "✓ Pasted"
+  could appear over a field where nothing landed. The raw→cleaned swap posted
+  one backspace per character with a 5ms sleep, on the main thread that also
+  runs the hotkey tap, and `LiveTyper.diff` is prefix-only — so dropping a
+  leading filler or capitalising the first letter, cleanup's two commonest
+  edits, set the erase count to the entire transcript, and nothing verified the
+  retype landed. It now prefers one atomic AX write with read-back, with the
+  keystroke burst kept only as the fallback (see §6).
+  `classifyFocus` also treated copy-success on `AXSelectedTextRange` as proof of
+  editability without validating the returned value, making it strictly more
+  permissive than the verifier it feeds.
+- Speech that read like an instruction was obeyed, and the model's answer was
+  typed in place of the words spoken. The transcript went to the cleanup model
+  bare, with nothing marking where data began — command mode already delimited
+  its selection; dictation now does the same, open marker only so a spoken
+  "</transcript>" cannot close the region early. Same commit: a one-line answer,
+  summary or refusal sails under an upper length ceiling, so a floor was added
+  (1/5, applied to transcripts of 80+ chars); the 15s request timeout is an idle
+  timer on a non-streaming completion, so it bounded total generation and cut
+  off cleanup on exactly the long dictations the streaming window exists to
+  support (now 60s); and transforms no longer run their result through the
+  wrapping-quote strip, which made "put this in quotes" retype the selection
+  unchanged under "✓ Pasted".
+- A dictation could fire its whole transcript as keystrokes into a web page or a
+  file list — where single letters are shortcuts — or withhold it from the field
+  the user was looking at. Focus was resolved at fn-down and acted on at fn-up
+  with only the secure case re-checked, but the tap sees no mouse events so
+  clicking never cancels a dictation, and hands-free exists precisely so the
+  user can move around while speaking; `finish()` now branches on focus read at
+  insert time. Same commit: a second dictation waited out the previous one's
+  cleanup network call, because the await sat on the same serialized chain as
+  whisper (detached — the generation guard and AX verification already make a
+  late swap safe); a fast re-press revived the previous dictation's stream loop
+  against the new dictation's freshly-cleared buffer, splicing its words into
+  the old confirmed prefix, because `stream()` gated on the shared `isRecording`
+  flag rather than the generation it started in; ⌃⌘V and the menu's Paste Last
+  were the only insertion path with no secure-field check; and a broken custom
+  `whisperModelPath` made the one-click download a no-op loop, since the
+  download installs to the default path that `loadModel` never re-read.
+- Pressing Esc during "Transcribing…" or "✓ · polishing…" hid the pill, which
+  reads as a successful cancel — it isn't, and the unwanted transcript typed
+  itself in moments later, followed by the cleaned swap. `dismiss()` settled any
+  visible non-idle pill; it now dismisses only a finished-state toast, which is
+  what its own comment always claimed it did.
+- Leave Parla running untouched for a long while — a screen lock, a sleep — and
+  fn stops working until the app is relaunched. The only path that re-enables a
+  disabled tap lives inside the tap callback, so reaching it requires macOS to
+  still be delivering events there, and nothing else in the process ever checked
+  the tap's state — so any disable that doesn't arrive as a delivered
+  notification is permanent. A 5s liveness poll now re-enables a disabled tap
+  and recreates one whose mach port has gone invalid, and Parla opts out of App
+  Nap: a throttled run loop makes the callback miss its deadline, which is how
+  macOS decides to disable a tap for being slow in the first place.
 
 ## 2026-07-10 changes
-- Clipboard removed entirely (supersedes the clipboard-fallback mentions in
-  issues 5–7 and the improvements below): Inserter types via CGEvent Unicode
+- Clipboard removed entirely (supersedes the clipboard HUD states and
+  clipboard-fallback mentions in issues 3 and 5–7 and in the improvements
+  below): Inserter types via CGEvent Unicode
   keystrokes; every unverifiable delivery goes to local history instead of the
   pasteboard; password fields are refused at fn-down with a toast. The only
   remaining pasteboard write is the Hub's explicit Copy button.
@@ -82,7 +190,7 @@ the exit ("fn 🌐 stops").
 - New shortcuts: fn+Space hands-free (latch while holding fn, fn stops, pop +
   "Hands-free…" pill on latch), Esc cancels dictation / dismisses the HUD
   toast, ⌃⌘V pastes the last transcript, ⌃⌘S opens the Scratchpad. All listed
-  in the Hub shortcuts card and tray menu.
+  in the Hub's shortcuts card.
 - Scratchpad: persistent plain-text window (Application
   Support/Parla/scratchpad.txt, debounced saves) — a safe landing place to
   dictate into now that the clipboard is gone.
@@ -97,12 +205,13 @@ the exit ("fn 🌐 stops").
 - Safety guards: password fields go on-device-transcript-to-clipboard-only (never pasted, never sent to cleanup); terminal apps get newline runs flattened so multi-line text can't execute per line; sub-0.4s or silent audio is skipped instead of transcribed (whisper hallucination guard).
 - Failure visibility: broken settings.json is surfaced in the menu instead of being silently reset; menu shows live Mic/Accessibility permission status with click-to-fix; missing model gets a one-click base.en download with progress in the status item.
 - Local dictation history: last 50 dictations (raw + cleaned + app) saved to history.json; menu gains Paste Last Dictation, a Recent submenu, and Clear History.
-- Papercuts: HUD now shows on the screen you're actually dictating into; Launch at Login toggle; `liveStreamingEnabled` setting to disable mid-stream retyping; opt-in `restoreClipboard` to put the prior clipboard back after a verified in-field landing.
+- Papercuts: HUD now shows on the screen you're actually dictating into; Launch at Login toggle; `liveStreamingEnabled` setting to disable mid-stream retyping.
 - Command mode: hold ⇧+fn with text selected, speak an edit instruction, release — the selection is transformed and pasted over itself, with a hard failure (nothing pasted) on any error and a clipboard fallback if the selection changed underneath it.
 
 ## Next steps
-1. Real-world testing of the instant-finalize + swap flow across more apps (Electron chat apps, terminals, browser text areas) — confirm the raw-then-cleaned handoff feels instant and the swap lands correctly, not just in logs.
+1. Re-test the instant-finalize + swap flow across more apps (Electron chat apps, terminals, browser text areas). This is no longer a confirmation of shipped behaviour: the swap was rewritten on 2026-08-06 into a single AX value write with read-back, so the question is now which apps accept that write, which silently ignore it and fall back to keystrokes, and whether the raw-then-cleaned handoff still feels instant.
 2. Exercise command mode (⇧+fn) in daily use: verify transform quality, the selection-changed history fallback, and that failures never leak the spoken instruction.
 3. Verify the failure-visibility paths for real: a genuinely corrupt settings.json, a revoked permission, and a from-scratch model download.
 4. Route no-focus dictations into the Scratchpad instead of history-only — completes the clipboard-removal story.
 5. Configurable shortcuts (recorder UI + persistence); everything is hard-coded today and the Hub says so.
+6. Dogfood the 2026-08-07 audit on a real build. The eight fixes are runtime behaviour against WindowServer, Core Audio and other apps' AX trees, and nothing in the test suite covers them: tap survival across a screen lock, a mic disconnected mid-dictation, the atomic swap in Electron/web fields, Esc during "Transcribing…", and whether every runtime refusal path actually calls `hotkey.reset()` (the state machine's rollback itself is unit-tested).

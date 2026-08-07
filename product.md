@@ -37,7 +37,8 @@ sentence you meant.
 - **Command mode** — transform highlighted text by voice: translate, rewrite,
   polish, inline questions.
 - **Transforms** — rewrite selected text anywhere; built-in + custom.
-- **Scratchpad** — floating notes with history (later).
+- **Scratchpad** — plain-text notes window (⌃⌘S), saved locally;
+  a safe place to dictate into when nothing else is focused.
 - **Insights** — words dictated, WPM, cleaned-up words, app breakdown (later).
 - **Team features** — shared dictionary/snippets, central billing/admin (later).
 - **Enterprise** — SSO/SAML, SCIM, enforced privacy policies (much later).
@@ -81,23 +82,36 @@ Parla inverts this:
 
 - **ASR always on-device** — audio never leaves the machine. Not a mode; the
   architecture.
-- **Cleanup LLM**: cloud call in v1 (transcript only, clearly disclosed),
-  optional fully-local model later = true zero-network mode.
-- **Zero retention by default** — history/sync is the opt-in, not privacy.
+- **Cleanup LLM**: a cloud call by default (transcript, selection, dictionary,
+  snippets and the frontmost app's name — never audio), or point it at a local
+  OpenAI-compatible server (Ollama) for true zero-network mode.
+- **No text leaves the machine but that one call** — no sync, no server, no
+  account. The only other network traffic is a once-a-day GitHub release check
+  and the one-click whisper model download; neither carries your text. The
+  local history log (last 50 dictations) is on by default and can be turned
+  off; secure-field and cancelled dictations are never recorded either way.
 - TLS for any network call; local state stays local.
 
 ## System-wide text insertion (desktop mechanics)
 
-Hybrid of three standard OS mechanisms:
+Three standard OS mechanisms exist. Parla uses two of them:
 
-1. **Simulated keystrokes** (universal fallback) — macOS
+1. **Simulated keystrokes** (how Parla types) — macOS
    `CGEventCreateKeyboardEvent`/`CGEventKeyboardSetUnicodeString`; Windows
-   `SendInput`. Works everywhere; char-by-char, layout-sensitive.
-2. **Paste injection** (fast path) — set clipboard → synthetic Cmd/Ctrl+V →
-   restore clipboard. Instant; save/restore is racy.
-3. **Accessibility APIs** (direct insertion) — macOS AX API (the Privacy &
-   Security → Accessibility grant; also used to read focused field/selected
-   text); Windows UI Automation. Cleanest; not all apps expose fields.
+   `SendInput`. Works everywhere; char-by-char, layout-sensitive. Every
+   transcript lands this way.
+2. **Paste injection** (rejected) — set clipboard → synthetic Cmd/Ctrl+V →
+   restore clipboard. Instant, but save/restore is racy and it commandeers the
+   user's clipboard. Parla never reads or writes the pasteboard while
+   dictating; the one clipboard write left in the app is the user's own Copy
+   button in the history view.
+3. **Accessibility APIs** (macOS AX API — the Privacy & Security →
+   Accessibility grant; Windows UI Automation) — Parla reads focus, the
+   focused field's text and cursor, and the current selection through AX, and
+   uses one atomic AX value write to swap the raw transcript for the polished
+   one (falling back to backspaces + retyping when the app ignores the write).
+   Nothing is erased unless AX first proves the text at the cursor is Parla's
+   own. Cleanest; not all apps expose fields.
 
 The macOS Accessibility permission enables both observing global focus and
 injecting into other apps. Global hotkey rides the same event-tap capability.

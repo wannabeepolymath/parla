@@ -1,5 +1,17 @@
 # Multi-Provider Cleanup Implementation Plan
 
+> **EXECUTED — kept as a record.** This plan shipped — tolerant `Settings`
+> decoding, `CleanupSettings`, `CleanupProviding`, `OpenAICompatClient`,
+> `CleanupSanitizer`, `makeCleanupClient` — but the checkboxes below were never
+> ticked. Three details were superseded: the default `cleanupModel` is
+> `claude-sonnet-5`, not the `claude-haiku-4-5` the Task 1 test snippet asserts
+> (`Sources/ParlaCore/Settings.swift:28`); an unknown `cleanup.provider` throws
+> "unknown cleanup.provider" rather than being treated as anthropic
+> (`Sources/ParlaCore/CleanupFactory.swift:91-93`); and for openai-compatible
+> only `baseURL` is required — a missing `cleanup.model` makes the client ask
+> the server for its first model (`CleanupFactory.swift:76-81`). Current
+> behavior is documented in README, "Cleanup providers".
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cleanup step works against any OpenAI-compatible provider (Groq, Gemini, OpenAI, Ollama) plus the existing Anthropic client; existing settings.json files keep working.
