@@ -23,7 +23,7 @@ public enum Inserter {
 
     /// Split UTF-16 units into chunks of at most `max`, never ending a chunk on an
     /// unpaired high surrogate (which would corrupt emoji/supplementary characters).
-    static func chunkUTF16(_ units: [UInt16], max: Int = 20) -> [[UInt16]] {
+    static func chunkUTF16(_ units: [UInt16], max: Int = 200) -> [[UInt16]] {
         var chunks: [[UInt16]] = []
         var i = 0
         while i < units.count {
@@ -38,7 +38,14 @@ public enum Inserter {
     }
 
     /// Type the text as Unicode keystrokes (layout-independent).
-    /// Chunked because CGEventKeyboardSetUnicodeString caps around 20 UTF-16 units.
+    ///
+    /// Chunked because CGEventKeyboardSetUnicodeString truncates long strings.
+    /// 200 units, not the 20 this used to use: terminals frame each keyDown/keyUp
+    /// burst as a separate paste, so a 600-char transcript arrived as 30 separate
+    /// "[Pasted text #N]" blocks and blocked the main actor for ~150ms. FluidVoice
+    /// ships 200 against Slack/Discord/VS Code, so the practical ceiling is far
+    /// above 20. The 1ms sleep stays rather than going to zero — openless and
+    /// OpenWhispr both document literal 0ms dropping characters in Chromium apps.
     public static func typeUnicode(_ text: String) {
         let src = CGEventSource(stateID: .combinedSessionState)
         for chunk in chunkUTF16(Array(text.utf16)) {
@@ -54,7 +61,7 @@ public enum Inserter {
                 post(down)
                 post(up)
             }
-            usleep(5_000)
+            usleep(1_000)
         }
     }
 

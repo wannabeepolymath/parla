@@ -58,7 +58,7 @@ are never parallelised.
 | 5 | Fence transcript + injection guards in cleanup prompt | `ParlaCore/Cleanup.swift` | S | low | **done** | wave 1 |
 | 6 | Strip whisper markers per segment | `ParlaCore/Transcriber.swift` + tests | S | low | **done** | wave 1 |
 | 7 | Delete `AXEnhancedUserInterface` write | `ParlaCore/Inserter.swift:97` | S | low | **done** | wave 1 |
-| 8 | Chunk 20→200 units, cut inter-chunk sleep | `ParlaCore/Inserter.swift` | S | **med** | todo | ships alone |
+| 8 | Chunk 20→200 units, cut inter-chunk sleep | `ParlaCore/Inserter.swift` | S | **med** | **done** | ⚠ smoke test pending |
 
 ### Wave 1 notes
 
@@ -77,6 +77,21 @@ are never parallelised.
   `OpenAICompatTests` asserted the pre-fence wire shape (now asserts against
   `PromptBuilder.user`), and the new resampler test asserted an exact output
   length on a priming buffer.
+
+### ⚠ Outstanding manual verification — Tier 0 #8
+
+Chunk size is now 200 UTF-16 units (was 20) and the inter-chunk sleep is 1ms
+(was 5ms). `typeBackspaces` was deliberately left at 5ms — erasing is the
+dangerous path and `ISSUES.md` §6 is about erase safety.
+
+Unit tests cover the chunking property and the 600-char → 3-bursts regression.
+They cannot cover how a real app frames the bursts. **Someone has to dictate a
+long multi-line transcript into Slack, Ghostty and VS Code and confirm no
+dropped characters and no `[Pasted text #N]` fan-out.** This is the one Tier 0
+change with a real regression surface (`ISSUES.md` §5–7 is a history of
+insertion bugs in exactly these apps), and it is the only automated-test gap in
+Tier 0. Revert to `max: 20` / `usleep(5_000)` if it misbehaves — the change is
+two constants.
 
 ### Not yet done from Wave 1's items
 

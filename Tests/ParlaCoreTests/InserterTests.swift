@@ -2,10 +2,10 @@ import XCTest
 @testable import ParlaCore
 
 final class InserterTests: XCTestCase {
-    func assertValidChunks(_ chunks: [[UInt16]], reproduce units: [UInt16]) {
+    func assertValidChunks(_ chunks: [[UInt16]], reproduce units: [UInt16], max: Int = 200) {
         for chunk in chunks {
             XCTAssertFalse(chunk.isEmpty)
-            XCTAssertLessThanOrEqual(chunk.count, 20)
+            XCTAssertLessThanOrEqual(chunk.count, max)
             // No chunk ends with a lone high surrogate...
             if let last = chunk.last {
                 XCTAssertFalse((0xD800...0xDBFF).contains(last), "chunk ends with unpaired high surrogate")
@@ -18,27 +18,39 @@ final class InserterTests: XCTestCase {
         XCTAssertEqual(chunks.flatMap { $0 }, units)
     }
 
+    // Boundary behaviour is tested against an explicit `max` so these keep
+    // testing the property rather than whatever the current default happens
+    // to be — the default moved from 20 to 200 once and can move again.
     func testASCIIChunksExactlyAtMax() {
         let units = Array(String(repeating: "a", count: 45).utf16)
-        let chunks = Inserter.chunkUTF16(units)
+        let chunks = Inserter.chunkUTF16(units, max: 20)
         XCTAssertEqual(chunks.map(\.count), [20, 20, 5])
-        assertValidChunks(chunks, reproduce: units)
+        assertValidChunks(chunks, reproduce: units, max: 20)
     }
 
     func testSurrogatePairStraddlingBoundaryNotSplit() {
         // 19 ASCII units then an emoji (2 UTF-16 units) — the pair would straddle index 20.
         let text = String(repeating: "x", count: 19) + "😀😀😀"
         let units = Array(text.utf16)
-        let chunks = Inserter.chunkUTF16(units)
-        assertValidChunks(chunks, reproduce: units)
+        let chunks = Inserter.chunkUTF16(units, max: 20)
+        assertValidChunks(chunks, reproduce: units, max: 20)
         // First chunk must stop at 19 to keep the pair intact.
         XCTAssertEqual(chunks[0].count, 19)
     }
 
+    /// The regression this size exists to prevent: terminals frame each burst as
+    /// its own paste, so a typical transcript must not fan out into dozens of them.
+    func testTypicalTranscriptIsFewBursts() {
+        let units = Array(String(repeating: "a", count: 600).utf16)
+        XCTAssertEqual(Inserter.chunkUTF16(units).count, 3)
+    }
+
     func testAllEmoji() {
         let units = Array(String(repeating: "😀", count: 25).utf16) // 50 units
-        let chunks = Inserter.chunkUTF16(units)
-        assertValidChunks(chunks, reproduce: units)
+        // max 20 so the pairs actually straddle boundaries — at the default 200
+        // this is a single chunk and tests nothing.
+        let chunks = Inserter.chunkUTF16(units, max: 20)
+        assertValidChunks(chunks, reproduce: units, max: 20)
     }
 
     func testSecureEventInputRefusesBeforeAnyAXLookup() {
