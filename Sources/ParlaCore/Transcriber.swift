@@ -15,10 +15,12 @@ public final class WhisperTranscriber {
     }
 
     public init(modelPath: String) throws {
-        // Metal GPU on by default — the v1.9.1 xcframework embeds the compiled Metal
-        // library in the binary, so init no longer hits the old broken resource bundle.
-        var params = whisper_context_default_params()
-        params.flash_attn = true  // Metal flash attention (xcframework is v1.9.1) — off by default.
+        // Metal GPU *and* flash attention are already on: v1.9.1's
+        // whisper_context_default_params() returns use_gpu=1, flash_attn=1, and the
+        // xcframework embeds the compiled Metal library so init no longer hits the old
+        // broken resource bundle. Nothing to override — an explicit flash_attn = true
+        // here was a no-op carrying a comment that claimed the opposite.
+        let params = whisper_context_default_params()
         guard let ctx = whisper_init_from_file_with_params(modelPath, params) else {
             throw TranscriberError(description: "failed to load whisper model at \(modelPath)")
         }
@@ -57,14 +59,31 @@ public final class WhisperTranscriber {
 
         let result: Int32 = withExtendedLifetime(abortBox) {
             samples.withUnsafeBufferPointer { buf in
-                if let prompt = initialPrompt, !prompt.isEmpty {
-                    // initial_prompt must stay alive through whisper_full → nested withCString.
-                    return prompt.withCString { c in
-                        params.initial_prompt = c
-                        return whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+                // Pin the decode to English instead of inheriting whisper's compiled default
+                // (which happens to be "en" today — don't let a model swap decide it). With an
+                // unpinned decoder, the English initial_prompt below (dictionary + cross-cut
+                // context) drags the decoder into *translating* non-English speech: voxtype #233
+                // logged "auto-detected: pt (p=1.00)" and typed English anyway.
+                //
+                // The other half of that fix — suppress the English prompt when the speaker
+                // isn't English — is deliberately absent: whisper only reports the language
+                // after the fact (whisper_full_lang_id), and learning it up front costs a whole
+                // extra encode (whisper_pcm_to_mel + whisper_lang_auto_detect), more than the
+                // prompt is worth. If Parla ever unpins language, do it as a conditional
+                // re-decode instead: check whisper_full_lang_id, and only when it isn't English
+                // run the pass again promptless — then only non-English speakers pay.
+                // language is borrowed for the whisper_full call, so it needs withCString too.
+                return "en".withCString { lang -> Int32 in
+                    params.language = lang
+                    if let prompt = initialPrompt, !prompt.isEmpty {
+                        // initial_prompt must stay alive through whisper_full → nested withCString.
+                        return prompt.withCString { c in
+                            params.initial_prompt = c
+                            return whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
+                        }
                     }
+                    return whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
                 }
-                return whisper_full(ctx, params, buf.baseAddress, Int32(buf.count))
             }
         }
         guard result == 0 else { return "" }  // non-zero on error or cooperative abort.

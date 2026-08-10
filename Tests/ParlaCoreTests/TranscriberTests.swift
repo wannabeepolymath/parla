@@ -10,6 +10,9 @@ final class TranscriberTests: XCTestCase {
         // 1s of silence: must not crash; output may be empty or hallucinated punctuation.
         let out = t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: "Kubernetes")
         XCTAssertNotNil(out)
+        // Both prompt branches run under the language withCString, and only the prompted
+        // one is covered above — a nil prompt takes the other path to whisper_full.
+        XCTAssertNotNil(t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil))
     }
 
     func testMissingModelThrows() {

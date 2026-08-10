@@ -69,7 +69,21 @@ public final class SettingsStore {
     public let url: URL
     /// Set by load() when settings.json exists but failed to load. nil means
     /// either no file (fine, defaults) or the last load succeeded.
-    public private(set) var lastError: String?
+    public var lastError: String? { lock.withLock { _lastError } }
+    private var _lastError: String?
+
+    /// Identity of the file the cache was built from. Both fields, not just
+    /// mtime: a rewrite inside the same second keeps the timestamp but almost
+    /// always changes the length. Missing file is (nil, nil), which is a
+    /// distinct value from any real file, so the file appearing invalidates.
+    private struct Stamp: Equatable {
+        let mtime: Date?
+        let size: Int?
+    }
+    private var cached: (stamp: Stamp, settings: Settings, error: String?)?
+    /// load() is called from the fn-down handler on main and from transform()
+    /// off-main. Uncontended, and never from the audio thread.
+    private let lock = NSLock()
 
     public init(url: URL? = nil) {
         self.url = url ?? FileManager.default
@@ -77,15 +91,36 @@ public final class SettingsStore {
             .appendingPathComponent("Parla/settings.json")
     }
 
+    /// Decoded settings, re-read only when the file changed. This is on the
+    /// fn-down keypress path, so the steady state is one stat() rather than a
+    /// read plus a JSON decode.
     public func load() -> Settings {
-        lastError = nil
-        guard FileManager.default.fileExists(atPath: url.path) else { return Settings() } // no file: fine, defaults
+        let stamp = currentStamp()
+        return lock.withLock {
+            if let c = cached, c.stamp == stamp {
+                _lastError = c.error
+                return c.settings
+            }
+            let (settings, error) = readFromDisk()
+            _lastError = error
+            cached = (stamp, settings, error)
+            return settings
+        }
+    }
+
+    private func currentStamp() -> Stamp {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return Stamp(mtime: attrs?[.modificationDate] as? Date, size: attrs?[.size] as? Int)
+    }
+
+    private func readFromDisk() -> (Settings, String?) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return (Settings(), nil) // no file: fine, defaults
+        }
         do {
-            let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(Settings.self, from: data)
+            return (try JSONDecoder().decode(Settings.self, from: Data(contentsOf: url)), nil)
         } catch {
-            lastError = Self.hint(error)
-            return Settings()
+            return (Settings(), Self.hint(error))
         }
     }
 
@@ -103,5 +138,8 @@ public final class SettingsStore {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         try enc.encode(settings).write(to: url, options: .atomic)
+        // Don't trust the stamp to notice our own write — an atomic replace can
+        // land in the same second at the same length as what it replaced.
+        lock.withLock { cached = nil }
     }
 }

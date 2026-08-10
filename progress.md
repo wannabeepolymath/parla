@@ -15,12 +15,12 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 
 | Tier | Items | done | wip | todo | skipped |
 |---|---|---|---|---|---|
-| 0 | 8 | 7 | 0 | 1 | 0 |
-| 1 | 14 | 0 | 0 | 14 | 0 |
+| 0 | 8 | 8 | 0 | 0 | 0 |
+| 1 | 14 | 6 | 0 | 8 | 0 |
 | 2 | 7 | 0 | 0 | 6 | 1 |
-| **all** | **29** | **7** | **0** | **21** | **1** |
+| **all** | **29** | **14** | **0** | **14** | **1** |
 
-Suite: **173 tests, 0 failures.** Build clean.
+Suite: **190 tests, 0 failures.** Build clean.
 
 ---
 
@@ -109,18 +109,18 @@ is a history of insertion regressions in exactly the apps it touches.
 
 | # | Item | Files | Effort | Risk | Status | Commit |
 |---|---|---|---|---|---|---|
-| 1 | Env-gated latency trace | `Parla/main.swift`, `ParlaCore/AudioRecorder.swift` | S | none | todo | |
-| 2 | Get `Settings` off the keypress path | `Parla/main.swift` | S | low | todo | |
-| 3 | Set `params.language = "en"`; drop stale `flash_attn` | `ParlaCore/Transcriber.swift` | S | low | todo | |
+| 1 | Env-gated latency trace | `ParlaCore/Trace.swift` (new), `main.swift`, `AudioRecorder.swift` | S | none | **done** | wave 2 |
+| 2 | Get `Settings` off the keypress path | `ParlaCore/Settings.swift`, `main.swift` | S | low | **done** | wave 2 |
+| 3 | Set `params.language = "en"`; drop stale `flash_attn` | `ParlaCore/Transcriber.swift` | S | low | **done** | wave 2 |
 | 4 | Model catalog + hardened download | `ParlaCore/Transcriber.swift`, `Parla/main.swift`, Hub | M | med | todo | |
 | 5 | WER harness (replaces exact-match) | `ParlaCore/Eval.swift`, `parla-eval/`, `eval/cases/` | M | low | todo | |
-| 6 | CI — `swift build` + `swift test` | `.github/workflows/` | S | none | todo | |
+| 6 | CI — `swift build` + `swift test` | `.github/workflows/ci.yml` | S | none | **done** | wave 2 |
 | 7 | Mic prepare/start split + pre-roll ring, BT excluded | `ParlaCore/AudioRecorder.swift` | M | med | todo | |
 | 8 | Extract `DictationSession` state machine | `ParlaCore/DictationSession.swift`, `Parla/main.swift` | M-L | med | todo | |
-| 9 | Process + capture lifecycle safety | `Parla/main.swift`, `ParlaCore/AudioRecorder.swift` | M | low | todo | |
+| 9 | Process + capture lifecycle safety | `Parla/main.swift`, `ParlaCore/AudioRecorder.swift` | M | low | **done** | wave 2 |
 | 10 | `AppCategory` enum replacing free-text app sentence | `ParlaCore/Cleanup.swift`, `TextRules.swift` | M | low | todo | |
 | 11 | Deterministic snippets | `ParlaCore/Pipeline.swift`, `Cleanup.swift` | M | low | todo | |
-| 12 | Sample frontmost app at finalize, not fn-down | `Parla/main.swift` | S | low | todo | |
+| 12 | Sample frontmost app at finalize, not fn-down | `Parla/main.swift` | S | low | **done** | wave 2 |
 | 13 | Idle model-unload policy | `ParlaCore/Transcriber.swift` | M | med | todo | |
 | 14 | Default `cleanupModel` to Haiku 4.5 | `ParlaCore/Settings.swift` | S | low | todo | |
 
@@ -153,4 +153,6 @@ nothing. Revisit after #2 has real numbers.
 | 2026-08-11 | Audit complete — 64 agents, 0 errors. 13 docs written to `docs/research/`. |
 | 2026-08-11 | All 8 Tier 0 claims verified against source; every `file:line` reference accurate. |
 | 2026-08-11 | This tracker created. Branch `feat/audit-implementation`, docs committed (8e4f58e). |
-| 2026-08-11 | Wave 1: Tier 0 #1–#7 landed. 6 agents on disjoint files, 0 conflicts. Build clean, 173/173 tests pass. |
+| 2026-08-11 | Wave 1: Tier 0 #1–#7 landed. 6 agents on disjoint files, 0 conflicts. 173/173 pass. |
+| 2026-08-11 | Tier 0 #8 landed alone (chunk 20→200). 174/174 pass. Manual smoke test still outstanding. |
+| 2026-08-11 | Wave 2: Tier 1 #1, #2, #3, #6, #9, #12 landed. 190/190 pass. |

@@ -121,4 +121,55 @@ final class SettingsTests: XCTestCase {
         try store.save(s)
         XCTAssertEqual(store.load(), s)
     }
+
+    // load() is on the fn-down keypress path, so it caches. These cover the
+    // three ways that cache has to stay honest.
+
+    func testLoadPicksUpAnExternalEdit() throws {
+        let store = tempStore()
+        var s = Settings()
+        s.dictionary = ["Kubernetes"]
+        try store.save(s)
+        XCTAssertEqual(store.load().dictionary, ["Kubernetes"])
+
+        // Same length, so a size-only check would miss it; the editor case.
+        try Data(#"{"dictionary":["Kubernetes!"]}"#.utf8).write(to: store.url)
+        XCTAssertEqual(store.load().dictionary, ["Kubernetes!"])
+    }
+
+    func testSaveInvalidatesEvenWhenStampCouldNotChange() throws {
+        let store = tempStore()
+        var s = Settings()
+        s.dictionary = ["aaaa"]
+        try store.save(s)
+        _ = store.load() // prime the cache
+
+        // Identical length, written immediately: mtime and size may both be
+        // unchanged, so save() must drop the cache itself.
+        s.dictionary = ["bbbb"]
+        try store.save(s)
+        XCTAssertEqual(store.load().dictionary, ["bbbb"])
+    }
+
+    func testLastErrorSurvivesACacheHit() throws {
+        let store = tempStore()
+        try FileManager.default.createDirectory(
+            at: store.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{ not json".utf8).write(to: store.url)
+        XCTAssertEqual(store.load(), Settings())
+        XCTAssertNotNil(store.lastError)
+        // Second call is a cache hit — the ⚠️ menu state must not clear itself.
+        XCTAssertEqual(store.load(), Settings())
+        XCTAssertNotNil(store.lastError)
+    }
+
+    func testAppearingFileInvalidatesTheNoFileCache() throws {
+        let store = tempStore()
+        try? FileManager.default.removeItem(at: store.url)
+        XCTAssertEqual(store.load(), Settings()) // caches "no file"
+        var s = Settings()
+        s.dictionary = ["later"]
+        try store.save(s)
+        XCTAssertEqual(store.load().dictionary, ["later"])
+    }
 }

@@ -7,9 +7,19 @@ public final class AudioRecorder {
         commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
         channels: 1, interleaved: false)!
 
+    /// Why a capture ended by itself, rather than by the user releasing fn.
+    public enum EndReason: Equatable { case sampleLimit, deviceLost }
+
+    /// Hard ceiling on one capture: 10 minutes at 16 kHz (~38 MB of Float).
+    /// Also the ceiling on a forgotten hands-free latch, which is otherwise
+    /// indefinite sustained Metal load — the app's only thermal risk.
+    public static let maxSamples = 10 * 60 * 16_000
+
     private let engine = AVAudioEngine()
     private var samples: [Float] = []
     private var failedBuffers = 0
+    private var ended: EndReason?
+    private var configObserver: NSObjectProtocol?
     private let lock = NSLock()
 
     /// Owned by the audio thread while the engine runs, by the caller either
@@ -19,6 +29,10 @@ public final class AudioRecorder {
     /// Called with each converted buffer's RMS level. Fires on the audio
     /// thread — callers must hop to main before touching UI.
     public var onLevel: ((Float) -> Void)?
+
+    /// Called once when the capture ends on its own (see endCapture). Fires off
+    /// the main thread; the owner is expected to run its ordinary stop path.
+    public var onEnd: ((EndReason) -> Void)?
 
     /// Core Audio UID of the mic to record from. nil (or an unresolvable UID)
     /// ⇒ system default input. Applied at each start() while the engine is idle.
@@ -104,6 +118,33 @@ public final class AudioRecorder {
         return device
     }
 
+    /// Transport label of the device a start() would open: the selected one, or
+    /// the system default when no UID is set. Trace-only (see Trace.transportName).
+    private static func transport(of device: AudioDeviceID?) -> String {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard let id = device ?? defaultInputDevice() else { return "unknown" }
+        var raw: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &raw) == noErr else { return "unknown" }
+        return Trace.transportName(raw)
+    }
+
+    private static func defaultInputDevice() -> AudioDeviceID? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var id = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
+            id != kAudioObjectUnknown else { return nil }
+        return id
+    }
+
     /// Root-mean-square amplitude of samples; 0 for empty input.
     public static func rms(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
@@ -128,9 +169,34 @@ public final class AudioRecorder {
         return failedBuffers
     }
 
+    /// Mark the capture ended, so the tap stops accumulating and `onEnd` fires
+    /// once. Deliberately does NOT tear the engine down: stop() stays the single
+    /// place that finalizes, so a mic that dies mid-dictation produces the same
+    /// transcript as a normal fn-up instead of silently producing nothing.
+    public func endCapture(_ reason: EndReason) {
+        lock.lock()
+        guard ended == nil else { lock.unlock(); return }
+        ended = reason
+        lock.unlock()
+        onEnd?(reason)
+    }
+
+    /// Tap-side accumulate. nil chunk = the converter dropped that buffer.
+    /// Once the capture has ended, further buffers are discarded — the cap is a
+    /// ceiling on memory, so it must hold until the owner's stop() lands.
+    func append(_ chunk: [Float]?) {
+        lock.lock()
+        guard ended == nil else { lock.unlock(); return }
+        if let chunk { samples.append(contentsOf: chunk) } else { failedBuffers += 1 }
+        let hitCap = samples.count >= AudioRecorder.maxSamples
+        lock.unlock()
+        if hitCap { endCapture(.sampleLimit) }
+    }
+
     public func start() throws {
         samples.removeAll()
         failedBuffers = 0
+        ended = nil
         // Previous recording ended with an endOfStream flush; reset so the next
         // one starts on a clean filter without rebuilding on the audio thread.
         resampler.reset()
@@ -139,24 +205,42 @@ public final class AudioRecorder {
         // format. Engine is idle here (start is only called after stop). An
         // unresolvable UID leaves the unit on the system default. ponytail: set
         // per-start so unplugging the selected mic self-heals to default.
-        if let uid = inputDeviceUID, let device = AudioRecorder.deviceID(forUID: uid),
-           let unit = input.audioUnit {
+        let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
+        if let device, let unit = input.audioUnit {
             var dev = device
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
                                  kAudioUnitScope_Global, 0, &dev,
                                  UInt32(MemoryLayout<AudioDeviceID>.size))
         }
+        // Behind the trace gate so a normal start pays no extra HAL queries.
+        if Trace.enabled { Trace.setTransport(AudioRecorder.transport(of: device)) }
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
             guard let self else { return }
+            Trace.mark(.firstPCM) // disabled: one bool test, no alloc, no lock
             let chunk = self.resampler.convert(buf, to: AudioRecorder.targetFormat)
-            self.lock.lock()
-            if let chunk { self.samples.append(contentsOf: chunk) } else { self.failedBuffers += 1 }
-            self.lock.unlock()
+            self.append(chunk)
             self.onLevel?(chunk.map(AudioRecorder.rms) ?? 0)
         }
         do {
             try engine.start()
+            Trace.mark(.recorderStartReturned)
+            // A mic that goes away mid-dictation (unplugged, seized by another
+            // app) leaves the tap silent forever. End the capture with a reason
+            // so stop() still finalizes what was already spoken.
+            // ponytail: only a lost input format ends it — a benign
+            // reconfiguration (default device swapped, rate changed) keeps a
+            // valid format. Follow-up: that swap leaves the tap on the old
+            // device, which needs a restart, not an end.
+            if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+            configObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+            ) { [weak self] _ in
+                guard let self else { return }
+                let format = self.engine.inputNode.inputFormat(forBus: 0)
+                guard format.sampleRate == 0 || format.channelCount == 0 else { return }
+                self.endCapture(.deviceLost)
+            }
         } catch {
             // A failed start must leave the recorder restartable.
             input.removeTap(onBus: 0)
@@ -174,6 +258,8 @@ public final class AudioRecorder {
     }
 
     public func stop() -> [Float] {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         // The tap is gone, so the resampler is ours again: take the tail it has

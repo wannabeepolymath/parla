@@ -1,0 +1,31 @@
+name: CI
+
+on: [push, pull_request]
+
+# A new push to the same ref makes the in-flight run's result irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    # Pinned, not macos-latest: this is an AppKit app against a vendored macOS-only
+    # xcframework, and a silent runner-image bump is exactly the kind of break that
+    # should be a deliberate commit.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Package.resolved does not exist — Parla has no SwiftPM dependencies — so the
+      # key falls back to Package.swift, which is what actually changes the build graph.
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - run: swift build
+
+      # No whisper model is committed (models/ is gitignored); TranscriberTests skips
+      # the one test that needs one. Nothing here downloads 148 MB per run.
+      - run: swift test
