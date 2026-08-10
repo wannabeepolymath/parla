@@ -686,7 +686,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the erase+append typing is additionally gated on liveTyping. Runs on
     /// the processTask chain (serialized with the final pass). Once the tail
     /// exceeds ~15s a confirmed prefix is frozen at a quiet spot (see
-    /// StreamWindow) so each pass stays O(tail), not O(n²).
+    /// StreamWindow) so each pass stays O(tail), not O(n²). In shadow mode the
+    /// tail pass itself is skipped until the buffer crosses that threshold —
+    /// nothing reads its output before the first cut.
     ///
     /// Passes abort cooperatively at fn-up (shouldAbort) and return "" — every
     /// transcribe here is followed by an isRecording recheck that BREAKS before
@@ -723,6 +725,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 tail = Array(tail[rel...])
                 NSLog("Parla stream: cut at %.1fs, confirmed %d chars",
                       Double(cut) / 16_000, confirmed.count)
+            }
+            // Below the freeze threshold nothing consumes the tail pass: `confirmed`
+            // only ever grows in the head cut above, and the typing block is gated on
+            // liveTyping. Running it anyway burns GPU the final pass is waiting for,
+            // so short dictations (nearly all of them) skip straight to finish().
+            // Live typing is the one real consumer — if it's ever re-enabled it needs
+            // a hypothesis from the first second, not from 15s in.
+            guard self.liveTyping || snap.count > StreamWindow.threshold else {
+                await pauseBetweenPasses()
+                continue
             }
             let tailText = transcriber.transcribe(
                 tail,

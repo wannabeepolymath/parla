@@ -92,8 +92,12 @@ the modifier (fn+A opens the Dock), so mid-speech typing is disabled. Instead, P
 transcribes in the background as you talk — dictations longer than ~15s freeze
 a confirmed prefix at the nearest quiet moment so each pass only
 re-transcribes the recent tail — and on release only the last few seconds of
-unheard audio need a whisper pass. Release latency is therefore independent of
-how long you dictated; an in-flight pass is aborted the moment you let go.
+unheard audio need a whisper pass. Past that threshold release latency is
+therefore constant: it's set by the length of the live tail, not by how long
+you dictated. Below it nothing has been frozen yet, so the pass on release
+transcribes the whole recording and latency still grows with the length of the
+dictation — up to ~15s of audio, which is a few hundred ms of whisper. An
+in-flight pass is aborted the moment you let go.
 
 On release, the whole raw transcript is typed into the focused field as
 synthetic keystrokes (HUD: "Transcribing…", then "✓ · polishing…"); with no
@@ -193,3 +197,15 @@ The `cleanup.model`/`cleanup.apiKeyEnvVar`/`cleanup.apiKey` fields apply to `ope
 swift build
 swift test
 ```
+
+## License
+
+The app — everything outside `Sources/ParlaCore/` — is **AGPL-3.0-or-later**
+(`LICENSE`). **`Sources/ParlaCore/` is MIT** (`Sources/ParlaCore/LICENSE`).
+
+The split is deliberate: copyleft on the app is what stops it being
+repackaged as a closed product, but ParlaCore is the reusable half — stream
+windowing, the grapheme-diff typer, the text rules, the AX-verified inserter —
+with no AppKit dependency and nothing product-specific in it, so it carries no
+obligation for anyone who wants those primitives. The vendored whisper.cpp
+xcframework is MIT and imposes nothing upward.

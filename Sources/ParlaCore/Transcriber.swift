@@ -80,14 +80,23 @@ public final class WhisperTranscriber {
 
     /// Whisper emits bracketed markers on non-speech audio — "[BLANK_AUDIO]",
     /// "[MUSIC]", "(silence)", "*sigh*" — which must never be typed or pasted.
-    /// A transcript that is nothing but such markers becomes "".
+    /// Dropped token by token, not all-or-nothing: whisper mixes a marker into a
+    /// real sentence ("Hello there. [BLANK_AUDIO]") and the all-or-nothing form
+    /// typed the brackets straight into the user's document. A transcript that is
+    /// nothing but markers still becomes "".
     public static func stripNonSpeech(_ text: String) -> String {
         let wrapped = ["[": "]", "(": ")", "*": "*"]
         let isMarker = { (word: Substring) -> Bool in
             guard let first = word.first, let close = wrapped[String(first)] else { return false }
-            return word.hasSuffix(close) && word.count > 1
+            // Two or more characters inside the wrapper: every marker whisper emits
+            // qualifies, while dictated "[0]" and "(a)" survive. Per-token matching
+            // has no all-or-nothing net under it, so this is the false-positive guard.
+            return word.hasSuffix(close) && word.count > 3
         }
-        return text.split(separator: " ").allSatisfy(isMarker) ? "" : text
+        // Split on any whitespace, not just " " — a marker on its own line was never
+        // seen as a token before. Empty subsequences are dropped, so rejoining with a
+        // single space leaves no doubled or edge spaces.
+        return text.split(whereSeparator: { $0.isWhitespace }).filter { !isMarker($0) }.joined(separator: " ")
     }
 }
 

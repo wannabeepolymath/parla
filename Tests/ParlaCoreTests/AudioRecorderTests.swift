@@ -17,4 +17,8 @@ final class AudioRecorderTests: XCTestCase {
     func testSnapshotOfFreshRecorderIsEmpty() {
         XCTAssertTrue(AudioRecorder().snapshot().isEmpty)
     }
+
+    func testFreshRecorderHasNoConversionFailures() {
+        XCTAssertEqual(AudioRecorder().conversionFailures(), 0)
+    }
 }

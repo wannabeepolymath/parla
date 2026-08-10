@@ -9,7 +9,12 @@ public final class AudioRecorder {
 
     private let engine = AVAudioEngine()
     private var samples: [Float] = []
+    private var failedBuffers = 0
     private let lock = NSLock()
+
+    /// Owned by the audio thread while the engine runs, by the caller either
+    /// side of that — never touched by both, so it needs no lock.
+    private let resampler = Resampler()
 
     /// Called with each converted buffer's RMS level. Fires on the audio
     /// thread — callers must hop to main before touching UI.
@@ -106,33 +111,29 @@ public final class AudioRecorder {
         return (sumSq / Float(samples.count)).squareRoot()
     }
 
-    /// Convert any PCM buffer to 16kHz mono Float32 samples.
+    /// Convert one self-contained PCM buffer to 16kHz mono Float32 samples.
+    /// Fresh converter, drained immediately — for offline whole-buffer work.
+    /// The capture path uses the recorder's own resampler instead, so that the
+    /// filter state carries across tap buffers.
     public static func convert(_ buffer: AVAudioPCMBuffer) -> [Float] {
-        if buffer.format == targetFormat {
-            return Array(UnsafeBufferPointer(start: buffer.floatChannelData![0],
-                                             count: Int(buffer.frameLength)))
-        }
-        guard let converter = AVAudioConverter(from: buffer.format, to: targetFormat)
-        else { return [] }
-        let ratio = 16_000.0 / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
-        guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
-        else { return [] }
-        var fed = false
-        converter.convert(to: out, error: nil) { _, status in
-            // endOfStream (not noDataNow) so the converter drains the resampler's
-            // tail latency; each buffer is a complete unit (fresh converter per call).
-            if fed { status.pointee = .endOfStream; return nil }
-            fed = true
-            status.pointee = .haveData
-            return buffer
-        }
-        return Array(UnsafeBufferPointer(start: out.floatChannelData![0],
-                                         count: Int(out.frameLength)))
+        let resampler = Resampler()
+        return (resampler.convert(buffer, to: targetFormat) ?? []) + resampler.flush()
+    }
+
+    /// Tap buffers the converter dropped during the last recording. Without a
+    /// count, a total conversion failure is indistinguishable from a silent mic.
+    public func conversionFailures() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return failedBuffers
     }
 
     public func start() throws {
         samples.removeAll()
+        failedBuffers = 0
+        // Previous recording ended with an endOfStream flush; reset so the next
+        // one starts on a clean filter without rebuilding on the audio thread.
+        resampler.reset()
         let input = engine.inputNode
         // Point the AUHAL input unit at the chosen device before reading its
         // format. Engine is idle here (start is only called after stop). An
@@ -148,11 +149,11 @@ public final class AudioRecorder {
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
             guard let self else { return }
-            let chunk = AudioRecorder.convert(buf)
+            let chunk = self.resampler.convert(buf, to: AudioRecorder.targetFormat)
             self.lock.lock()
-            self.samples.append(contentsOf: chunk)
+            if let chunk { self.samples.append(contentsOf: chunk) } else { self.failedBuffers += 1 }
             self.lock.unlock()
-            self.onLevel?(AudioRecorder.rms(chunk))
+            self.onLevel?(chunk.map(AudioRecorder.rms) ?? 0)
         }
         do {
             try engine.start()
@@ -175,8 +176,77 @@ public final class AudioRecorder {
     public func stop() -> [Float] {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        // The tap is gone, so the resampler is ours again: take the tail it has
+        // been holding back across every .noDataNow feed.
+        let tail = resampler.flush()
         lock.lock()
         defer { lock.unlock() }
+        samples.append(contentsOf: tail)
         return samples
     }
+}
+
+/// One `AVAudioConverter` reused across buffers, rebuilt only when the input
+/// format changes. Building one per buffer restarts the resampler's filter at
+/// every buffer edge — at 48k→16k that is a discontinuity every ~85 ms for the
+/// whole recording — and allocates on the audio thread. The cost of reuse is a
+/// tail the converter holds back until `flush()`.
+///
+/// Not thread-safe; the owner is responsible for handing it between threads.
+final class Resampler {
+    private var converter: AVAudioConverter?
+    private var inputFormat: AVAudioFormat?
+    private var out: AVAudioPCMBuffer?
+
+    /// nil when the buffer could not be converted at all, which the caller
+    /// counts — an empty array here would read as silence.
+    func convert(_ buffer: AVAudioPCMBuffer, to target: AVAudioFormat) -> [Float]? {
+        if buffer.format == target {
+            return Array(UnsafeBufferPointer(start: buffer.floatChannelData![0],
+                                             count: Int(buffer.frameLength)))
+        }
+        if inputFormat != buffer.format {
+            // Device or sample-rate change: the held filter state belongs to the
+            // old stream, so start over rather than carry it into the new one.
+            converter = AVAudioConverter(from: buffer.format, to: target)
+            inputFormat = buffer.format
+            out = nil
+        }
+        guard let converter else { return nil }
+        let ratio = target.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
+        // ponytail: one output buffer, grown on demand, instead of VoiceInk's
+        // free-list — the tap is serial and convert() copies out before returning.
+        if (out?.frameCapacity ?? 0) < capacity {
+            out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity)
+        }
+        guard let out else { return nil }
+        var fed = false
+        let outcome = converter.convert(to: out, error: nil) { _, status in
+            // noDataNow (not endOfStream) leaves the converter open, so the next
+            // buffer continues the same filter run instead of starting a new one.
+            if fed { status.pointee = .noDataNow; return nil }
+            fed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard outcome != .error else { return nil }
+        return Array(UnsafeBufferPointer(start: out.floatChannelData![0],
+                                         count: Int(out.frameLength)))
+    }
+
+    /// Frames still inside the resampler. Call once, after the last buffer.
+    func flush() -> [Float] {
+        guard let converter, let out else { return [] }
+        let outcome = converter.convert(to: out, error: nil) { _, status in
+            status.pointee = .endOfStream
+            return nil
+        }
+        guard outcome != .error else { return [] }
+        return Array(UnsafeBufferPointer(start: out.floatChannelData![0],
+                                         count: Int(out.frameLength)))
+    }
+
+    /// Ready the converter for a new stream after a flush, without discarding it.
+    func reset() { converter?.reset() }
 }

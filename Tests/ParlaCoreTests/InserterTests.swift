@@ -41,6 +41,12 @@ final class InserterTests: XCTestCase {
         assertValidChunks(chunks, reproduce: units)
     }
 
+    func testSecureEventInputRefusesBeforeAnyAXLookup() {
+        // Secure input short-circuits: no AX query, no accessibility-flag write,
+        // just the same refusal a password field gets.
+        XCTAssertEqual(Inserter.focusTarget(secureInput: true), .secure)
+    }
+
     func testAXCenterToAppKitFlipsYThroughPrimaryScreenHeight() {
         // AX top-left origin (10, 20), size 100x50, on a 900pt-tall primary screen.
         // Center in AX space is (60, 45); AppKit y = 900 - 45 = 855.

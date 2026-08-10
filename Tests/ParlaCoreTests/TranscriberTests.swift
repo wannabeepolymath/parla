@@ -22,11 +22,21 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("(silence)"), "")
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("*sigh*"), "")
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[MUSIC] [BLANK_AUDIO]"), "")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[MUSIC]\n[BLANK_AUDIO]"), "")
     }
 
     func testRealSpeechUntouched() {
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Hello world."), "Hello world.")
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Array [0] is empty"), "Array [0] is empty")
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech(""), "")
+    }
+
+    func testMarkerStrippedFromMixedContent() {
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Hello there. [BLANK_AUDIO]"), "Hello there.")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[MUSIC] Hello there."), "Hello there.")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Hello [MUSIC] there."), "Hello there.")
+        // Marker on its own line: never seen as a token when splitting on " " alone.
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Hello there.\n[BLANK_AUDIO]"), "Hello there.")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[BLANK_AUDIO]\n\nHello\tthere."), "Hello there.")
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox // IsSecureEventInputEnabled
 
 public enum Inserter {
     /// Stamped on every CGEvent Parla posts (eventSourceUserData), so the hotkey
@@ -80,21 +81,33 @@ public enum Inserter {
         case editable   // confirmed text field: safe to live-type into
         case unknown    // something is focused but AX can't confirm it's a field: paste, don't stream
         case none       // no focused element at all: history only, nothing typed
-        case secure     // password field (AXSecureTextField): refuse the dictation entirely
+        case secure     // password field (AXSecureTextField) or secure event input: refuse the dictation entirely
     }
 
     /// Best-effort focus classification. Chromium/Electron apps (Chrome, VS Code,
     /// Slack…) expose no AX tree until an assistive client flips their
-    /// accessibility flags, so on a non-editable answer we flip them and retry
+    /// accessibility flag, so on a non-editable answer we flip it and retry
     /// once. First dictation in such an app may still classify as .unknown
     /// (paste fallback); subsequent ones see the real field.
-    public static func focusTarget() -> FocusTarget {
+    ///
+    /// `secureInput` is a parameter only so tests can force the branch.
+    public static func focusTarget(secureInput: Bool = IsSecureEventInputEnabled()) -> FocusTarget {
+        // Some process holds the keyboard (1Password, a sudo prompt, Terminal's
+        // Secure Keyboard Entry): the window server silently discards every
+        // synthetic CGEvent — no error, no return code — so typing would land
+        // nothing under a green done HUD. Different signal from AXSecureTextField
+        // (that's the field, this is the keyboard), same refusal path.
+        if secureInput { return .secure }
         var result = classifyFocus()
         // Never wake Electron's AX tree for a secure field — the whole point is
         // to touch it as little as possible (never stream, never type, never cloud).
         if result != .editable, result != .secure, let app = NSWorkspace.shared.frontmostApplication {
             let appEl = AXUIElementCreateApplication(app.processIdentifier)
-            AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            // Only AXManualAccessibility. AXEnhancedUserInterface puts the *target*
+            // process into screen-reader mode for the rest of its lifetime — it
+            // outlives Parla, survives a restart, permanently blurs the composer in
+            // some Chromium/Electron apps, and can't be undone from outside
+            // (muesli PR #1116; VoiceInk reverted it in ba0954a). Don't re-add it.
             AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             usleep(50_000) // give the app a beat to build its AX tree
             result = classifyFocus()

@@ -15,10 +15,12 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 
 | Tier | Items | done | wip | todo | skipped |
 |---|---|---|---|---|---|
-| 0 | 8 | 0 | 0 | 8 | 0 |
+| 0 | 8 | 7 | 0 | 1 | 0 |
 | 1 | 14 | 0 | 0 | 14 | 0 |
 | 2 | 7 | 0 | 0 | 6 | 1 |
-| **all** | **29** | **0** | **0** | **28** | **1** |
+| **all** | **29** | **7** | **0** | **21** | **1** |
+
+Suite: **173 tests, 0 failures.** Build clean.
 
 ---
 
@@ -49,14 +51,41 @@ are never parallelised.
 
 | # | Item | Files | Effort | Risk | Status | Commit |
 |---|---|---|---|---|---|---|
-| 1 | Gate shadow stream on freeze threshold | `Parla/main.swift`, `README.md` | S | low | todo | |
-| 2 | Add `LICENSE` (AGPL root + MIT ParlaCore) | `LICENSE`, `Sources/ParlaCore/LICENSE`, `README.md` | S | none | todo | |
-| 3 | Hoist `AVAudioConverter` out of tap callback | `ParlaCore/AudioRecorder.swift` | S | low | todo | |
-| 4 | Detect Secure Event Input before typing | `ParlaCore/Inserter.swift` | S | low | todo | |
-| 5 | Fence transcript + injection guards in cleanup prompt | `ParlaCore/Cleanup.swift` | S | low | todo | |
-| 6 | Strip whisper markers per segment | `ParlaCore/Transcriber.swift` + tests | S | low | todo | |
-| 7 | Delete `AXEnhancedUserInterface` write | `ParlaCore/Inserter.swift:97` | S | low | todo | |
-| 8 | Chunk 20→200 units, cut inter-chunk sleep | `ParlaCore/Inserter.swift` | S | **med** | todo | |
+| 1 | Gate shadow stream on freeze threshold | `Parla/main.swift`, `README.md` | S | low | **done** | wave 1 |
+| 2 | Add `LICENSE` (AGPL root + MIT ParlaCore) | `LICENSE`, `Sources/ParlaCore/LICENSE`, `README.md` | S | none | **done** | wave 1 |
+| 3 | Hoist `AVAudioConverter` out of tap callback | `ParlaCore/AudioRecorder.swift` | S | low | **done** | wave 1 |
+| 4 | Detect Secure Event Input before typing | `ParlaCore/Inserter.swift` | S | low | **done** | wave 1 |
+| 5 | Fence transcript + injection guards in cleanup prompt | `ParlaCore/Cleanup.swift` | S | low | **done** | wave 1 |
+| 6 | Strip whisper markers per segment | `ParlaCore/Transcriber.swift` + tests | S | low | **done** | wave 1 |
+| 7 | Delete `AXEnhancedUserInterface` write | `ParlaCore/Inserter.swift:97` | S | low | **done** | wave 1 |
+| 8 | Chunk 20→200 units, cut inter-chunk sleep | `ParlaCore/Inserter.swift` | S | **med** | todo | ships alone |
+
+### Wave 1 notes
+
+- **#1** gated on `snap.count`, not `tail.count` (post-cut the tail is ~5s and
+  would re-gate itself off mid-dictation), with a `liveTyping ||` short-circuit
+  so re-enabling live typing doesn't silently lose the first 15s of hypothesis.
+- **#3** produced a `Resampler` class holding one cached converter + one reused
+  output buffer, `.noDataNow` between buffers, `flush()` at stop. A fresh or
+  rebuilt converter's first buffer is short by the filter priming delay
+  (~240 samples); nothing is lost — it comes out of the next call or `flush()`.
+  Also added `conversionFailures()` so total conversion failure is
+  distinguishable from silence.
+- **#4** `focusTarget(secureInput:)` takes the flag as a defaulted parameter
+  purely so tests can force the branch.
+- Two tests needed fixing after the fact, both my scoping error, not agent error:
+  `OpenAICompatTests` asserted the pre-fence wire shape (now asserts against
+  `PromptBuilder.user`), and the new resampler test asserted an exact output
+  length on a priming buffer.
+
+### Not yet done from Wave 1's items
+
+- `LICENSE-COMMERCIAL.md` stub (reserves the paid-binary right) — called for by
+  `08-cost.md` #1, was outside the agent's file scope. Do before the first
+  external PR.
+- No regression test for #1's gate: `stream()` lives in the app target and isn't
+  importable from `ParlaCoreTests`. Needs a seam in ParlaCore to be testable —
+  revisit during Tier 1 #8 (`DictationSession` extraction), which creates one.
 
 Item 8 lands alone, after 1–7, and needs a real smoke test — `ISSUES.md` §5–7
 is a history of insertion regressions in exactly the apps it touches.
@@ -108,4 +137,5 @@ nothing. Revisit after #2 has real numbers.
 |---|---|
 | 2026-08-11 | Audit complete — 64 agents, 0 errors. 13 docs written to `docs/research/`. |
 | 2026-08-11 | All 8 Tier 0 claims verified against source; every `file:line` reference accurate. |
-| 2026-08-11 | This tracker created. Branch + docs commit pending. |
+| 2026-08-11 | This tracker created. Branch `feat/audit-implementation`, docs committed (8e4f58e). |
+| 2026-08-11 | Wave 1: Tier 0 #1–#7 landed. 6 agents on disjoint files, 0 conflicts. Build clean, 173/173 tests pass. |
