@@ -188,7 +188,12 @@ public final class Metrics: @unchecked Sendable {
             // is off; if that ever has to be exact, have the polish leg say a
             // POST is outstanding instead of inferring it from a missing write.
             if current.hasLanded || parked?.polishResolved == true { parked = nil }
-            if current.awaitingHistory { parked = current }
+            // `awaitingHistory` alone would also park a dictation whose polish
+            // already came back — owed nothing by test (1) above. That is the
+            // same predicate only while history is on; with it off no row is
+            // ever written, so a resolved bucket would park and then be handed
+            // to whatever row is written next, permanently one behind.
+            if current.awaitingHistory, !current.polishResolved { parked = current }
             current = Bucket()
         }
         // Only the polish result belongs to the parked dictation, and only while

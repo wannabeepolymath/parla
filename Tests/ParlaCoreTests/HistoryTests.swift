@@ -134,6 +134,37 @@ final class HistoryTests: XCTestCase {
         XCTAssertNil(second?.model)
     }
 
+    /// History off: no row is ever written, so `awaitingHistory` stays true even
+    /// for a dictation whose polish already came back. Parking on that alone
+    /// hands its numbers to whatever row is written next — and then that one's
+    /// to the row after it, permanently one behind. A resolved dictation is owed
+    /// nothing and must never park.
+    func testResolvedDictationDoesNotParkWhenNoHistoryRowIsWritten() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+
+        // Dictation 1 runs to completion. History is off, so no snapshot() call
+        // ever follows — nothing marks the bucket as recorded.
+        metrics.mark(.fnDown, at: ms(1000))
+        metrics.mark(.fnUp, at: ms(3000))
+        metrics.mark(.landed, at: ms(3100))
+        metrics.update { $0.model = "d1-model"; $0.promptTokens = 111 }
+        metrics.mark(.cleanedSwapped, at: ms(3500))
+
+        // The user turns history back on and dictates again.
+        metrics.mark(.fnDown, at: ms(9000))
+        metrics.mark(.fnUp, at: ms(10_000))
+        metrics.mark(.landed, at: ms(10_100))
+        metrics.update { $0.model = "d2-model"; $0.promptTokens = 222 }
+        metrics.mark(.cleanedSwapped, at: ms(10_400))
+
+        // Dictation 2's row must be dictation 2's.
+        let second = metrics.snapshot()
+        XCTAssertEqual(second?.captureMs, 1000)   // 9000 → 10000, not 1's 2000
+        XCTAssertEqual(second?.model, "d2-model")
+        XCTAssertEqual(second?.promptTokens, 222)
+    }
+
     /// Cleanup unconfigured: the entry is written straight after landing, so
     /// nothing is in flight and the next dictation must own the collector
     /// outright — the park is for pending polish only.

@@ -143,8 +143,9 @@ That dictation's audio — the prepended 0.45 s included — is written to
 `~/Library/Application Support/Parla/recordings` before whisper runs, so a
 crash mid-transcription can't take what you just said with it, and is deleted
 the moment a transcript comes back. Only dictations that failed are left
-behind, and those go after 7 days; the Hub's **Data & Privacy** page shows the
-folder, its size, and a button to empty it. (Setting
+behind, and those go at the first dictation after they turn 7 days old, or
+whenever you open the Hub's **Data & Privacy** page — which also shows the
+folder, its size, and a button to empty it now. (Setting
 `PARLA_KEEP_RECORDINGS=1` keeps successful dictations too, to build an eval
 corpus; the Hub shows a banner for as long as it is on.) Transcription itself
 runs on this Mac, and the cleanup model is sent text, never audio.

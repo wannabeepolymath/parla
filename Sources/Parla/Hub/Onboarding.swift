@@ -26,7 +26,11 @@ struct OnboardingView: View {
         // hands-free and keeps recording past the release. The Bluetooth
         // exception to holding it open is on the permission row below.
         "Parla holds the mic open between dictations so one starts instantly, transcribes only what you dictate, and types the result into whatever you're using.",
-        "Speech recognition runs on this Mac. Nothing you say leaves it.",
+        // Scoped to audio on purpose: with a cleanup provider configured — which
+        // the README and the menu's Set API Key… item both steer users toward —
+        // the transcript text does leave the Mac. Says the same thing the
+        // Privacy page and the README already say.
+        "Speech recognition runs on this Mac — your audio never leaves it. Optional AI cleanup sends the transcript text, never audio, to the provider you set up.",
         "One dictation, straight into this window — nothing is typed anywhere else."
     ]
 

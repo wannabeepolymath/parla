@@ -350,6 +350,11 @@ public final class HotkeyMonitor {
                 break
             }
         }
+        // Modifier-blind on purpose, unlike the stop below: "Esc always cancels"
+        // is the rule problem() enforces at :207, and an abort you have to press
+        // bare is not an abort. The cost is that ⌘⌥Esc (Force Quit) and ⌥Esc are
+        // swallowed once mid-dictation; the session is .idle afterwards, so the
+        // second press goes through. Deliberate trade, not an oversight.
         if keyCode == 53, session != .idle { // Esc: cancel the dictation
             session = .idle
             onEdge?(.cancel)

@@ -663,6 +663,12 @@ struct PrivacyPage: View {
                        detail: "The transcript, the selected text for voice commands, your dictionary, snippets, and the frontmost app's name — never audio") { EmptyView() }
             }
         }
-        .onAppear { recordings = RecordingStore.shared.summary() }
+        // Prune before summarising, not just for tidiness: the sweep otherwise
+        // only runs when the next dictation is stashed, so this page could list
+        // — and total up — files it is simultaneously claiming are deleted.
+        .onAppear {
+            RecordingStore.shared.prune()
+            recordings = RecordingStore.shared.summary()
+        }
     }
 }

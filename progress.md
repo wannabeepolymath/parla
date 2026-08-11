@@ -20,7 +20,7 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 6 | 0 | 0 | 1 |
 | **all** | **29** | **28** | **0** | **0** | **1** |
 
-Suite: **381 tests, 0 failures.** Build clean.
+Suite: **382 tests, 0 failures.** Build clean.
 
 ---
 
@@ -364,6 +364,33 @@ replaced one false claim with three:
 All three now state what the code actually does, with the retention window, the
 deletion point and the eval-corpus opt-in named explicitly.
 
+### Round 4 — dry
+
+6 raised, 4 confirmed, **all nits**. The rebuilt matcher produced exactly one
+finding — a pre-existing Esc nit — and the AudioRecorder dimension was not
+re-raised at all. That is the stopping condition.
+
+Closed: the onboarding still promised *"Nothing you say leaves it"*, which cloud
+cleanup contradicts (the transcript text does leave the Mac — the app says so
+correctly in the README and on the Privacy page, just not here); the README's
+7-day retention promise was true only at the next dictation, so the Data &
+Privacy page now prunes on appear rather than listing files it simultaneously
+claims are deleted; and the metrics park was created for dictations that were
+owed nothing, which with history *off* handed each row the previous dictation's
+numbers forever. That last fix is mutation-checked — reverting it fails the new
+test with 3 assertions.
+
+Left deliberately: **Esc stays modifier-blind.** It swallows ⌘⌥Esc once
+mid-dictation, but "Esc always cancels" is a rule `problem()` enforces, an abort
+you have to press bare is not an abort, the session is `.idle` immediately after
+so the second press goes through, and the naive fix breaks an existing test. The
+trade is now written at the branch instead of being implicit.
+
+One refutation worth recording: a reviewer claimed this tracker misdescribed
+⇧Return as un-swallowed. Refuted — the sentence describes the *bug* (pre-fix,
+all 32 modifier sets were swallowed, ⇧Return included), and ⇧Return stays
+swallowed by design because it produces whitespace.
+
 ## Log
 
 | When | What |
@@ -381,3 +408,4 @@ deletion point and the eval-corpus opt-in named explicitly.
 | 2026-08-11 | Review round 1 (whole branch): 32 raised, **25 confirmed / 7 refuted**. All fixed. 367/367 pass. |
 | 2026-08-11 | Review round 2 (the fix commit itself): 12 raised, **11 confirmed / 1 refuted** — the fixes had introduced 2 majors. All fixed. 373/373 pass. |
 | 2026-08-11 | Review round 3 (twice-wrong subsystems): 13 raised, **9 confirmed / 4 refuted**. AudioRecorder came back fully refuted — dry. Hotkey rebuilt wholesale. 381/381 pass. |
+| 2026-08-11 | Review round 4: 6 raised, **4 confirmed / 2 refuted — all nits, zero majors, zero minors.** Dry. 382/382 pass. |
