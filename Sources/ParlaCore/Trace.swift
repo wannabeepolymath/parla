@@ -14,7 +14,7 @@ import Foundation
 public final class Trace: @unchecked Sendable {
     /// Pipeline order is the declaration order; the emitted line is sorted by
     /// timestamp so an out-of-order stamp shows up rather than being hidden.
-    public enum Stamp: String {
+    public enum Stamp: String, Sendable {
         case fnDown = "fn_down"
         case recorderStartReturned = "recorder_start_returned"
         case firstPCM = "first_pcm_callback"

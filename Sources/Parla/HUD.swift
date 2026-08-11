@@ -5,18 +5,9 @@ import ParlaCore
 // ponytail: @unchecked Sendable — main-thread-only by contract, lets async
 // callers hand it to DispatchQueue.main without non-Sendable capture warnings.
 final class HUD: @unchecked Sendable {
-    enum State {
-        case listening(command: Bool)  // command: transform-selection mode ("Command…")
-        case handsFree      // fn+Space latched: still recording, fn can be released
-        case transcribing   // fn-up → raw text landing (fast, on-device)
-        case polishing        // raw landed; LLM cleanup in flight — resolves to done/savedToHistory/cleanedInHistory
-        case done
-        case savedToHistory   // nothing landed in a field; transcript lives in history
-        case cleanedInHistory // swap unverifiable; cleaned text only in history
-        case rawFallback(String) // cleanup failed; raw transcript is final, with a safe reason
-        case cancelled      // dictation aborted (key pressed while fn held)
-        case error(String)
-    }
+    /// The cases live in ParlaCore (see HUDState) so DictationSession can name
+    /// them without importing AppKit. Every call site still says `HUD.State`.
+    typealias State = HUDState
 
     private let panel: NSPanel
     private let pill = DraggablePill(frame: HUD.activePillFrame)

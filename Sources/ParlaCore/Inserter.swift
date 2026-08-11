@@ -84,7 +84,7 @@ public enum Inserter {
     }
 
     /// What Parla can do with the current keyboard focus.
-    public enum FocusTarget {
+    public enum FocusTarget: Sendable {
         case editable   // confirmed text field: safe to live-type into
         case unknown    // something is focused but AX can't confirm it's a field: paste, don't stream
         case none       // no focused element at all: history only, nothing typed

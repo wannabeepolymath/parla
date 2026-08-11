@@ -8,7 +8,7 @@ public final class AudioRecorder {
         channels: 1, interleaved: false)!
 
     /// Why a capture ended by itself, rather than by the user releasing fn.
-    public enum EndReason: Equatable { case sampleLimit, deviceLost }
+    public enum EndReason: Equatable, Sendable { case sampleLimit, deviceLost }
 
     public enum RecorderError: Error {
         /// The input node reported a 0 Hz / 0 ch format. `installTap` throws an

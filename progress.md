@@ -16,11 +16,11 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | Tier | Items | done | wip | todo | skipped |
 |---|---|---|---|---|---|
 | 0 | 8 | 8 | 0 | 0 | 0 |
-| 1 | 14 | 13 | 0 | 1 | 0 |
+| 1 | 14 | 14 | 0 | 0 | 0 |
 | 2 | 7 | 0 | 0 | 6 | 1 |
-| **all** | **29** | **21** | **0** | **7** | **1** |
+| **all** | **29** | **22** | **0** | **6** | **1** |
 
-Suite: **240 tests, 0 failures.** Build clean.
+Suite: **284 tests, 0 failures.** Build clean.
 
 ---
 
@@ -116,7 +116,7 @@ is a history of insertion regressions in exactly the apps it touches.
 | 5 | WER harness (replaces exact-match) | `ParlaCore/Eval.swift`, `parla-eval/`, `eval/cases/` | M | low | **done** | wave 3 |
 | 6 | CI — `swift build` + `swift test` | `.github/workflows/ci.yml` | S | none | **done** | wave 2 |
 | 7 | Mic prepare/start split + pre-roll ring, BT excluded | `ParlaCore/AudioRecorder.swift` | M | med | **done** | wave 3 |
-| 8 | Extract `DictationSession` state machine | `ParlaCore/DictationSession.swift`, `Parla/main.swift` | M-L | med | todo | |
+| 8 | Extract `DictationSession` state machine | `ParlaCore/DictationSession.swift` (new), `Parla/Dictation.swift` (new), `main.swift` | M-L | med | **done** | wave 4 |
 | 9 | Process + capture lifecycle safety | `Parla/main.swift`, `ParlaCore/AudioRecorder.swift` | M | low | **done** | wave 2 |
 | 10 | `AppCategory` enum replacing free-text app sentence | `ParlaCore/Cleanup.swift`, `TextRules.swift` | M | low | **done** | wave 3 |
 | 11 | Deterministic snippets | `ParlaCore/Pipeline.swift`, `Cleanup.swift` | M | low | **done** | wave 3 |
@@ -161,6 +161,41 @@ reference, so **the ASR leg is entirely unscored**; text cases do not substitute
 for recorded audio, and the silence/long-form categories where the guards live
 cannot be exercised at text level at all.
 
+### Wave 4 — what the adversarial reviews caught
+
+Both reviewers returned `changed-behaviour`. The refactor built and passed 281
+tests *before* these were found, which is the point of reviewing separately from
+implementing:
+
+1. **Off-main `session.state` read** — a real data race. `State` carries a
+   `Session`, which carries `Settings`, i.e. Swift arrays and dictionaries.
+   Replaced with an `OSAllocatedUnfairLock<Int>` mirroring "which generation
+   holds the mic" (0 = nobody). The comment above it still claimed a "benign
+   stop-flag race" from when it guarded a `Bool`; deleted.
+2. **The interpreter broke its own documented contract** — `Dictation.swift`
+   opens with "effect order is the contract, never reordered", then re-entered
+   `send()` from inside `perform()`, so nested effect lists ran *inside* effect
+   #2. That silently moved the cleanup-endpoint warm-up to after
+   `recorder.start()`, a ~50ms Electron AX probe, and a possible 574MB model
+   load — regressing the exact latency path it exists to serve. Now a real queue
+   inside the machine; nested sends append.
+3. **A test certifying a guarantee that did not exist** — `captureEnded` was
+   passed the *live* generation, making the staleness check a tautology. Fixed by
+   reading the gen on the tap thread as capture ends, so the guard is now real.
+4. Cancel no longer serialized behind the in-flight stream pass — a late
+   `.streamTyped` could resurrect a ledger that was just erased. Cancel now bumps
+   `gen`, with the hazard documented at the site.
+
+Both new invariants were mutation-checked: reverting the queue fails the
+interleave test, and removing cancel's `gen += 1` fails
+`testLateStreamTypedAfterCancelCannotResurrectTheLedger`. I re-ran the second
+mutation independently to confirm it wasn't a vacuous test — it fails as claimed.
+
+The implementing agent also noticed its own first interleave test was vacuous
+(with today's effect lists, every dispatching effect happens to be last, so
+recursion and queueing are observationally identical) and rewrote it to hang the
+nested dispatch off the *first* effect.
+
 ## Tier 2 — later
 
 | # | Item | Files | Effort | Risk | Status | Commit |
@@ -194,3 +229,4 @@ nothing. Revisit after #2 has real numbers.
 | 2026-08-11 | Tier 0 #8 landed alone (chunk 20→200). 174/174 pass. Manual smoke test still outstanding. |
 | 2026-08-11 | Wave 2: Tier 1 #1, #2, #3, #6, #9, #12 landed. 190/190 pass. |
 | 2026-08-11 | Wave 3: Tier 1 #4, #5, #7, #10, #11, #13, #14 landed. 240/240 pass. Model catalog hashes + sizes verified against Hugging Face. |
+| 2026-08-11 | Wave 4: Tier 1 #8 `DictationSession` extracted. main.swift 1364 → 458 lines. Two adversarial reviews found 5 defects; all fixed. 284/284 pass. **Tier 1 complete.** |

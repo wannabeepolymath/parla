@@ -1,21 +1,7 @@
 import AppKit
 import AVFoundation
 import ParlaCore
-import ServiceManagement
-
-/// Subtle system-sound cues. NSSound(named:) uses the bundled ~/Library sounds —
-/// no audio framework. ponytail: fire-and-forget; a nil name just no-ops.
-enum Sound {
-    private static func play(_ name: String) {
-        guard let s = NSSound(named: name) else { return }
-        s.volume = 0.25
-        s.play()
-    }
-    static func start()  { play("Tink") }   // record-start
-    static func finish() { play("Glass") }  // raw transcript landed
-    static func cancel() { play("Funk") }   // dictation aborted
-    static func latch()  { play("Pop") }    // fn+Space: hands-free engaged
-}
+import os
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -24,27 +10,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let hotkey = HotkeyMonitor()
     let recorder = AudioRecorder()
     let hud = HUD()
+    /// The dictation flow itself. Every fn edge and every leg completion becomes
+    /// an Event; the [Effect] it returns is what Dictation.swift executes. It
+    /// owns what used to be a handful of correlated fields here — the generation
+    /// counter, the per-dictation latch (settings, focus, command selection) and
+    /// the live-typed ledger — so nothing can drift out of step with anything else.
+    let session = DictationSession()
+    /// Which generation holds the mic, mirrored out of `session` on main before
+    /// every effect (see `send`). 0 = nobody; generations count from 1.
+    ///
+    /// The machine's own `state` is an enum carrying a `Session`, which carries
+    /// `Settings` — Swift arrays and dictionaries. Reading that concurrently with
+    /// a main-thread write is a real data race, so the off-main readers (the
+    /// streaming loop, whisper's shouldAbort callbacks, the recorder's onEnd tap
+    /// thread) read this Int under a lock instead.
+    let capturingGen = OSAllocatedUnfairLock(initialState: 0)
     var transcriber: WhisperTranscriber?
     var processTask: Task<Void, Never>?
-    var isRecording = false
-    // Live streaming: whether the focused field accepts typed text, and what
-    // we've already streamed into it (grapheme-accurate, so backspace counts match).
-    var liveTyping = false
-    var focus = Inserter.FocusTarget.none
-    var typed = ""
-    // Last settings read from disk (see currentSettings). Latched at fn-down and
-    // read at fn-up like liveTyping/focus.
-    var settings = Settings()
-    // Command mode (⇧+fn): transform the selection captured at fn-down instead of
-    // dictating. Latched at fn-down, read at fn-up like liveTyping/focus.
-    var commandMode = false
-    var commandSelection = ""
-    // Bumped on every fn-down; a pending cleaned-swap compares its captured
-    // value on the main actor and never fires keystrokes into a newer session.
-    var generation = 0
-    // Confirmed-prefix window for long dictations: written by stream(), consumed
-    // by the finish() queued right after it — the processTask chain serializes.
+
+    /// Live in-field typing is hard-disabled: keystrokes posted while the user
+    /// physically holds fn merge with the modifier (fn+A opens the Dock, ⇧←
+    /// becomes select-to-Home) — revisions stall on the first wrong hypothesis
+    /// and the finalize demotes to history-only. Shadow streaming keeps the speed
+    /// win; the transcript lands as ONE insert at fn-up, after the modifier is
+    /// released. Re-enable only with a verified fix for the fn-merge.
+    let liveTyping = false
+
+    // Hand-offs from an effect to the async leg that consumes it — the same
+    // three values the old inline flow passed from hand to hand.
+    var captured: [Float] = []                   // .stopCapture(discard: false)
+    var pendingPolish: DictationSession.Landed?  // .polish
+    var pendingInstruction: String?              // .transform
+    /// Confirmed-prefix window for long dictations: written by stream(), consumed
+    /// by the finish() queued right after it — the processTask chain serializes.
     var window: StreamWindow?
+
     // Model download-in-progress state (feature 4): non-nil task means the menu
     // shows a disabled "Downloading…" item instead of the download action.
     var downloadTask: URLSessionDownloadTask?
@@ -71,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.onOpenSettingsFile = { [weak self] in self?.openSettings() }
         m.onSaved = { [weak self] in
             guard let self else { return }
-            let s = self.currentSettings()
+            let s = self.store.load()
             self.hud.idleBarSize = HUD.idleSize(s.hudIdleSize)
             self.hud.showAlways = s.showHudAlways
             self.recorder.inputDeviceUID = s.inputDeviceUID
@@ -94,21 +94,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scratchpad.save() // flush a pending debounced edit
     }
 
-    /// Latch the current settings into `settings` for the rest of this dictation.
-    /// The re-read-only-if-changed cache lives in SettingsStore.load() so that all
-    /// ten call sites get it and it can be unit-tested; the latch here is separate,
-    /// and exists so the streaming loop reads a fixed value instead of stat()ing
-    /// the file every ~300ms pass.
-    @discardableResult
-    func currentSettings() -> Settings {
-        settings = store.load()
-        return settings
-    }
-
-    /// Where the instant raw finalize landed — decides how the cleaned swap applies.
-    /// .history = nothing safely finalized in a field; history may retain it.
-    enum Landing: Sendable { case field, history }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         setStatus("🎤")
         installMainMenu()
@@ -116,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestPermissions()
         loadModel()
         startUnloadWatcher()
-        let launchSettings = currentSettings()
+        let launchSettings = store.load()
         hud.idleBarSize = HUD.idleSize(launchSettings.hudIdleSize)
         hud.showAlways = launchSettings.showHudAlways
         recorder.inputDeviceUID = launchSettings.inputDeviceUID
@@ -127,16 +112,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Capture ended without an fn-up: the 10-minute cap (which is also the
         // ceiling on a forgotten hands-free latch) or a mic that disappeared.
-        // Finalize what was captured through the ordinary path. No toast — the
-        // .transcribing HUD that finalize shows would immediately replace it.
+        // The machine finalizes it exactly as fn-up does, minus the fn-up stamp.
         // The hotkey monitor is still latched, so the next fn press resyncs it
-        // (guarded above as a no-op) and the one after starts a new dictation.
+        // (a no-op) and the one after starts a new dictation.
         recorder.onEnd = { [weak self] reason in
-            DispatchQueue.main.async {
-                guard let self, self.isRecording else { return }
-                NSLog("Parla: capture ended early (%@)", "\(reason)")
-                self.finalizeDictation()
-            }
+            guard let self else { return }
+            // The generation is read HERE, on the tap thread as the capture ends,
+            // not inside the hop: reading it at delivery time would make the
+            // machine's `s.gen == g` check a tautology, and an fn-down landing in
+            // between would rename this stale end as the new dictation's and
+            // finalize a session that just started recording.
+            let gen = self.capturingGen.withLock { $0 }
+            DispatchQueue.main.async { self.send(.captureEnded(gen: gen, reason: reason)) }
         }
 
         hotkey.onEdge = { [weak self] edge in
@@ -144,119 +131,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Parla: fn edge %@", "\(edge)")
             switch edge {
             case .down(let command):
-                if command {
-                    // Command mode: capture the selection NOW; refuse early (no
-                    // recording) when there's nothing safe to transform.
-                    let focus = Inserter.focusTarget()
-                    guard focus != .secure else {
-                        self.hud.show(.error("No transforms in password fields")); return
-                    }
-                    guard let selection = Inserter.selectedText() else {
-                        self.hud.show(.error("Select text first")); return
-                    }
-                    self.generation += 1 // invalidates any pending cleaned-swap
-                    self.commandMode = true
-                    self.commandSelection = selection
-                    self.focus = focus
-                    self.liveTyping = false // never stream a transform
-                    do { try self.recorder.start() }
-                    catch {
-                        self.setStatus("⚠️"); self.hud.show(.error("Mic failed"))
-                        NSLog("%@", "Parla mic start failed: \(error)"); return
-                    }
-                    self.isRecording = true
-                    // Reload now if the idle watcher freed the context: transform()
-                    // runs off-main and must find it already resident.
-                    self.activeTranscriber()
-                    self.showRecording(); self.hud.show(.listening(command: true)); Sound.start()
+                // Latch the settings for the whole dictation: the streaming loop
+                // and both legs read the latched value instead of stat()ing the
+                // file every ~300ms pass. The re-read-only-if-changed cache lives
+                // in SettingsStore.load() so all ten call sites get it.
+                let settings = self.store.load()
+                let configured = cleanupIsConfigured(
+                    settings: settings, env: ProcessInfo.processInfo.environment)
+                guard command else {
+                    // The frontmost app is NOT sampled here: users routinely start
+                    // dictating and then click into the destination, so the target
+                    // is whatever is frontmost at finalize (see finish()).
+                    self.send(.startDictation(settings: settings, cleanupConfigured: configured,
+                                              live: self.liveTyping))
                     return
                 }
-                self.commandMode = false
-                Trace.mark(.fnDown) // resets the trace; see Trace.swift
-                // The frontmost app is NOT sampled here: users routinely start
-                // dictating and then click into the destination, so the target is
-                // whatever is frontmost at finalize (see finish()).
-                let settings = self.currentSettings()
-                self.hud.idleBarSize = HUD.idleSize(settings.hudIdleSize)
-                self.hud.showAlways = settings.showHudAlways
-                self.recorder.inputDeviceUID = settings.inputDeviceUID
-                if let url = cleanupWarmURL(
-                    settings: settings, env: ProcessInfo.processInfo.environment) {
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "HEAD"
-                    request.timeoutInterval = 5
-                    URLSession.shared.dataTask(with: request).resume()
-                }
-                self.generation += 1 // invalidates any pending cleaned-swap
-                self.isRecording = true
-                // typed is NOT reset here: a still-queued finish from the previous
-                // dictation must see it to erase that dictation's live text.
-                do { try self.recorder.start(); self.showRecording(); self.hud.show(.listening(command: false)); Sound.start() }
-                catch {
-                    self.isRecording = false
-                    self.setStatus("⚠️"); self.hud.show(.error("Mic failed"))
-                    NSLog("%@", "Parla mic start failed: \(error)")
-                    return
-                }
-                // Focused field gets the final insert at fn-up; no focus never
-                // types into the void (see finish).
-                self.focus = Inserter.focusTarget()
-                // Password field: with no clipboard hand-off there is nothing
-                // safe to do with the transcript (never type into a secure
-                // field, never store a plausible password) — refuse up front.
-                // Inline cancel, not cancelDictation(): its queued hud.hide()
-                // would immediately wipe the error toast. Nothing streamed yet.
-                guard self.focus != .secure else {
-                    self.isRecording = false
-                    _ = self.recorder.stop() // discard the captured audio
-                    self.hud.show(.error("Not supported in password fields"))
-                    self.showIdle()
-                    return
-                }
-                // Live in-field typing is hard-disabled: keystrokes posted while
-                // the user physically holds fn merge with the modifier (fn+A
-                // opens the Dock, ⇧← becomes select-to-Home) — revisions stall
-                // on the first wrong hypothesis and the finalize demotes to
-                // history-only. Shadow streaming below keeps the speed win; the
-                // transcript lands as ONE insert at fn-up, after the modifier is
-                // released. Re-enable only with a verified fix for the fn-merge.
-                self.liveTyping = false
-                // Shadow streaming: run the pass loop on EVERY dictation, not just
-                // live-typing ones, so finish() only ever pays for the unconfirmed
-                // tail. Actual typing inside the loop is gated on liveTyping.
-                if let transcriber = self.activeTranscriber() {
-                    // Chain onto the previous finish so partial passes never run
-                    // concurrently with the final pass (whisper ctx isn't reentrant).
-                    self.processTask = Task { [prev = self.processTask] in
-                        await prev?.value
-                        await self.stream(transcriber: transcriber)
-                    }
-                }
+                // Command mode: capture the selection NOW, before any recording —
+                // the machine refuses (with no generation burned) when there is
+                // nothing safe to transform. Never query a password field's
+                // selection.
+                let focus = Inserter.focusTarget()
+                self.send(.startCommand(settings: settings, cleanupConfigured: configured,
+                                        focus: focus,
+                                        selection: focus == .secure ? nil : Inserter.selectedText()))
             case .up(let short):
-                // A command down that refused (bad focus/selection) never started
-                // recording; the paired fn-up has nothing to finish. Also covers
-                // the fn-up after a capture the recorder already ended itself.
-                guard self.isRecording else { return }
-                Trace.mark(.fnUp)
                 // Short tap = accidental Globe press (emoji/input switch): abort
                 // silently, never run whisper. Recording still STARTED on fn-down
                 // so we don't clip speech onset; we just discard it here.
-                if short {
-                    NSLog("Parla: short tap, discarding")
-                    self.cancelDictation(silent: true)
-                    return
-                }
-                self.finalizeDictation()
+                self.send(short ? .cancelRequested(silent: true) : .stopRequested)
             case .cancel:
                 // Esc, or a real key pressed while fn was held (fn+arrow): abort.
-                NSLog("Parla: cancelled by keypress")
-                self.cancelDictation(silent: false)
+                self.send(.cancelRequested(silent: false))
             case .handsFree:
                 // fn+Space latched: same recording, but tell the user Space took —
                 // the pill relabels and a pop confirms fn can be released.
-                guard self.isRecording else { return }
-                self.hud.show(.handsFree)
-                Sound.latch()
+                self.send(.handsFreeLatched)
             case .pasteLast:
                 guard let text = self.history.entries.first?.best else { return }
                 self.pasteWhenModifiersClear(text)
@@ -302,546 +211,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// History can outlive its source app. Resolve the target at the keystroke,
     /// then flatten newlines where Return would fire: terminals run commands,
     /// chat apps (Slack, Discord, etc.) send the message.
-    private func insertStoredText(_ text: String) {
+    func insertStoredText(_ text: String) {
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Inserter.insert(TextRules.flattensNewlines(bundleID: bundleID) ? TextRules.flattenForTerminal(text) : text)
-    }
-
-    /// Stop the recorder and queue the transcribe of what it captured. Reached
-    /// from fn-up and from recorder.onEnd (10-minute cap, mic gone) — both must
-    /// finalize identically, so neither may inline its own version of this.
-    func finalizeDictation() {
-        isRecording = false
-        let samples = recorder.stop()
-        if commandMode {
-            // Transform path: instruction → LLM → replace selection. Runs
-            // on the processTask chain (whisper ctx not reentrant).
-            let selection = commandSelection
-            let gen = generation
-            setStatus("…"); hud.show(.transcribing)
-            processTask = Task { [prev = processTask] in
-                await prev?.value
-                await self.transform(samples: samples, selection: selection, gen: gen)
-            }
-            return
-        }
-        // Capture this dictation's context now: a quick next fn-press
-        // rewrites the latched state before finish runs.
-        let live = liveTyping
-        let focus = self.focus
-        let gen = generation
-        let settings = self.settings
-        setStatus("…")
-        hud.show(.transcribing)
-        // Chain onto the previous work (any in-flight streaming pass):
-        // whisper ctx is not reentrant, and insertions must land in
-        // dictation order.
-        processTask = Task { [prev = processTask] in
-            await prev?.value
-            await self.finish(samples: samples, live: live, focus: focus, gen: gen,
-                              settings: settings)
-        }
-    }
-
-    /// Abort the in-flight dictation: stop the stream loop + recorder (discard
-    /// audio, never call whisper), then queue the undo of any live-typed text on
-    /// the processTask chain so it serializes behind a still-running streaming
-    /// pass and reads the final `typed` value. `silent` = accidental short tap
-    /// (no sound, HUD just hides); otherwise a real cancel (sound + ✕ HUD).
-    func cancelDictation(silent: Bool) {
-        isRecording = false          // stops the stream loop
-        _ = recorder.stop()          // discard captured audio
-        if !silent { Sound.cancel() }
-        let hud = self.hud
-        processTask = Task { [prev = self.processTask] in
-            await prev?.value        // wait out any in-flight streaming pass
-            await MainActor.run {
-                // Undo live-typed text only if still provably ours (same
-                // invariant as finish's empty-transcript path — never blind-delete).
-                let typedCount = self.typed.count
-                if typedCount > 0, Inserter.canEraseTyped(self.typed) {
-                    Inserter.typeBackspaces(typedCount)
-                }
-                self.typed = ""
-                self.window = nil    // discard any confirmed-prefix the stream handed off
-                if silent { hud.hide() } else { hud.show(.cancelled) }
-            }
-        }
-        showIdle()
-    }
-
-    func finish(samples: [Float], live: Bool, focus: Inserter.FocusTarget, gen: Int,
-                settings: Settings) async {
-        let hud = self.hud // bind so main-queue hops don't capture non-Sendable self
-        // One trace line per dictation, whichever path finish() leaves by.
-        defer { Trace.flush() }
-        defer {
-            DispatchQueue.main.async {
-                // Don't stamp over an active recording, and keep ⚠️ visible
-                // while there's no model / settings are broken / permissions missing.
-                guard !self.isRecording else { return }
-                self.showIdle()
-                self.unloadAfterTranscription()
-            }
-        }
-        guard let transcriber else {
-            NSLog("Parla: no whisper model loaded — run scripts/download-model.sh")
-            DispatchQueue.main.async { hud.show(.error("No whisper model")) }
-            return
-        }
-        // var: frontAppName is rebound below to the app the text actually landed
-        // in — it isn't known until the finalize insert.
-        var pipeline = Pipeline(
-            transcribe: { samples, prompt in transcriber.transcribe(samples, initialPrompt: prompt) },
-            cleanup: { transcript, ctx in
-                // A factory throw (misconfig / no key) lands in Pipeline's raw-transcript fallback.
-                try await makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
-                    .clean(transcript: transcript, context: ctx)
-            },
-            settings: { settings },
-            frontAppName: { nil })
-
-        // Raw transcript — reuse the stream's confirmed prefix so the final pass
-        // is O(tail), not O(whole utterance). self.window is ours to consume:
-        // stream() (queued just before us) wrote it, the chain serializes access.
-        let raw: String?
-        if let win = self.window {
-            self.window = nil
-            let cut = min(win.cutSample, samples.count)
-            let tail = Array(samples[cut...])
-            // Min-audio guard on the TAIL only: a long dictation trailing off into
-            // silence still finalizes its confirmed prefix — we just skip the tail
-            // whisper pass (which would hallucinate) and use the confirmed text raw.
-            if TextRules.audioWorthTranscribing(sampleCount: tail.count, rms: AudioRecorder.rms(tail)) {
-                let tailText = transcriber.transcribe(
-                    tail,
-                    initialPrompt: StreamWindow.tailPrompt(dictionary: settings.dictionary,
-                                                           confirmed: win.confirmedText))
-                let joined = StreamWindow.join(win.confirmedText, tailText)
-                raw = joined.isEmpty ? nil : joined
-            } else {
-                raw = win.confirmedText.isEmpty ? nil : win.confirmedText
-            }
-        } else if TextRules.audioWorthTranscribing(sampleCount: samples.count, rms: AudioRecorder.rms(samples)) {
-            raw = pipeline.transcript(samples: samples)
-        } else {
-            // Too short or silent — whisper hallucinates here. Treat as empty.
-            NSLog("Parla finish: audio below min-audio floor, skipping whisper")
-            raw = nil
-        }
-
-        Trace.mark(.finalPassDone)
-
-        guard let raw else {
-            await MainActor.run {
-                // Empty transcript: undo anything we streamed — only if verified ours.
-                let typedCount = self.typed.count
-                NSLog("Parla finish: empty transcript, typed=%d", typedCount)
-                if typedCount > 0, Inserter.canEraseTyped(self.typed) {
-                    Inserter.typeBackspaces(typedCount)
-                }
-                self.typed = ""
-                hud.hide()
-            }
-            return
-        }
-
-        // Cleanup intent, decided once from the latched settings. Configured
-        // means the user set a key (anthropic) or a baseURL (openai-compatible)
-        // even if it's invalid — a broken config must still attempt and surface
-        // raw-fallback, while keyless (a supported config) skips the polish leg
-        // instead of flashing "polishing…" into a guaranteed "failed" toast.
-        let willPolish = cleanupIsConfigured(
-            settings: settings, env: ProcessInfo.processInfo.environment)
-
-        // Instant finalize: land the raw transcript NOW; the LLM polish swaps in
-        // behind it without blocking the user. nil = dropped (secure field).
-        let landingResult: (landing: Landing, insertText: String, bundleID: String?, appName: String?)? = await MainActor.run {
-            let typedCount = self.typed.count // graphemes streamed live so far
-            defer { self.typed = "" }
-            // `focus` was latched at fn-down; re-check BEFORE the transcript is
-            // logged so a password dictated into a moved-into secure field never
-            // reaches unified logging. Same semantics as the (_, .secure) arm
-            // below: never type, never log, never store — drop it.
-            if Inserter.focusTarget() == .secure {
-                NSLog("Parla finish path: focus moved to secure field, dropped")
-                hud.show(.error("Not supported in password fields"))
-                return nil
-            }
-            // Sample the destination app HERE, not at fn-down: dictation often
-            // starts before the user clicks into the app the text is meant for.
-            // Feeds the flatten rule, the cleanup prompt's app-tone hint and the
-            // history entry — all three describe where the text landed.
-            let landingApp = NSWorkspace.shared.frontmostApplication
-            let landingBundleID = landingApp?.bundleIdentifier
-            let landingAppName = landingApp?.localizedName
-            // Flatten against the actual keystroke target. The cleaned swap must
-            // use this same bundle ID so both sides of its diff agree.
-            let insertText = TextRules.flattensNewlines(bundleID: landingBundleID)
-                ? TextRules.flattenForTerminal(raw) : raw
-            // Never log the transcript for a secure field — it's plausibly a
-            // password, and unified logging is readable in Console.
-            NSLog("Parla finish: raw=%@ live=%d focus=%d typed=%d",
-                  focus == .secure ? "<secure>" : insertText, live ? 1 : 0, focus == .none ? 0 : 1, typedCount)
-            // Show "polishing…" only when a polish is actually coming; without
-            // polish the raw transcript IS final — land the terminal HUD
-            // state directly, no interstitial that nothing will ever resolve.
-            let fieldHUD: HUD.State = willPolish ? .polishing : .done
-            let historyHUD: HUD.State = willPolish ? .polishing
-                : settings.historyEnabled ? .savedToHistory : .error("History off — text discarded")
-            switch (live, focus) {
-            case (_, .secure):
-                // Defensive: secure fields are refused at fn-down. Never type,
-                // never store — drop the transcript entirely.
-                NSLog("Parla finish path: secure field, dropped")
-                hud.show(.error("Not supported in password fields"))
-                return nil
-            case (true, _):
-                // Diff-based finalize: fix only the diverging tail of the
-                // live-typed text instead of erasing and retyping all of it —
-                // the streamed text usually already equals the final text.
-                let d = LiveTyper.diff(typed: self.typed, new: insertText)
-                if typedCount == 0 {
-                    // Nothing streamed (short utterance): single insert.
-                    NSLog("Parla finish path: nothing typed, focused insert")
-                    Inserter.insert(insertText)
-                } else if Inserter.canEraseTyped(self.typed) {
-                    NSLog("Parla finish path: ax-verified diff finalize (erase %d)", d.erase)
-                    Inserter.typeBackspaces(d.erase)
-                    Inserter.typeUnicode(d.append)
-                } else if d.erase == 0, d.append.isEmpty {
-                    // Streamed text already IS the final text — no keystrokes.
-                    NSLog("Parla finish path: streamed text already final")
-                } else {
-                    // Can't prove the field still ends with our streamed text —
-                    // leave it in place; history retains the final when enabled.
-                    NSLog("Parla finish path: unverified, no safe finalize")
-                    hud.show(historyHUD)
-                    return (.history, insertText, landingBundleID, landingAppName)
-                }
-                hud.show(fieldHUD)
-                return (.field, insertText, landingBundleID, landingAppName)
-            case (false, .unknown), (false, .editable):
-                NSLog("Parla finish path: focused insert")
-                Inserter.insert(insertText) // insert at cursor
-                hud.show(fieldHUD)
-                return (.field, insertText, landingBundleID, landingAppName)
-            case (false, .none):
-                // Nothing focused: never type into the void; history may retain it.
-                NSLog("Parla finish path: no focus, no insertion")
-                hud.show(historyHUD)
-                return (.history, insertText, landingBundleID, landingAppName)
-            }
-        }
-        guard let landingResult else { return } // dropped: no sound, no polish, no history
-        Trace.mark(.landed)
-        let landing = landingResult.landing
-        let insertText = landingResult.insertText
-        let appName = landingResult.appName
-        pipeline.frontAppName = { appName }
-
-        // The POST starts after landing keystrokes; polish is async anyway.
-        // [pipeline] copies the struct in — a `var` can't cross into a Task.
-        let cleanTask: Task<(text: String, failure: String?), Never>? = willPolish
-            ? Task { [pipeline] in await pipeline.clean(transcript: raw) } : nil
-        switch landing {
-        case .field:
-            Sound.finish()
-        case .history where settings.historyEnabled:
-            Sound.finish()
-        case .history:
-            break
-        }
-
-        // With cleanup unconfigured, the raw transcript is final; retain it when
-        // history is enabled, then stop — no polish, no swap.
-        guard let cleanTask else {
-            if settings.historyEnabled {
-                let entry = HistoryEntry(raw: raw, cleaned: nil, appName: appName)
-                await MainActor.run { self.history.append(entry) }
-            }
-            return
-        }
-
-        // Async polish: cleanup, then swap raw → cleaned with the same
-        // verification machinery. Still on the processTask chain, so a queued
-        // next dictation starts only after this resolves (insertion order holds).
-        let cleanResult = await cleanTask.value
-        // Same terminal guard on the cleaned text — it replaces insertText in the
-        // field, so it must be flattened too, and the plan must diff flattened vs
-        // flattened (insertText) or the erase/verify counts won't match the field.
-        let cleaned = TextRules.flattensNewlines(bundleID: landingResult.bundleID)
-            ? TextRules.flattenForTerminal(cleanResult.text) : cleanResult.text
-        await MainActor.run {
-            let plan = LiveTyper.swapPlan(raw: insertText, cleaned: cleaned)
-            let failureHUD = cleanResult.failure.map(HUD.State.rawFallback)
-            guard gen == self.generation else {
-                // A newer dictation owns the field and HUD — no keystrokes, no
-                // HUD. History still records the result below when enabled.
-                NSLog("Parla swap: stale generation, no swap")
-                return
-            }
-            if case .field = landing, Inserter.focusTarget() == .secure {
-                // Same never-type-into-secure invariant as landing.
-                NSLog("Parla swap path: focus moved to secure field, no cleaned swap")
-                let secureHUD: HUD.State = failureHUD ?? (plan == nil ? .done
-                    : settings.historyEnabled ? .cleanedInHistory
-                    : .error("History off — cleanup discarded"))
-                hud.show(secureHUD)
-                return
-            }
-            switch landing {
-            case .history:
-                // Nothing of ours in a field — history is the only durable landing.
-                hud.show(settings.historyEnabled
-                    ? (failureHUD ?? .savedToHistory)
-                    : .error("History off — text discarded"))
-            case .field:
-                guard let plan else { // polish was a no-op: either cleanup failed, or the LLM agreed raw was fine
-                    hud.show(failureHUD ?? .done)
-                    return
-                }
-                if Inserter.canEraseTyped(insertText) {
-                    NSLog("Parla swap path: ax-verified tail swap (erase %d)", plan.eraseTail.count)
-                    Inserter.typeBackspaces(plan.eraseTail.count)
-                    Inserter.typeUnicode(plan.replacement)
-                    hud.show(.done)
-                } else {
-                    // AX can't prove the field still ends with our text — leave
-                    // the raw alone; history retains the cleaned version when enabled.
-                    NSLog("Parla swap path: unverified, no cleaned swap")
-                    hud.show(settings.historyEnabled ? .cleanedInHistory
-                        : .error("History off — cleanup discarded"))
-                }
-            }
-        }
-
-        Trace.mark(.cleanedSwapped)
-
-        // Record once per dictation (secure fields returned above; raw is
-        // non-nil past the guard). cleaned is dropped when cleanup failed or
-        // matched raw. Append on main to serialize with menu reads/Clear.
-        if settings.historyEnabled {
-            let cleanedForHistory = (cleanResult.failure == nil && cleanResult.text != raw) ? cleanResult.text : nil
-            let entry = HistoryEntry(raw: raw, cleaned: cleanedForHistory, appName: appName)
-            DispatchQueue.main.async { self.history.append(entry) }
-        }
-    }
-
-    /// Command mode: transcribe the spoken instruction on-device, transform the
-    /// selection captured at fn-down via the cleanup LLM, and replace the live
-    /// selection if it's still intact — else park it when history is enabled.
-    /// Runs on the processTask chain like finish().
-    func transform(samples: [Float], selection: String, gen: Int) async {
-        let hud = self.hud
-        defer {
-            DispatchQueue.main.async {
-                guard !self.isRecording else { return }
-                self.showIdle()
-                self.unloadAfterTranscription()
-            }
-        }
-        guard let transcriber else {
-            NSLog("Parla transform: no whisper model loaded")
-            DispatchQueue.main.async { hud.show(.error("No whisper model")) }
-            return
-        }
-        let settings = store.load()
-        // Transforms REQUIRE the cleanup LLM (no raw fallback here) — fail fast
-        // with the real reason before burning a whisper pass, instead of a
-        // misleading "Transform failed" after it. A configured-but-broken setup
-        // still proceeds and hard-fails so the misconfiguration surfaces.
-        guard cleanupIsConfigured(settings: settings, env: ProcessInfo.processInfo.environment) else {
-            NSLog("Parla transform: cleanup not configured")
-            DispatchQueue.main.async { hud.show(.error("Cleanup not configured")) }
-            return
-        }
-        // Same min-audio floor as dictation: too short/silent = no instruction.
-        guard TextRules.audioWorthTranscribing(sampleCount: samples.count, rms: AudioRecorder.rms(samples)) else {
-            NSLog("Parla transform: audio below min-audio floor")
-            DispatchQueue.main.async { hud.show(.error("No command heard")) }
-            return
-        }
-        let prompt = settings.dictionary.isEmpty ? nil : settings.dictionary.joined(separator: ", ")
-        let instruction = transcriber.transcribe(samples, initialPrompt: prompt)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !instruction.isEmpty else {
-            NSLog("Parla transform: empty instruction")
-            DispatchQueue.main.async { hud.show(.error("No command heard")) }
-            return
-        }
-
-        // Transform via the cleanup client DIRECTLY (not Pipeline.clean): its
-        // raw-transcript fallback would return the spoken instruction on failure,
-        // which must never be typed over the user's selection. A failure here is
-        // a hard failure — nothing inserted, nothing stored.
-        let ctx = CleanupContext(dictionary: settings.dictionary, snippets: [:], appName: nil, selection: selection)
-        let transformed: String
-        do {
-            let out = try await makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
-                .clean(transcript: instruction, context: ctx)
-            transformed = CleanupSanitizer.sanitize(out)
-        } catch {
-            NSLog("%@", "Parla transform failed: \(error)")
-            DispatchQueue.main.async { hud.show(.error("Transform failed")) }
-            return
-        }
-        guard !transformed.isEmpty else {
-            NSLog("Parla transform: empty result")
-            DispatchQueue.main.async { hud.show(.error("Transform failed")) }
-            return
-        }
-        // ponytail: generous expansion ceiling; add repeated-substring detection
-        // if legitimate transforms ever need more than 6× the source.
-        let lengthCeiling = max(2000, 6 * selection.count)
-        guard transformed.count <= lengthCeiling else {
-            NSLog("Parla transform: result over ceiling (%d > %d)", transformed.count, lengthCeiling)
-            DispatchQueue.main.async { hud.show(.error("Transform failed")) }
-            return
-        }
-        await MainActor.run {
-            // Park when we can't safely type; without history, discard honestly.
-            let park = { (why: String) -> HUD.State in
-                if settings.historyEnabled {
-                    NSLog("Parla transform: %@, saved to history", why)
-                    self.history.append(HistoryEntry(raw: transformed, cleaned: nil, appName: nil))
-                    return .savedToHistory
-                }
-                NSLog("Parla transform: %@, discarded (history off)", why)
-                return .error("History off — text discarded")
-            }
-            guard gen == self.generation else {
-                // A newer dictation owns the field/HUD — no keystrokes.
-                _ = park("stale generation")
-                return
-            }
-            // Same insert-time re-check as finish(): focus may have moved into
-            // a password field since fn-down — never type there, and don't even
-            // query its selection. The result derives from the user's own
-            // (non-secure) selection, so parking it in history is safe.
-            guard Inserter.focusTarget() != .secure else {
-                hud.show(park("focus moved to secure field"))
-                return
-            }
-            // Only replace if the selection is textually unchanged; otherwise
-            // never type over new context.
-            if Inserter.selectedText() == selection {
-                NSLog("Parla transform: selection intact, replacing")
-                let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                // Resolve terminal safety only for text actually being typed.
-                let result = TextRules.flattensNewlines(bundleID: bundleID)
-                    ? TextRules.flattenForTerminal(transformed) : transformed
-                Inserter.insert(result) // typing replaces the live selection
-                Sound.finish()
-                hud.show(.done)
-            } else {
-                hud.show(park("selection changed"))
-            }
-        }
-        // ponytail: transforms only attempt history on the fallback paths above —
-        // a landed transform isn't a dictation, and the source text is the user's.
-    }
-
-    /// ~300ms between streaming passes, sliced so fn-up (isRecording flipping
-    /// false) unblocks the queued finish() within ~50ms instead of sitting out
-    /// the full sleep as dead time.
-    private func pauseBetweenPasses() async {
-        for _ in 0..<6 {
-            guard isRecording else { return }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-    }
-
-    /// Streaming pass loop: while fn is held, re-transcribe the unconfirmed
-    /// tail of the buffer. Runs for EVERY dictation (shadow streaming) so the
-    /// confirmed-prefix window is always built and finish() stays O(tail);
-    /// the erase+append typing is additionally gated on liveTyping. Runs on
-    /// the processTask chain (serialized with the final pass). Once the tail
-    /// exceeds ~15s a confirmed prefix is frozen at a quiet spot (see
-    /// StreamWindow) so each pass stays O(tail), not O(n²). In shadow mode the
-    /// tail pass itself is skipped until the buffer crosses that threshold —
-    /// nothing reads its output before the first cut.
-    ///
-    /// Passes abort cooperatively at fn-up (shouldAbort) and return "" — every
-    /// transcribe here is followed by an isRecording recheck that BREAKS before
-    /// the result is used, so an aborted "" is never committed as a hypothesis
-    /// or a confirmed head. The handoff below still runs after a break: it only
-    /// carries state from completed passes.
-    func stream(transcriber: WhisperTranscriber) async {
-        // Latched at fn-down, just before this task was queued — no disk read per pass.
-        let dict = self.settings.dictionary
-        var confirmed = "" // frozen transcript of snap[0..<cut]
-        var cut = 0
-        var lastCount = 0
-        // ponytail: isRecording is written on main, read here — benign stop-flag race.
-        while self.isRecording {
-            let snap = self.recorder.snapshot()
-            guard snap.count - lastCount >= 8000 else { // <0.5s new audio, wait
-                await pauseBetweenPasses()
-                continue
-            }
-            lastCount = snap.count
-            var tail = Array(snap[cut...])
-            if tail.count > StreamWindow.threshold {
-                // Freeze the head up to the quietest spot near cutTarget: one
-                // final pass over it, then it's never re-transcribed.
-                let rel = StreamWindow.quietestCut(samples: tail, near: StreamWindow.cutTarget)
-                let head = transcriber.transcribe(
-                    Array(tail[..<rel]),
-                    initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
-                    shouldAbort: { !self.isRecording })
-                // Aborted head pass returns "": committing the cut would silently
-                // drop the head's text from confirmed. Only commit a completed pass.
-                guard self.isRecording else { break }
-                confirmed = StreamWindow.join(confirmed, head)
-                cut += rel
-                tail = Array(tail[rel...])
-                NSLog("Parla stream: cut at %.1fs, confirmed %d chars",
-                      Double(cut) / 16_000, confirmed.count)
-            }
-            // Below the freeze threshold nothing consumes the tail pass: `confirmed`
-            // only ever grows in the head cut above, and the typing block is gated on
-            // liveTyping. Running it anyway burns GPU the final pass is waiting for,
-            // so short dictations (nearly all of them) skip straight to finish().
-            // Live typing is the one real consumer — if it's ever re-enabled it needs
-            // a hypothesis from the first second, not from 15s in.
-            guard self.liveTyping || snap.count > StreamWindow.threshold else {
-                await pauseBetweenPasses()
-                continue
-            }
-            let tailText = transcriber.transcribe(
-                tail,
-                initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
-                shouldAbort: { !self.isRecording })
-            // Aborted pass returns "": never treat it as a new hypothesis —
-            // live typing would erase everything the user sees. finish() takes over.
-            guard self.isRecording else { break }
-            let text = StreamWindow.join(confirmed, tailText)
-            await MainActor.run {
-                // Shadow mode: window-building only, never touch the field.
-                guard self.liveTyping else { return }
-                let d = LiveTyper.diff(typed: self.typed, new: text)
-                NSLog("Parla stream: %.1fs audio -> \"%@\" (erase %d, append \"%@\")",
-                      Double(snap.count) / 16_000, text, d.erase, d.append)
-                if d.erase == 0 {
-                    Inserter.typeUnicode(d.append) // pure append: can't harm foreign text
-                } else if Inserter.canEraseTyped(self.typed) {
-                    Inserter.typeBackspaces(d.erase)
-                    Inserter.typeUnicode(d.append)
-                } else {
-                    // Can't prove the tail is ours — never risk foreign text.
-                    NSLog("Parla stream: revision skipped, tail unverified (erase %d)", d.erase)
-                    return
-                }
-                self.typed = text
-            }
-            await pauseBetweenPasses()
-        }
-        // Hand the window to this dictation's finish(), queued right after us on
-        // the processTask chain — the chain is the synchronization.
-        if !confirmed.isEmpty {
-            self.window = StreamWindow(confirmedText: confirmed, cutSample: cut)
-        }
     }
 
     func loadModel() {
@@ -878,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Preemptible: a dictation started before warmup finishes takes
                 // priority — it eats the cold start instead of queueing behind it.
                 _ = transcriber.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil,
-                                           shouldAbort: { self.isRecording })
+                                           shouldAbort: { self.capturingGen.withLock { $0 != 0 } })
                 NSLog("Parla: whisper warmup done")
             }
         }
@@ -904,7 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func startUnloadWatcher() {
         unloadTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             guard let self, self.transcriber != nil else { return }
-            if self.isRecording { self.lastModelUse = Date(); return }
+            if self.session.isCapturing { self.lastModelUse = Date(); return }
             let idle = Date().timeIntervalSince(self.lastModelUse)
             guard self.unloadPolicy.shouldUnloadOnTick(idle: idle, recording: false) else { return }
             self.unloadModel(reason: "idle \(Int(idle))s")
@@ -916,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await prev?.value
             await MainActor.run {
                 // A dictation may have started while we waited in the queue.
-                guard !self.isRecording, self.transcriber != nil else { return }
+                guard !self.session.isCapturing, self.transcriber != nil else { return }
                 self.transcriber = nil
                 NSLog("%@", "Parla: whisper model unloaded (\(reason))")
             }
@@ -928,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func unloadAfterTranscription() {
         guard unloadPolicy.unloadsAfterTranscription else { return }
         DispatchQueue.main.async { [self] in
-            guard !isRecording else { return }
+            guard !session.isCapturing else { return }
             unloadModel(reason: "policy: immediately")
         }
     }
@@ -961,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Idle menu-bar state: the logo glyph when healthy, ⚠️ if anything needs the
     /// user's attention (no model, broken settings.json, missing permission).
     /// store.lastError reflects the most recent load() — refreshed at launch, and on
-    /// any dictation or menu open that finds settings.json changed (currentSettings).
+    /// any dictation or menu open that finds settings.json changed.
     func showIdle() {
         // modelReady, not `transcriber != nil`: an idle unload is not a problem
         // the user needs to see a ⚠️ about.
@@ -1068,270 +440,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")
         else { return }
         NSWorkspace.shared.open(url)
-    }
-
-    /// Menu action: fetch the catalog default. The Hub picker calls
-    /// `download(_:)` directly for any other model.
-    @objc func downloadModel() { download(ModelCatalog.default) }
-
-    /// menuNeedsUpdate hides the action while downloadTask is non-nil so a
-    /// second click can't start a duplicate.
-    func download(_ model: ModelCatalog.Model) {
-        guard downloadTask == nil else { return }
-        setStatus("⬇️ 0%")
-        let dest = URL(fileURLWithPath: ModelCatalog.path(for: model))
-        let task = URLSession.shared.downloadTask(with: model.url) { [weak self] tmp, _, error in
-            // The tmp file is deleted the moment this handler returns — verify
-            // and move it NOW, before hopping to main for the UI. URLSession's
-            // temp file IS vibe PR #1245's `.part` staging; re-staging it into
-            // one of our own would cost another 574 MB of I/O for nothing.
-            let failure: Error?
-            if let error {
-                failure = error
-            } else if let tmp {
-                do { try ModelCatalog.install(staged: tmp, as: model, at: dest); failure = nil }
-                catch { failure = error }
-            } else {
-                failure = ModelFileError(description: "no file")
-            }
-            DispatchQueue.main.async { self?.finishDownload(model: model, error: failure) }
-        }
-        // KVO on the task's own Progress — least code for a live percentage,
-        // no delegate class needed.
-        downloadObservation = task.progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
-            DispatchQueue.main.async {
-                self?.setStatus("⬇️ \(Int(progress.fractionCompleted * 100))%")
-                self?.hubModel.downloadProgress = progress.fractionCompleted
-            }
-        }
-        downloadTask = task
-        hubModel.downloadProgress = 0
-        hubModel.downloadingModel = model
-        task.resume()
-    }
-
-    private func finishDownload(model: ModelCatalog.Model, error: Error?) {
-        downloadObservation = nil
-        downloadTask = nil
-        hubModel.downloadProgress = nil
-        hubModel.downloadingModel = nil
-        if let error {
-            NSLog("%@", "Parla model download failed: \(error)")
-            // A verification failure is not a network failure: the file arrived
-            // and was wrong (proxy error page, truncation, re-upload). Saying so
-            // stops the user retrying a download that will keep failing.
-            hud.show(.error(error is ModelFileError
-                            ? "Downloaded model failed verification" : "Model download failed"))
-            showIdle()
-            return
-        }
-        // Switch to what the user just waited for. Written through the store
-        // rather than hubModel.settings: hubModel's copy is default-constructed
-        // until the window is first opened, so writing it would save those
-        // defaults over the user's real settings.json.
-        var s = store.load()
-        let path = ModelCatalog.path(for: model)
-        if s.whisperModelPath != path {
-            s.whisperModelPath = path
-            try? store.save(s)
-            hubModel.refresh()
-        }
-        loadModel() // clears the ⚠️ when it succeeds (showIdle() inside)
-    }
-}
-
-extension AppDelegate: NSMenuDelegate {
-    /// Rebuilt from scratch right before the menu shows, so permission/model/
-    /// settings status is always current — cheaper than tracking diffs.
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let openHubItem = NSMenuItem(title: "Open Parla…", action: #selector(openHub), keyEquivalent: "")
-        openHubItem.target = self
-        menu.addItem(openHubItem)
-        let scratchItem = NSMenuItem(title: "Open Scratchpad", action: #selector(openScratchpad), keyEquivalent: "s")
-        // Display only — the global ⌃⌘S lives in HotkeyMonitor (swallowed there).
-        scratchItem.keyEquivalentModifierMask = [.control, .command]
-        scratchItem.target = self
-        menu.addItem(scratchItem)
-        menu.addItem(.separator())
-
-        if let update = availableUpdate {
-            let item = NSMenuItem(title: "Update available (\(update.version))…",
-                                   action: #selector(openUpdate), keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-            menu.addItem(.separator())
-        }
-
-        if !modelReady {
-            if let downloading = hubModel.downloadingModel {
-                let item = NSMenuItem(title: "Downloading \(downloading.displayName)…", action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                menu.addItem(item)
-            } else {
-                let m = ModelCatalog.default
-                let item = NSMenuItem(title: "Download model (\(m.displayName), \(m.sizeLabel))",
-                                       action: #selector(downloadModel), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            }
-            menu.addItem(.separator())
-        }
-
-        if let error = store.lastError {
-            let item = NSMenuItem(title: "⚠️ settings.json invalid — click to open",
-                                   action: #selector(openSettings), keyEquivalent: "")
-            item.target = self
-            item.toolTip = error
-            menu.addItem(item)
-            menu.addItem(.separator())
-        }
-
-        addHistoryItems(to: menu)
-
-        // Permissions surface only when missing — a granted app needs no reminder.
-        if !micGranted { menu.addItem(permissionItem(name: "Microphone", pane: "Privacy_Microphone")) }
-        if !axGranted { menu.addItem(permissionItem(name: "Accessibility", pane: "Privacy_Accessibility")) }
-        if !micGranted || !axGranted { menu.addItem(.separator()) }
-
-        addMicrophoneItem(to: menu)
-
-        let launch = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-        launch.target = self
-        launch.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(launch)
-        menu.addItem(.separator())
-
-        let report = NSMenuItem(title: "Report a Bug or Feature…", action: #selector(reportIssue), keyEquivalent: "")
-        report.target = self
-        menu.addItem(report)
-        menu.addItem(.separator())
-
-        menu.addItem(NSMenuItem(title: "Quit Parla", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-
-        showIdle() // menu open is a free moment to reconcile the icon too
-    }
-
-    /// "Paste Last Dictation" + a "Recent" submenu (up to 8, newest first) with
-    /// a "Clear History" action. Nil action ⇒ auto-disabled when empty.
-    private func addHistoryItems(to menu: NSMenu) {
-        let entries = history.entries
-        let pasteLast = NSMenuItem(title: "Paste Last Dictation",
-                                    action: entries.isEmpty ? nil : #selector(pasteLastDictation),
-                                    keyEquivalent: "v")
-        // Display only — the global ⌃⌘V lives in HotkeyMonitor (and is swallowed
-        // there before any menu could see it).
-        pasteLast.keyEquivalentModifierMask = [.control, .command]
-        pasteLast.target = self
-        menu.addItem(pasteLast)
-
-        let recent = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        if entries.isEmpty {
-            let none = NSMenuItem(title: "No dictations yet", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            sub.addItem(none)
-        } else {
-            for entry in entries.prefix(8) {
-                let item = NSMenuItem(title: Self.menuTitle(entry.best),
-                                       action: #selector(pasteRecent(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = entry.best
-                item.toolTip = entry.appName
-                sub.addItem(item)
-            }
-            sub.addItem(.separator())
-            let clear = NSMenuItem(title: "Clear History", action: #selector(clearHistory), keyEquivalent: "")
-            clear.target = self
-            sub.addItem(clear)
-        }
-        recent.submenu = sub
-        menu.addItem(recent)
-        menu.addItem(.separator())
-    }
-
-    /// First non-empty line of `text`, capped ~40 chars with an ellipsis.
-    static func menuTitle(_ text: String) -> String {
-        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-        return line.count > 40 ? String(line.prefix(40)) + "…" : line
-    }
-
-    @objc func pasteLastDictation() {
-        guard let best = history.entries.first?.best else { return }
-        insertFromMenu(best)
-    }
-
-    @objc func pasteRecent(_ sender: NSMenuItem) {
-        guard let text = sender.representedObject as? String else { return }
-        insertFromMenu(text)
-    }
-
-    @objc func clearHistory() { history.clear() }
-
-    /// SMAppService registration only works from the installed .app bundle
-    /// (Info.plist + code signature). ponytail: running via `swift run` still
-    /// shows the toggle, it'll just log-and-HUD the thrown error instead of
-    /// crashing — fine for dev, real usage is always the bundled app.
-    @objc func toggleLaunchAtLogin() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            NSLog("%@", "Parla: launch-at-login toggle failed: \(error)")
-            hud.show(.error("Launch at Login failed"))
-        }
-    }
-
-    /// Menu actions fire once the menu has dismissed, but focus handoff back to
-    /// the previous app can lag the click — typing too early hits nothing.
-    /// Delay a beat; worst case the text is still in history to retry.
-    private func insertFromMenu(_ text: String) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.insertStoredText(text) }
-    }
-
-    /// "Microphone" submenu: "System Default" + each input device, a checkmark
-    /// on the current selection. Empty representedObject ⇒ clear to default.
-    private func addMicrophoneItem(to menu: NSMenu) {
-        let selected = store.load().inputDeviceUID
-        let mic = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-
-        let def = NSMenuItem(title: "System Default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
-        def.target = self
-        def.representedObject = ""
-        def.state = selected == nil ? .on : .off
-        sub.addItem(def)
-        sub.addItem(.separator())
-
-        for device in AudioRecorder.availableInputs() {
-            let item = NSMenuItem(title: device.name, action: #selector(selectMicrophone(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = device.uid
-            item.state = device.uid == selected ? .on : .off
-            sub.addItem(item)
-        }
-        mic.submenu = sub
-        menu.addItem(mic)
-    }
-
-    @objc func selectMicrophone(_ sender: NSMenuItem) {
-        guard store.lastError == nil else { return } // never clobber a file being hand-fixed
-        let uid = sender.representedObject as? String
-        var s = store.load()
-        s.inputDeviceUID = (uid?.isEmpty ?? true) ? nil : uid
-        try? store.save(s)
-        recorder.inputDeviceUID = s.inputDeviceUID
-    }
-
-    private func permissionItem(name: String, pane: String) -> NSMenuItem {
-        let item = NSMenuItem(title: "⚠️ \(name): not granted — click to open settings",
-                               action: #selector(openPrivacyPane(_:)), keyEquivalent: "")
-        item.target = self
-        item.representedObject = pane
-        return item
     }
 }
 

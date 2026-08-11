@@ -1,6 +1,6 @@
 import Foundation
 
-public struct CleanupSettings: Codable, Equatable {
+public struct CleanupSettings: Codable, Equatable, Sendable {
     public var provider: String = "anthropic"   // "anthropic" | "openai-compatible"
     public var baseURL: String? = nil            // required for openai-compatible
     // These three apply to openai-compatible only; anthropic uses the top-level
@@ -22,7 +22,7 @@ public struct CleanupSettings: Codable, Equatable {
     }
 }
 
-public struct Settings: Codable, Equatable {
+public struct Settings: Codable, Equatable, Sendable {
     public var dictionary: [String] = []
     public var snippets: [String: String] = [:]
     // Cleanup is a constrained rewrite, not a reasoning task: Haiku is far
