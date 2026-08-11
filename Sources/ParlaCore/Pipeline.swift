@@ -4,16 +4,19 @@ public struct Pipeline {
     public var transcribe: ([Float], String?) -> String
     public var cleanup: (String, CleanupContext) async throws -> String
     public var settings: () -> Settings
-    public var frontAppName: () -> String?
+    /// The destination app's bundle ID, not its name: the only thing the prompt
+    /// does with the destination is pick a tone hint by `AppCategory`, and that
+    /// is keyed on the bundle ID (`CleanupContext.appName` reaches nothing).
+    public var frontBundleID: () -> String?
 
     public init(transcribe: @escaping ([Float], String?) -> String,
                 cleanup: @escaping (String, CleanupContext) async throws -> String,
                 settings: @escaping () -> Settings,
-                frontAppName: @escaping () -> String?) {
+                frontBundleID: @escaping () -> String?) {
         self.transcribe = transcribe
         self.cleanup = cleanup
         self.settings = settings
-        self.frontAppName = frontAppName
+        self.frontBundleID = frontBundleID
     }
 
     /// Whisper pass only: trimmed transcript, nil when empty. Split from clean()
@@ -55,7 +58,7 @@ public struct Pipeline {
             return (expansion, nil)
         }
         let ctx = CleanupContext(dictionary: s.dictionary, snippets: s.snippets,
-                                 appName: frontAppName())
+                                 appName: nil, bundleID: frontBundleID())
         do {
             let cleaned = CleanupSanitizer.sanitize(try await cleanup(transcript, ctx))
             if cleaned.isEmpty {

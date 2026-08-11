@@ -84,6 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.hud.idleBarSize = HUD.idleSize(s.hudIdleSize)
             self.hud.showAlways = s.showHudAlways
             self.recorder.inputDeviceUID = s.inputDeviceUID
+            // Warm the new mic. A warm engine still running on the OLD one is left
+            // alone (see prepare()); start() rebinds it, so the first press after a
+            // mic switch is cold but correct — accepted over a rebind here, which
+            // would tear the tap down mid-capture when hands-free is latched.
+            self.recorder.prepare()
             // The Hub's model picker writes whisperModelPath through this same
             // save, so a changed path is the signal to swap the loaded context.
             if (s.whisperModelPath ?? WhisperTranscriber.defaultModelPath()) != self.loadedModelPath {
@@ -114,6 +119,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hud.idleBarSize = HUD.idleSize(launchSettings.hudIdleSize)
         hud.showAlways = launchSettings.showHudAlways
         recorder.inputDeviceUID = launchSettings.inputDeviceUID
+        // Turn the warm engine + pre-roll ring on. This is what moves the 240–700 ms
+        // device open off the fn-down press and lets start() prepend the 0.45 s
+        // spoken before the key went down. Costs that open here at launch instead,
+        // and keeps the mic indicator lit while Parla is idle — deliberate.
+        // No-op until the mic permission lands, so a fresh install stays cold until
+        // its first dictation ends (see AudioRecorder.warmUp).
+        recorder.prepare()
         // Fresh install: open the setup flow instead of leaving a ⚠️ glyph in the
         // menu bar for the user to find and decode. A broken settings.json is a
         // different problem with its own banner — don't onboard over it.

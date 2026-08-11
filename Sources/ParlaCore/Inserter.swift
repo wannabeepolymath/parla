@@ -125,7 +125,11 @@ public enum Inserter {
     /// Focused element via the system-wide query, falling back to asking the
     /// frontmost app directly — Electron/Chromium apps often answer only the
     /// app-level query.
-    private static func focusedElement() -> AXUIElement? {
+    /// Public so the dictionary-learning watcher observes the *same* element
+    /// `canEraseTyped` verified — a second copy of this lookup drifted from it
+    /// once already and lost the Electron fallback, which silently disarmed
+    /// learning in exactly the apps that need it most.
+    public static func focusedElement() -> AXUIElement? {
         let system = AXUIElementCreateSystemWide()
         var focused: CFTypeRef?
         if AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
@@ -164,9 +168,11 @@ public enum Inserter {
         return .unknown
     }
 
-    /// The focused field's full text and cursor position (UTF-16 offset), when
-    /// AX exposes both. nil means "can't see inside the field".
-    static func focusedFieldState() -> (text: NSString, cursor: Int)? {
+    /// The focused field's full text, cursor position and selection length (both
+    /// UTF-16), when AX exposes them. nil means "can't see inside the field".
+    /// The length matters: a non-empty selection makes the position a selection
+    /// anchor, not a caret — see `canErase`.
+    static func focusedFieldState() -> (text: NSString, cursor: Int, selLength: Int)? {
         guard let element = focusedElement() else { return nil }
         var valueRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
@@ -176,7 +182,7 @@ public enum Inserter {
               let rangeRef, CFGetTypeID(rangeRef) == AXValueGetTypeID() else { return nil }
         var range = CFRange()
         guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) else { return nil }
-        return (text as NSString, range.location)
+        return (text as NSString, range.location, range.length)
     }
 
     /// The focused element's current selection via AX. nil when there's no
@@ -192,11 +198,23 @@ public enum Inserter {
 
     /// True when the characters immediately before the cursor are exactly
     /// `typed` — i.e. erasing that many keystrokes removes only our own text.
-    /// False when the field is opaque to AX (can't verify ⇒ don't erase).
+    /// False when the field is opaque to AX, or a live selection would swallow
+    /// the first Delete (can't verify ⇒ don't erase).
     public static func canEraseTyped(_ typed: String) -> Bool {
-        guard !typed.isEmpty else { return true }
-        guard let (text, cursor) = focusedFieldState() else { return false }
+        guard !typed.isEmpty else { return true } // nothing to erase, no AX call needed
+        guard let (text, cursor, selLength) = focusedFieldState() else { return false }
+        return canErase(text: text, cursor: cursor, selLength: selLength, typed: typed)
+    }
+
+    /// Pure decision behind `canEraseTyped`, split out for testability.
+    static func canErase(text: NSString, cursor: Int, selLength: Int, typed: String) -> Bool {
         let len = (typed as NSString).length
+        guard len > 0 else { return true }
+        // With a live selection, `cursor` is the selection's anchor, not a caret:
+        // the first Delete wipes the whole selection — text the user made, not
+        // ours — and the run then stops a character short of our own. Can't
+        // verify what the keystroke will hit ⇒ don't erase.
+        guard selLength == 0 else { return false }
         guard cursor >= len, cursor <= text.length else { return false }
         return text.substring(with: NSRange(location: cursor - len, length: len)) == typed
     }

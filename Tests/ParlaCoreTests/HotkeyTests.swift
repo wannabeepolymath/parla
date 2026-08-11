@@ -163,6 +163,16 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(out, [.down(command: false), .handsFree, .up(short: false)])
     }
 
+    func testHandsFreeLatchesInCommandMode() {
+        // Command mode is entered by holding shift at push-to-talk, so shift is
+        // still down when the latch key arrives: the Space carries [.fn, .shift].
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn, .shift], at: 0)
+        XCTAssertTrue(m.keyDown(keyCode: 49, modifiers: [.fn, .shift], at: 0.1)) // swallowed, not typed
+        XCTAssertEqual(out, [.down(command: true), .handsFree])
+    }
+
     // MARK: esc + paste-last while idle
 
     func testEscWhileHeldCancelsAndIsSwallowed() {
@@ -215,14 +225,15 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(out, [])
     }
 
-    func testExtraModifierDoesNotLatchHandsFree() {
+    func testHandsFreeMatchesAsASupersetUnlikeTheIdleChords() {
+        // The exception to exactness: the latch only fires while the trigger is
+        // held, so extra modifiers must not break it. Exact matching here made
+        // command mode (shift held) fall through to .cancel and leak the Space.
         var out: [HotkeyMonitor.Edge] = []
         let m = monitor(&out)
         m.handle(keyCode: 63, modifiers: [.fn], at: 0)
-        // fn+⌘+Space is Spotlight-with-fn, not the latch: it must cancel like
-        // any other key pressed while the trigger is held, not swallow.
-        XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.fn, .cmd], at: 0.1))
-        XCTAssertEqual(out, [.down(command: false), .cancel])
+        XCTAssertTrue(m.keyDown(keyCode: 49, modifiers: [.fn, .cmd], at: 0.1))
+        XCTAssertEqual(out, [.down(command: false), .handsFree])
     }
 
     func testMissingModifierDoesNotFire() {
@@ -265,6 +276,29 @@ final class HotkeyTests: XCTestCase {
         XCTAssertTrue(m.keyDown(keyCode: 35, modifiers: [.opt, .cmd], at: 0))
         XCTAssertFalse(m.keyDown(keyCode: 9, modifiers: [.ctrl, .cmd], at: 1))
         XCTAssertEqual(out, [.pasteLast])
+    }
+
+    func testRefreshBindingsLoadsFromSettingsAndDropsAnUnusableSet() throws {
+        // The Settings→bindings path a real user exercises: every other rebinding
+        // test assigns `m.bindings` directly and skips the load entirely.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("settings.json")
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let m = HotkeyMonitor(store: SettingsStore(url: url))
+
+        try Data(#"{"hotkeys": {"pushToTalk": "rightoption", "handsFree": "opt+space"}}"#.utf8)
+            .write(to: url)
+        m.refreshBindings()
+        XCTAssertEqual(m.bindings.pushToTalk, KeyChord(61))
+        XCTAssertEqual(m.bindings.handsFree, KeyChord(49, .opt))
+
+        // Hand-edited nonsense: the unparseable chord falls back per field, and a
+        // set that would leave Parla unreachable (V can't be held) is dropped
+        // whole — so fn+Space still works rather than no hotkey at all.
+        try Data(#"{"hotkeys": {"pushToTalk": "v", "handsFree": "ctrl+banana"}}"#.utf8).write(to: url)
+        m.refreshBindings()
+        XCTAssertEqual(m.bindings, HotkeyBindings())
     }
 
     // MARK: chord serialization

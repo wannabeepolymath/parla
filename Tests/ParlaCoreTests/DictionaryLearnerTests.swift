@@ -86,6 +86,18 @@ final class DictionaryLearnerTests: XCTestCase {
         let d = Eval.editDistance("shunade".map { String($0) }, "sinead".map { String($0) })
         XCTAssertEqual(d, 4)
         XCTAssertLessThanOrEqual(Double(d), DictionaryLearner.maxDistanceRatio * 7)
+
+        // The other edge, and the one that costs something to get wrong: 4 edits
+        // over 6 chars is 0.67, just past the ratio, and must not propose. The
+        // accept above only fails if someone *tightens* the constant — a missed
+        // correction. This fails if they widen it, which is how a word Parla never
+        // misheard gets into every future prompt. Together they pin the window.
+        XCTAssertEqual(Eval.editDistance("marina".map { String($0) },
+                                         "maxwel".map { String($0) }), 4)
+        XCTAssertNil(DictionaryLearner.propose(inserted: "Meeting with Marina tomorrow",
+                                               before: "Meeting with Marina tomorrow",
+                                               after: "Meeting with Maxwel tomorrow",
+                                               dictionary: []))
     }
 
     // MARK: - Edits Parla did not cause

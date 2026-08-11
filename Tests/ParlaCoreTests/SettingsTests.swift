@@ -71,7 +71,11 @@ final class SettingsTests: XCTestCase {
         let store = tempStore()
         try FileManager.default.createDirectory(
             at: store.url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(#"{"futureField":true,"cleanupModel":"m"}"#.utf8).write(to: store.url)
+        // `liveStreamingEnabled` is a *retired* key, not a hypothetical one: it
+        // sits in every settings.json written before it was deleted, and those
+        // files must keep decoding.
+        try Data(#"{"futureField":true,"liveStreamingEnabled":false,"cleanupModel":"m"}"#.utf8)
+            .write(to: store.url)
         XCTAssertEqual(store.load().cleanupModel, "m")
     }
 
@@ -84,17 +88,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(s.cleanup.provider, "anthropic")
         XCTAssertEqual(s.cleanup.model, "m")
         XCTAssertEqual(s.dictionary, ["X"])
-    }
-
-    func testLiveStreamingEnabledDefaultTrue() {
-        XCTAssertTrue(Settings().liveStreamingEnabled)
-    }
-
-    func testLiveStreamingEnabledTolerantDecode() throws {
-        let missing = try JSONDecoder().decode(Settings.self, from: Data(#"{"dictionary":["X"]}"#.utf8))
-        XCTAssertTrue(missing.liveStreamingEnabled)
-        let off = try JSONDecoder().decode(Settings.self, from: Data(#"{"liveStreamingEnabled":false}"#.utf8))
-        XCTAssertFalse(off.liveStreamingEnabled)
     }
 
     func testInputDeviceUIDDefaultNil() {
@@ -139,15 +132,29 @@ final class SettingsTests: XCTestCase {
 
     func testSaveInvalidatesEvenWhenStampCouldNotChange() throws {
         let store = tempStore()
+        // An atomic rewrite of the same length does move the mtime in practice, so
+        // simply saving twice never reaches save()'s own invalidation — the stamp
+        // check gets there first. Pin the mtime to a whole second (which survives
+        // the filesystem round-trip exactly) on both sides instead, so the stamp
+        // is provably identical and only save() dropping the cache can save us.
+        let frozen = Date(timeIntervalSince1970: 1_700_000_000)
         var s = Settings()
         s.dictionary = ["aaaa"]
         try store.save(s)
-        _ = store.load() // prime the cache
+        try FileManager.default.setAttributes([.modificationDate: frozen],
+                                              ofItemAtPath: store.url.path)
+        let before = try FileManager.default.attributesOfItem(atPath: store.url.path)
+        _ = store.load() // prime the cache against that stamp
 
-        // Identical length, written immediately: mtime and size may both be
-        // unchanged, so save() must drop the cache itself.
-        s.dictionary = ["bbbb"]
+        s.dictionary = ["bbbb"] // identical length
         try store.save(s)
+        try FileManager.default.setAttributes([.modificationDate: frozen],
+                                              ofItemAtPath: store.url.path)
+        let after = try FileManager.default.attributesOfItem(atPath: store.url.path)
+        // If either half of the stamp moved, this test is back to proving nothing,
+        // so fail loudly rather than pass for the wrong reason.
+        XCTAssertEqual(after[.modificationDate] as? Date, before[.modificationDate] as? Date)
+        XCTAssertEqual(after[.size] as? Int, before[.size] as? Int)
         XCTAssertEqual(store.load().dictionary, ["bbbb"])
     }
 

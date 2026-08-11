@@ -4,10 +4,20 @@ import XCTest
 final class TextRulesTests: XCTestCase {
     // MARK: category
     func testKnownTerminalsMatch() {
-        for id in ["com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp",
+        for id in ["com.apple.Terminal", "com.googlecode.iterm2",
                    "com.github.wez.wezterm", "net.kovidgoyal.kitty",
                    "com.mitchellh.ghostty", "org.alacritty", "co.zeit.hyper"] {
             XCTAssertEqual(TextRules.category(bundleID: id), .terminal, id)
+        }
+    }
+
+    // Warp ships one bundle per release channel and no bare `dev.warp.Warp`,
+    // so the exact key this table used to hold never matched the running app:
+    // Warp came back .unknown and dictated newlines executed as shell commands.
+    func testWarpReleaseChannelsMatch() {
+        for id in ["dev.warp.Warp-Stable", "dev.warp.Warp-Preview"] {
+            XCTAssertEqual(TextRules.category(bundleID: id), .terminal, id)
+            XCTAssertTrue(TextRules.flattensNewlines(bundleID: id), id)
         }
     }
 
@@ -56,6 +66,7 @@ final class TextRulesTests: XCTestCase {
         XCTAssertEqual(TextRules.category(bundleID: "com.jetbrains.pycharm"), .code)
         // ...but only as a prefix, not anywhere in the string.
         XCTAssertEqual(TextRules.category(bundleID: "org.fake.com.jetbrains.clone"), .unknown)
+        XCTAssertEqual(TextRules.category(bundleID: "org.fake.dev.warp.Warp-Stable"), .unknown)
     }
 
     func testFlattenNewlineTargets() {

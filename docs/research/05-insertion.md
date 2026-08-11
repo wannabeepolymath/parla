@@ -253,7 +253,7 @@ Union of every hard-coded list in the corpus, annotated with what Parla has.
 |---|---|---|
 | `com.apple.Terminal` | ✅ | |
 | `com.googlecode.iterm2` | ✅ | Handy #692: interleaved/duplicated text on direct typing |
-| `dev.warp.Warp` | ✅ | |
+| `dev.warp.Warp-Stable` / `-Preview` | ✅ | prefix-matched; there is no bare `dev.warp.Warp` bundle, so an exact key never matches |
 | `com.github.wez.wezterm` | ✅ | Kitty keyboard protocol |
 | `net.kovidgoyal.kitty` | ✅ | Kitty keyboard protocol |
 | `com.mitchellh.ghostty` | ✅ | **FluidVoice #479, ghost-pepper: forced to paste** |

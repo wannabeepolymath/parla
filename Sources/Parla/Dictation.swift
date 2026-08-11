@@ -215,7 +215,7 @@ extension AppDelegate {
             return
         }
         let settings = s.settings
-        // var: frontAppName is rebound below to the app the text actually landed
+        // var: frontBundleID is rebound below to the app the text actually landed
         // in — it isn't known until the finalize insert.
         var pipeline = Pipeline(
             transcribe: { samples, prompt in transcriber.transcribe(samples, initialPrompt: prompt) },
@@ -225,7 +225,7 @@ extension AppDelegate {
                     .clean(transcript: transcript, context: ctx)
             },
             settings: { settings },
-            frontAppName: { nil })
+            frontBundleID: { nil })
 
         // Raw transcript — reuse the stream's confirmed prefix so the final pass
         // is O(tail), not O(whole utterance). self.window is ours to consume:
@@ -269,13 +269,19 @@ extension AppDelegate {
         // The instant raw finalize, and — when a polish is coming — the values it
         // must hold across the await.
         let landed: DictationSession.Landed? = await MainActor.run {
-            var probe = LandingProbe(focus: .none)
+            // Re-check focus: it may have moved into a password field since
+            // fn-down. Sampled on BOTH paths, not just the landing one: it is
+            // also the signal that deletes the stashed WAV below, and the
+            // no-transcript path is the only one that KEEPS that file — reading
+            // focus only when there is a transcript is what made the secure
+            // delete unreachable exactly where it matters. The reducer ignores
+            // the probe entirely when `raw` is nil, so this changes no decision.
+            let focus = Inserter.focusTarget()
+            var probe = LandingProbe(focus: focus)
             if raw != nil {
-                // Re-check focus: it may have moved into a password field since
-                // fn-down. Sample the destination app HERE, not at fn-down —
-                // dictation often starts before the user clicks into the app the
-                // text is meant for.
-                let focus = Inserter.focusTarget()
+                // Sample the destination app HERE, not at fn-down — dictation
+                // often starts before the user clicks into the app the text is
+                // meant for.
                 let app = NSWorkspace.shared.frontmostApplication
                 probe = LandingProbe(focus: focus, bundleID: app?.bundleIdentifier,
                                      appName: app?.localizedName,
@@ -295,10 +301,13 @@ extension AppDelegate {
         }
         guard let landed else { return } // dropped, empty, or cleanup unconfigured
 
+        // The bundle ID the text actually landed in — the cleanup prompt's tone
+        // hint is keyed on it, and it is the same one the swap's flatten uses,
+        // so the prompt and the last mile can't disagree about the destination.
+        pipeline.frontBundleID = { landed.bundleID }
         // The POST goes out behind the landing keystrokes, and the chain stays
         // held until it resolves so a queued next dictation can't land text
         // before the swap.
-        pipeline.frontAppName = { landed.appName }
         let result = await pipeline.clean(transcript: landed.raw)
         await MainActor.run {
             // Only the swap paths that can type consult this, so only they pay
@@ -468,11 +477,17 @@ extension AppDelegate {
             await pauseBetweenPasses(gen)
         }
         // Hand the window to this dictation's finish(), queued right after us on
-        // the processTask chain — the chain is the synchronization, and it is the
-        // only ordering guarantee needed: whoever runs next on the chain is this
-        // dictation's own finish() (which consumes the window) or a newer
-        // dictation's stream(), which overwrites it before anyone reads it.
-        if !confirmed.isEmpty { window = StreamWindow(confirmedText: confirmed, cutSample: cut) }
+        // the processTask chain — the chain is the synchronization: whoever runs
+        // next on the chain is this dictation's own finish() (which consumes the
+        // window) or a newer dictation's stream().
+        //
+        // Assigned unconditionally, nil included: "a newer stream() overwrites
+        // it" only holds when that stream froze a head of its own. A dictation
+        // the user interrupts with a new fn-down never reaches finish(), so its
+        // window goes unconsumed, and the next dictation — almost always short,
+        // confirmed empty — would inherit it and splice the previous utterance
+        // in front of its own tail.
+        window = confirmed.isEmpty ? nil : StreamWindow(confirmedText: confirmed, cutSample: cut)
     }
 
     /// This dictation still holds the mic — what `isRecording` used to answer,
@@ -605,15 +620,21 @@ final class CorrectionWatcher {
         baseline = ""
     }
 
-    /// The focused element and its owning process. Inserter's equivalent is
-    /// private and this needs the pid too (AXObserverCreate takes one).
+    /// The focused element and its owning process — the same lookup
+    /// `Inserter.focusedElement` makes, app-level fallback included, because it
+    /// is private to ParlaCore and this needs the pid too (AXObserverCreate
+    /// takes one). Collapse into one call if that ever goes public.
+    ///
+    /// The fallback is load-bearing, not cosmetic: Electron/Chromium apps
+    /// answer only the app-level query, and `Inserter.canEraseTyped` — the
+    /// guard `attach` runs on this same field — resolves through it. Without it
+    /// we ask about a different element than the one we verified, so learning
+    /// simply never arms in Slack, VS Code or Cursor.
     private static func focusedElement() -> (AXUIElement, pid_t)? {
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(),
-                                            kAXFocusedUIElementAttribute as CFString,
-                                            &focused) == .success,
-              let focused else { return nil }
-        let element = focused as! AXUIElement
+        // Inserter's lookup, not a copy of it: `attach` gates on
+        // `Inserter.canEraseTyped`, so watching a different element than the one
+        // that was verified is how this silently disarms.
+        guard let element = Inserter.focusedElement() else { return nil }
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success else { return nil }
         return (element, pid)

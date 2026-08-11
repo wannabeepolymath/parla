@@ -17,10 +17,11 @@ public enum TextRules {
     /// scanner, which is how voicetypr filed 1Password as a documents app.
     static let appCategories: [String: AppCategory] = [
         // Terminals: a bare newline SUBMITS, so each line would run as a command.
+        // (Warp is in appCategoryPrefixes — it has no bare bundle ID.)
         "com.apple.Terminal": .terminal, "com.googlecode.iterm2": .terminal,
-        "dev.warp.Warp": .terminal, "com.github.wez.wezterm": .terminal,
-        "net.kovidgoyal.kitty": .terminal, "com.mitchellh.ghostty": .terminal,
-        "org.alacritty": .terminal, "co.zeit.hyper": .terminal,
+        "com.github.wez.wezterm": .terminal, "net.kovidgoyal.kitty": .terminal,
+        "com.mitchellh.ghostty": .terminal, "org.alacritty": .terminal,
+        "co.zeit.hyper": .terminal,
         // Chat: Return sends the message, so newlines are just as destructive.
         "com.tinyspeck.slackmacgap": .chat, "com.hnc.Discord": .chat,
         "com.apple.MobileSMS": .chat, "net.whatsapp.WhatsApp": .chat,
@@ -38,13 +39,16 @@ public enum TextRules {
     ]
 
     /// Prefixes are allowed ONLY where a vendor namespaces a whole product
-    /// family: every `com.jetbrains.*` is an IDE, and VS Code ships as
-    /// `.VSCode`, `.VSCodeInsiders`, `.VSCodeExploration`. Note the VS Code
-    /// prefix stops at the product, not at `com.microsoft.` — Word and Outlook
-    /// live in that namespace and are prose.
+    /// family: every `com.jetbrains.*` is an IDE, VS Code ships as `.VSCode`,
+    /// `.VSCodeInsiders`, `.VSCodeExploration`, and Warp ships one bundle per
+    /// release channel — `dev.warp.Warp-Stable`, `dev.warp.Warp-Preview` — with
+    /// no bare `dev.warp.Warp` to match exactly. Note the VS Code prefix stops
+    /// at the product, not at `com.microsoft.` — Word and Outlook live in that
+    /// namespace and are prose. Still ANCHORED, so the no-substring rule holds.
     static let appCategoryPrefixes: [(String, AppCategory)] = [
         ("com.microsoft.VSCode", .code),
         ("com.jetbrains.", .code),
+        ("dev.warp.Warp", .terminal),
     ]
 
     public static func category(bundleID: String?) -> AppCategory {

@@ -4,6 +4,7 @@ import XCTest
 final class PipelineTests: XCTestCase {
     func makePipeline(transcript: String,
                       snippets: [String: String] = [:],
+                      bundleID: String? = nil,
                       cleanup: @escaping (String, CleanupContext) async throws -> String)
     -> Pipeline {
         var settings = Settings()
@@ -16,17 +17,32 @@ final class PipelineTests: XCTestCase {
             },
             cleanup: cleanup,
             settings: { settings },
-            frontAppName: { "Mail" })
+            frontBundleID: { bundleID })
     }
 
     func testHappyPath() async {
-        let p = makePipeline(transcript: "um hello") { t, ctx in
+        let p = makePipeline(transcript: "um hello") { t, _ in
             XCTAssertEqual(t, "um hello")
-            XCTAssertEqual(ctx.appName, "Mail")
             return "Hello."
         }
         let out = await p.process(samples: [0.1])
         XCTAssertEqual(out, "Hello.")
+    }
+
+    // The destination hint has exactly ONE production caller — clean() — and the
+    // caller was the broken half: it passed no bundle ID, so every dictation was
+    // cleaned as `.unknown` while the PromptBuilder tests stayed green. Hence
+    // this asserts through clean(), not through PromptBuilder.
+    func testCleanPassesFrontBundleIDIntoCleanupContext() async {
+        let p = makePipeline(transcript: "list the steps",
+                             bundleID: "com.apple.Terminal") { _, ctx in
+            XCTAssertEqual(ctx.category, .terminal)
+            XCTAssertTrue(PromptBuilder.system(context: ctx).contains("literal command line"),
+                          "the category must reach the prompt's tone hint")
+            return "cleaned"
+        }
+        let result = await p.clean(transcript: "list the steps")
+        XCTAssertEqual(result.text, "cleaned") // proves the cleanup closure ran at all
     }
 
     func testCleanupResultIsSanitized() async {

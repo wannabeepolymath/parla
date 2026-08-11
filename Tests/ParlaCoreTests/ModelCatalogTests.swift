@@ -57,7 +57,6 @@ final class ModelCatalogTests: XCTestCase {
     func testModelLookupByPathIgnoresDirectory() {
         XCTAssertEqual(ModelCatalog.model(atPath: "/anywhere/ggml-base.en.bin")?.id, "base.en")
         XCTAssertNil(ModelCatalog.model(atPath: "/anywhere/my-own-model.bin"))
-        XCTAssertNil(ModelCatalog.model(id: "nope"))
     }
 
     // MARK: - Markup sniffing (vibe #353)
@@ -156,7 +155,7 @@ final class ModelCatalogTests: XCTestCase {
 
     // MARK: - Hash cache (ghost-pepper #163)
 
-    func testCacheRemembersAVerifiedFileAndForgetsItWhenTheBytesChange() throws {
+    func testCacheRemembersAVerifiedFileAndForgetsARewriteOfTheSameLength() throws {
         let cache = VerifiedCache(url: dir.appendingPathComponent("v.json"))
         let file = try write(Data("model".utf8), "ggml-base.en.bin")
 
@@ -164,9 +163,15 @@ final class ModelCatalogTests: XCTestCase {
         cache.record(file)
         XCTAssertTrue(cache.isVerified(file))
 
-        // Same path, different bytes — macparakeet's disk-identity rule: the
-        // stale verdict must not bless a re-download.
-        try Data("different model".utf8).write(to: file)
+        // Same path, different bytes, *same length* — the only case that proves
+        // mtime is part of the identity (macparakeet's disk-identity rule: a
+        // stale verdict must not bless a re-download). A rewrite that also
+        // changed the size would still be caught by a size-only identity, so it
+        // would test nothing. mtime is stamped rather than left to the clock:
+        // two writes microseconds apart can round to the same Date.
+        try Data("MODEL".utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_000_000)], ofItemAtPath: file.path)
         XCTAssertFalse(cache.isVerified(file))
     }
 

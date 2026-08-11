@@ -20,7 +20,7 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 6 | 0 | 0 | 1 |
 | **all** | **29** | **28** | **0** | **0** | **1** |
 
-Suite: **356 tests, 0 failures.** Build clean.
+Suite: **367 tests, 0 failures.** Build clean.
 
 ---
 
@@ -245,6 +245,44 @@ nothing. Revisit after #2 has real numbers.
 
 ---
 
+## Final review — what shipped broken
+
+An adversarial review of the whole branch (six dimensions, every finding then
+independently verified by a second agent told to refute it) raised 32 findings.
+25 survived verification. **Three shipped items did not actually work**, which
+is the part worth remembering: all three built, passed their tests, and were
+committed.
+
+| Finding | Why the tests missed it |
+|---|---|
+| **`AudioRecorder.prepare()` had no call site** — the warm engine and pre-roll ring (Tier 1 #7, the biggest latency item) never ran. `warm` was never true, so the engine was torn down after every dictation, `PreRollRing` was always empty, `mediaPlaying()` never ran, `scheduleRebuild()` was unreachable. | The unit tests tested the ring and the transport gate as pure logic. Nothing tested that anything *called* them. |
+| **The cleanup prompt got no app context at all** — `Pipeline.clean`, the only production caller, never passed a `bundleID`, so `category` was permanently `.unknown` and `toneHint` always nil. The branch *lost* a hint `main` had. | `CleanupTests` tested `PromptBuilder` directly and stayed green throughout. The new test goes through `Pipeline.clean` for exactly this reason. |
+| **Warp was never classified as a terminal** — table key `dev.warp.Warp`, real bundle ID `dev.warp.Warp-Stable`. Dictated newlines submit as shell commands. | `TextRulesTests` asserted against the non-existent ID, so it passed while the real app was unprotected. |
+
+Plus two that were live-path defects rather than dead code:
+
+- **`canEraseTyped` ignored selection length** (`focusedFieldState` threw
+  `range.length` away), so it could not tell a bare caret from the start of a
+  live selection — and the first `Delete` eats the whole selection. That is the
+  ISSUES.md #6 invariant (*never delete text Parla did not write*) failing on
+  the cleaned-swap path, which runs on every dictation. Now refuses whenever a
+  selection is live, and the decision is a pure function with six tests.
+- **The hands-free latch was unreachable in command mode** and leaked a Space
+  keystroke into the front app: Tier 2 #3 routed it through exact modifier
+  matching, but command mode means shift is held by definition. Hands-free now
+  matches as a superset (it only fires while the trigger is physically held, so
+  it cannot steal a chord); idle chords stay exact.
+
+Also fixed: an onboarding tryout that leaked an open mic and a permanently
+suspended hotkey tap (`onDisappear` cannot fire when
+`isReleasedWhenClosed = false`), a `Metrics` singleton clobbered by the next
+fn-down while a polish was in flight, an unconsumed `StreamWindow` splicing into
+a later dictation, an unreachable secure-deletion guard on the one path that
+retains the WAV, and six tests that passed whether or not the code was correct.
+
+Seven findings were correctly **refuted** by the verifier — including a claimed
+`stripNonSpeech` over-deletion and a claimed duplicate download path.
+
 ## Log
 
 | When | What |
@@ -258,3 +296,5 @@ nothing. Revisit after #2 has real numbers.
 | 2026-08-11 | Wave 3: Tier 1 #4, #5, #7, #10, #11, #13, #14 landed. 240/240 pass. Model catalog hashes + sizes verified against Hugging Face. |
 | 2026-08-11 | Wave 4: Tier 1 #8 `DictationSession` extracted. main.swift 1364 → 458 lines. Two adversarial reviews found 5 defects; all fixed. 284/284 pass. **Tier 1 complete.** |
 | 2026-08-11 | Wave 5: Tier 2 #1–#6 landed. 356/356 pass. **All 28 implementable items done; #7 skipped by the audit's own reasoning.** |
+| 2026-08-11 | Closing pass: `LICENSE-COMMERCIAL.md` added. |
+| 2026-08-11 | Final adversarial review of the whole branch: 32 findings raised, **25 confirmed / 7 refuted**. All 25 fixed. 367/367 pass. |

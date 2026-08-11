@@ -60,8 +60,6 @@ public enum ModelCatalog {
     /// not this change.
     public static let `default` = all[0]
 
-    public static func model(id: String) -> Model? { all.first { $0.id == id } }
-
     /// Which catalog entry a path refers to, by filename. Anything else is the
     /// user's own model via `settings.whisperModelPath` and is never verified —
     /// nothing is pinned for it.

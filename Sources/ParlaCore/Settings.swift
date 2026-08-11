@@ -40,9 +40,6 @@ public struct Settings: Codable, Equatable, Sendable {
     // Idle bar size preset: "small" | "medium" | "large". Unknown values fall
     // back to small at the HUD layer.
     public var hudIdleSize: String = "small"
-    // Mid-stream live retyping while fn is held. Off ⇒ instant raw finalize on
-    // fn-up still happens; only the word-by-word revision stream is skipped.
-    public var liveStreamingEnabled: Bool = true
     // Show the shadow stream's text in Parla's own pill while dictating. Off by
     // default: it costs a whisper pass every ~300 ms on every dictation, which
     // the gated shadow stream otherwise skips entirely. Preview only — the text
@@ -74,7 +71,6 @@ public struct Settings: Codable, Equatable, Sendable {
         historyEnabled = try c.decodeIfPresent(Bool.self, forKey: .historyEnabled) ?? historyEnabled
         showHudAlways = try c.decodeIfPresent(Bool.self, forKey: .showHudAlways) ?? showHudAlways
         hudIdleSize = try c.decodeIfPresent(String.self, forKey: .hudIdleSize) ?? hudIdleSize
-        liveStreamingEnabled = try c.decodeIfPresent(Bool.self, forKey: .liveStreamingEnabled) ?? liveStreamingEnabled
         streamPreviewEnabled = try c.decodeIfPresent(Bool.self, forKey: .streamPreviewEnabled) ?? streamPreviewEnabled
         inputDeviceUID = try c.decodeIfPresent(String.self, forKey: .inputDeviceUID) ?? inputDeviceUID
         hotkeys = try c.decodeIfPresent(HotkeyBindings.self, forKey: .hotkeys) ?? hotkeys

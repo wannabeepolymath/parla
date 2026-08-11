@@ -59,6 +59,44 @@ final class InserterTests: XCTestCase {
         XCTAssertEqual(Inserter.focusTarget(secureInput: true), .secure)
     }
 
+    // MARK: - canErase (the pure (text, cursor, selLength, typed) decision)
+
+    func testCanEraseWithBareCaretAfterOurText() {
+        // Caret sits right after what we typed: erasing removes only our own.
+        XCTAssertTrue(Inserter.canErase(text: "hello world", cursor: 11, selLength: 0, typed: " world"))
+    }
+
+    func testCannotEraseIntoForeignTailWithBareCaret() {
+        XCTAssertFalse(Inserter.canErase(text: "hello world", cursor: 11, selLength: 0, typed: " there"))
+    }
+
+    /// ISSUES.md #6: Parla must never delete text it did not write. The offset
+    /// before a live selection matches our text just as well as a caret does,
+    /// but the first Delete eats the selection instead of one of our characters.
+    func testCannotEraseWhenSelectionIsLive() {
+        // "hello world" typed by us, and the user has since selected "worl" —
+        // the offset before that selection still ends with "hello ".
+        XCTAssertFalse(Inserter.canErase(text: "hello world", cursor: 6, selLength: 4, typed: "hello "))
+    }
+
+    func testCannotEraseWhenSelectionCoversOurOwnText() {
+        // Even a selection of exactly our text is refused: the erase run's count
+        // assumes one character per Delete, and the first one takes all four.
+        XCTAssertFalse(Inserter.canErase(text: "hi Parla", cursor: 3, selLength: 5, typed: "hi "))
+    }
+
+    func testCanEraseOutOfBoundsCursor() {
+        // Cursor past the reported text, or too close to the start to hold what
+        // we typed: unverifiable either way.
+        XCTAssertFalse(Inserter.canErase(text: "hi", cursor: 9, selLength: 0, typed: "hi"))
+        XCTAssertFalse(Inserter.canErase(text: "hello", cursor: 2, selLength: 0, typed: "hello"))
+    }
+
+    func testCanEraseNothingIsAlwaysTrue() {
+        // Zero backspaces touch nothing, so a live selection is harmless here.
+        XCTAssertTrue(Inserter.canErase(text: "hello", cursor: 2, selLength: 3, typed: ""))
+    }
+
     func testAXCenterToAppKitFlipsYThroughPrimaryScreenHeight() {
         // AX top-left origin (10, 20), size 100x50, on a 900pt-tall primary screen.
         // Center in AX space is (60, 45); AppKit y = 900 - 45 = 855.

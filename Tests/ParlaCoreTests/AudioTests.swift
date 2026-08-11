@@ -73,11 +73,17 @@ final class AudioTests: XCTestCase {
         // next call, or out of flush() (see testChunkedConversionMatchesOneShot).
         XCTAssertGreaterThan(at48k.count, 1_000)
         XCTAssertGreaterThan(at44k.count, 1_000)
-        // Steady state is the assertion that matters here: 4410 frames at 44.1k
-        // yield a full 1600 at 16k only if the converter was cached across the
-        // two calls rather than rebuilt — a rebuild would re-prime and come up short.
-        XCTAssertEqual(at44kSteady.count, 1_600, accuracy: 200)
         XCTAssertGreaterThan(at44k.map(abs).max() ?? 0, 0.5) // signal survived the rebuild
+        // Steady state is the assertion that matters here, and it only bites when
+        // it is exact: a resampler that rebuilt on every call would emit the same
+        // short post-priming count every time (1480 here), so any tolerance wide
+        // enough to admit the priming shortfall admits the bug too. The cached
+        // call is over 1600 precisely because it is draining that shortfall.
+        XCTAssertGreaterThan(at44kSteady.count, at44k.count)   // primed once…
+        XCTAssertGreaterThanOrEqual(at44kSteady.count, 1_600)  // …and paid back
+        // Nothing is lost across the new format either: 2 × 4410 frames at 44.1k
+        // is exactly 3200 samples at 16k, the converter's held tail included.
+        XCTAssertEqual(at44k.count + at44kSteady.count + resampler.flush().count, 3_200)
     }
 
     /// The warm engine converts pre-roll and live capture through the *same*

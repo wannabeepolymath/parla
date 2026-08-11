@@ -216,7 +216,9 @@ let cleanupEngine = settings.cleanup.provider == "anthropic"
     ? settings.cleanupModel : (settings.cleanup.model ?? settings.cleanup.provider)
 
 struct NoEngine: Error {}
-var currentApp: String?
+/// The `# bundle:` of the case being run — the destination the cleanup prompt's
+/// tone hint is keyed on, and the same value the flatten below uses.
+var currentBundle: String?
 let pipeline = Pipeline(
     transcribe: { samples, prompt in transcriber?.transcribe(samples, initialPrompt: prompt) ?? "" },
     cleanup: { text, ctx in
@@ -224,7 +226,7 @@ let pipeline = Pipeline(
         return try await client.clean(transcript: text, context: ctx)
     },
     settings: { settings },
-    frontAppName: { currentApp })
+    frontBundleID: { currentBundle })
 
 // MARK: - Run
 
@@ -266,7 +268,7 @@ for name in names {
     var cleaned = ""
     var llm = 0.0
     if !input.isEmpty {
-        currentApp = golden.headers["app"]
+        currentBundle = golden.headers["bundle"]
         let t1 = Date()
         let out = await pipeline.clean(transcript: input)
         llm = Date().timeIntervalSince(t1)
@@ -276,7 +278,7 @@ for name in names {
             continue
         }
         // Same last mile as the app: newline-submitting targets get flattened.
-        cleaned = TextRules.flattensNewlines(bundleID: golden.headers["bundle"])
+        cleaned = TextRules.flattensNewlines(bundleID: currentBundle)
             ? TextRules.flattenForTerminal(out.text) : out.text
     }
     results.append(CaseResult(name: name, category: category, leg: "cleanup",

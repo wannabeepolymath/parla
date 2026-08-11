@@ -49,6 +49,15 @@ struct OnboardingView: View {
         .tint(Theme.accent)
         .onReceive(tick) { _ in model.refreshPermissions() }
         .onDisappear(perform: endTryout)
+        // onDisappear cannot cover a window close: HubWindowController keeps the
+        // window (isReleasedWhenClosed = false), so the view is never torn down
+        // and the tryout would hold the mic and a suspended hotkey tap forever.
+        // Not filtered to the Hub's own window on purpose — endTryout's
+        // `recording` guard is what keeps this off a real dictation, and a stray
+        // stop of the tryout is harmless where a missed one leaks.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
+            endTryout()
+        }
     }
 
     private var header: some View {
@@ -79,7 +88,9 @@ struct OnboardingView: View {
     private var footer: some View {
         HStack(spacing: 10) {
             if step > 0 {
-                Button("Back") { step -= 1 }.buttonStyle(HubButtonStyle())
+                // Leaving the tryout step backwards releases the mic and the
+                // hotkey too — only advance() used to.
+                Button("Back") { endTryout(); step -= 1 }.buttonStyle(HubButtonStyle())
             }
             Spacer()
             Button(step == Self.titles.count - 1 ? "Skip" : "Skip this step") { advance() }
@@ -182,9 +193,9 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 18) {
             if let tryoutError { HubBanner(text: tryoutError) }
             HubSection("Dictation test",
-                       footer: "This one goes nowhere else: the transcript appears in Parla's pill and "
-                           + "here, and is never typed into another app. Every other dictation lands "
-                           + "wherever your cursor is.") {
+                       footer: "This one goes nowhere else: the transcript appears here, and is never "
+                           + "typed into another app. Every other dictation lands wherever your "
+                           + "cursor is.") {
                 HubRow(recording ? "Listening…" : transcribing ? "Transcribing…" : "Say a sentence",
                        detail: recording ? "Press Stop when you're done"
                            : "Parla records, transcribes on this Mac, and shows you what it heard") {
@@ -278,7 +289,12 @@ extension AppDelegate {
                                                         rms: AudioRecorder.rms(samples))
                 ? transcriber.transcribe(samples, initialPrompt: nil) : ""
             await MainActor.run {
-                if text.isEmpty { self.hud.hide() } else { self.hud.show(.preview(text)) }
+                // Back to idle on every exit. `.preview` is a mid-recording state
+                // in the real pipeline — a terminal state always follows it and
+                // schedules the hide. Nothing follows the tryout, so showing it
+                // here stranded the pill on screen, recording dot lit, until the
+                // next dictation. The transcript is in the Hub window anyway.
+                self.hud.hide()
                 done(text)
             }
         }

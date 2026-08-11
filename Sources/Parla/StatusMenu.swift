@@ -186,6 +186,13 @@ extension AppDelegate: NSMenuDelegate {
         s.inputDeviceUID = (uid?.isEmpty ?? true) ? nil : uid
         try? store.save(s)
         recorder.inputDeviceUID = s.inputDeviceUID
+        // Warm the new mic. A warm engine still running on the OLD one is left
+        // alone (see AudioRecorder.prepare()); start() rebinds it, so the first
+        // press after a mic switch is cold but correct — accepted over a rebind
+        // here, which would tear the tap down mid-capture when hands-free is
+        // latched. The real win is switching away from a gated Bluetooth mic:
+        // the engine is idle then, so this warms the new one immediately.
+        recorder.prepare()
     }
 
     private func permissionItem(name: String, pane: String) -> NSMenuItem {

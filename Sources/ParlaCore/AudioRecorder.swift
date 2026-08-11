@@ -272,14 +272,28 @@ public final class AudioRecorder {
     /// Also latches warmth on: without it the recorder behaves exactly as it did
     /// before, cold-opening per press and tearing down at stop. Warm means the
     /// mic indicator stays lit while Parla is idle, so it is the app's call.
+    ///
+    /// Deliberately does NOT rebind a warm engine already running on another mic
+    /// — warmUp()'s `!engine.isRunning` guard makes that a no-op, which is also
+    /// what keeps a mid-dictation call (mic switched while hands-free is latched)
+    /// from pulling the tap out from under the capture. start() self-heals on the
+    /// next press, so a mic switch costs one cold open, never a wrong recording.
     public func prepare() {
         warm = true
         warmUp()
     }
 
-    /// Idempotent build of the warm engine, subject to the Bluetooth gate.
+    /// Idempotent build of the warm engine, subject to the permission and
+    /// Bluetooth gates.
     private func warmUp() {
         guard warm, !engine.isRunning else { return }
+        // An input unit started before TCC grants the mic runs happily and
+        // delivers zeros; the later grant never reaches a unit that is already
+        // going. Without this, a fresh install would latch a permanently silent
+        // warm engine at launch and every dictation until relaunch would hear
+        // nothing. start()'s cold path is unaffected, and the stop() after the
+        // first dictation re-warms for real.
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
         let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
         guard !AudioRecorder.isBluetooth(device) else { return }
         // A warm engine is a nicety; failing to get one just means the next
@@ -453,10 +467,18 @@ public final class AudioRecorder {
         lock.lock()
         samples.append(contentsOf: tail)
         let captured = samples
+        let failures = failedBuffers
         // Whatever the tap wrote while stop() ran is this dictation's own tail,
         // already transcribed — never prepend it to the next one.
         preRoll.reset()
         lock.unlock()
+        // The production reader of the failure count, which is the whole reason
+        // it is kept: "Parla heard nothing" otherwise logs identically whether the
+        // mic was silent or every tap buffer failed to convert.
+        if failures > 0 {
+            NSLog("Parla recorder: %d tap buffers failed to convert (%d samples captured)",
+                  failures, captured.count)
+        }
         // A cold-path start may have bound a headset; the gate only allows
         // *holding* a non-Bluetooth device.
         if !warm || AudioRecorder.isBluetooth(boundDevice) { teardown() }

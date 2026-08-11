@@ -95,6 +95,64 @@ final class HistoryTests: XCTestCase {
         XCTAssertNil(metrics.snapshot())
     }
 
+    /// The cleanup POST goes out after the text lands, so the user can start the
+    /// next dictation while it is still in flight. Its tokens must be billed to
+    /// the dictation that paid for them, and must not follow the new one.
+    func testLatePolishLandsOnItsOwnDictationNotTheNewOne() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        // Dictation 1 reaches the landing; its cleanup POST is still out.
+        metrics.mark(.fnDown, at: ms(1000))
+        metrics.mark(.fnUp, at: ms(3000))
+        metrics.mark(.finalPassDone, at: ms(3400))
+        metrics.mark(.landed, at: ms(3450))
+        metrics.update { $0.model = "small.en" }
+
+        // The user starts dictation 2 before that POST comes back.
+        metrics.mark(.fnDown, at: ms(5000))
+        metrics.mark(.fnUp, at: ms(6000))
+
+        // Dictation 1's cleanup finally resolves and its entry is written.
+        metrics.update { $0.cleanupModel = "claude-haiku-4-5"; $0.promptTokens = 400 }
+        metrics.mark(.cleanedSwapped, at: ms(6200))
+        let first = metrics.snapshot()
+        XCTAssertEqual(first?.captureMs, 2000)  // 1's own fn-down→fn-up, not 2's
+        XCTAssertEqual(first?.insertMs, 50)
+        XCTAssertEqual(first?.cleanupMs, 2750)  // landed 3450 → swapped 6200
+        XCTAssertEqual(first?.model, "small.en")
+        XCTAssertEqual(first?.promptTokens, 400)
+
+        // Dictation 2 kept its own stamps and never saw 1's tokens.
+        metrics.mark(.finalPassDone, at: ms(6400))
+        metrics.mark(.landed, at: ms(6450))
+        metrics.mark(.cleanedSwapped, at: ms(6800))
+        let second = metrics.snapshot()
+        XCTAssertEqual(second?.captureMs, 1000) // 5000 → 6000
+        XCTAssertEqual(second?.cleanupMs, 350)  // 6450 → 6800, not 1's swap
+        XCTAssertNil(second?.promptTokens)
+        XCTAssertNil(second?.cleanupModel)
+        XCTAssertNil(second?.model)
+    }
+
+    /// Cleanup unconfigured: the entry is written straight after landing, so
+    /// nothing is in flight and the next dictation must own the collector
+    /// outright — the park is for pending polish only.
+    func testNoPolishDictationIsNotParkedForTheNextOne() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        metrics.mark(.fnDown, at: ms(1000))
+        metrics.mark(.fnUp, at: ms(2000))
+        metrics.mark(.landed, at: ms(2100))
+        XCTAssertEqual(metrics.snapshot()?.captureMs, 1000)
+
+        metrics.mark(.fnDown, at: ms(4000))
+        metrics.mark(.fnUp, at: ms(4500))
+        metrics.update { $0.model = "small.en" }
+        let m = metrics.snapshot()
+        XCTAssertEqual(m?.captureMs, 500)
+        XCTAssertEqual(m?.model, "small.en")
+    }
+
     func testPricingLongestPrefixWinsAndUnknownIsUnpriced() {
         // 400 in + 130 out on Haiku 4.5 ($1/$5 per MTok).
         XCTAssertEqual(CleanupPricing.usd(model: "claude-haiku-4-5-20251001",

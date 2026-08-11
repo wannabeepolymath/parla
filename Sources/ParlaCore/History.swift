@@ -85,56 +85,117 @@ public final class HistoryStore {
 /// none of which share a value to thread them through — and `CleanupProviding`
 /// returns a String, so tokens have no other way home.
 ///
-/// ponytail: no per-dictation identity. The processTask chain serializes the
-/// legs, so only one dictation is ever between fn-down and its history write;
-/// add a generation if that ever stops being true.
+/// Unlike `Trace` it cannot simply reset on `.fnDown`. The cleanup POST is
+/// issued *after* the raw text lands, and the user is free to start the next
+/// dictation while it is still out — a reset there drops the first dictation's
+/// stamps and bills its tokens to the second. So the outgoing dictation is
+/// parked instead of dropped, and the polish result follows it home.
+///
+/// ponytail: the park is one deep and needs no explicit generation — the
+/// processTask chain serializes the legs, so only one cleanup POST is ever in
+/// flight. Key by a real generation if that ever stops being true.
 public final class Metrics: @unchecked Sendable {
     public static let shared = Metrics()
 
+    /// One dictation's raw material. A struct so the outgoing dictation can be
+    /// parked whole, by value, the instant the next one starts.
+    private struct Bucket {
+        var stamps: [Trace.Stamp: UInt64] = [:]
+        var pending = PipelineMetrics()
+        /// Set by the history write — the only signal that a dictation is done
+        /// with this collector.
+        var snapshotted = false
+        /// Landed, but no history row yet: the cleanup POST that fills in the
+        /// tokens may still be out, so this bucket must survive the next fn-down.
+        var awaitingHistory: Bool { stamps[.landed] != nil && !snapshotted }
+        /// The polish came back — nothing further is owed to this dictation.
+        var polishResolved: Bool { stamps[.cleanedSwapped] != nil }
+
+        init() { stamps.reserveCapacity(8) }
+
+        /// First stamp wins, the same rule `Trace.mark` follows.
+        mutating func mark(_ stamp: Trace.Stamp, at ns: UInt64) {
+            if stamps[stamp] == nil { stamps[stamp] = ns }
+        }
+
+        func snapshot() -> PipelineMetrics? {
+            func delta(_ from: Trace.Stamp, _ to: Trace.Stamp) -> Int? {
+                guard let a = stamps[from], let b = stamps[to], b >= a else { return nil }
+                return Int((b - a) / 1_000_000)
+            }
+            var m = pending
+            m.captureMs = delta(.fnDown, .fnUp)
+            m.asrMs = delta(.fnUp, .finalPassDone)
+            m.insertMs = delta(.finalPassDone, .landed)
+            m.cleanupMs = delta(.landed, .cleanedSwapped)
+            // Two stamps minimum: a "total" spanning one stamp is 0, which reads
+            // as a measurement rather than as the absence of one.
+            if stamps.count > 1, let start = stamps[.fnDown], let end = stamps.values.max(),
+               end >= start {
+                m.totalMs = Int((end - start) / 1_000_000)
+            }
+            return m.isEmpty ? nil : m
+        }
+    }
+
     private let lock = NSLock()
-    private var stamps: [Trace.Stamp: UInt64] = [:]
-    private var pending = PipelineMetrics()
+    private var current = Bucket()
+    /// The previous dictation, held back by fn-down because its history row
+    /// hadn't been written yet. Retired by that write.
+    private var parked: Bucket?
 
-    public init() { stamps.reserveCapacity(8) }
+    public init() {}
 
-    /// First stamp wins, and `.fnDown` starts a fresh dictation — the same rule
-    /// `Trace.mark` follows, because these are the same stamps.
+    /// First stamp wins, and `.fnDown` starts a fresh dictation. The one that
+    /// just ended is parked when its cleanup can still be in flight, and the
+    /// late `.cleanedSwapped` is routed to it rather than to the new dictation.
     public func mark(_ stamp: Trace.Stamp, at ns: UInt64 = DispatchTime.now().uptimeNanoseconds) {
         lock.lock()
         defer { lock.unlock() }
         if stamp == .fnDown {
-            stamps.removeAll(keepingCapacity: true)
-            pending = PipelineMetrics()
+            // A park whose polish already came back is owed nothing more; drop it
+            // so it can't outlive its dictation and swallow the next one's write.
+            if parked?.polishResolved == true { parked = nil }
+            if current.awaitingHistory { parked = current }
+            current = Bucket()
         }
-        if stamps[stamp] == nil { stamps[stamp] = ns }
+        // Only the polish result belongs to the parked dictation, and only while
+        // that dictation's own polish is still outstanding — the same rule
+        // `update` routes by. Every other stamp is the one being recorded now.
+        if stamp == .cleanedSwapped, var p = parked, !p.polishResolved {
+            p.mark(stamp, at: ns)
+            parked = p
+        } else {
+            current.mark(stamp, at: ns)
+        }
     }
 
+    /// The cleanup model and its token counts arrive from inside the POST, which
+    /// can outlive the dictation that issued it, so they follow the parked
+    /// dictation until its polish comes back.
     public func update(_ mutate: (inout PipelineMetrics) -> Void) {
         lock.lock()
         defer { lock.unlock() }
-        mutate(&pending)
+        if var p = parked, !p.polishResolved {
+            mutate(&p.pending)
+            parked = p
+        } else {
+            mutate(&current.pending)
+        }
     }
 
     /// Timings folded together with whatever was recorded, or nil when nothing
     /// is known — an all-nil blob on every entry would be noise in the file.
-    /// Non-destructive: a leg can append history more than once.
+    /// Writing the entry is what retires a parked dictation; the live one is
+    /// left intact, so a leg can append history more than once.
     public func snapshot() -> PipelineMetrics? {
         lock.lock()
         defer { lock.unlock() }
-        func delta(_ from: Trace.Stamp, _ to: Trace.Stamp) -> Int? {
-            guard let a = stamps[from], let b = stamps[to], b >= a else { return nil }
-            return Int((b - a) / 1_000_000)
+        if let p = parked {
+            parked = nil
+            return p.snapshot()
         }
-        var m = pending
-        m.captureMs = delta(.fnDown, .fnUp)
-        m.asrMs = delta(.fnUp, .finalPassDone)
-        m.insertMs = delta(.finalPassDone, .landed)
-        m.cleanupMs = delta(.landed, .cleanedSwapped)
-        // Two stamps minimum: a "total" spanning one stamp is 0, which reads as
-        // a measurement rather than as the absence of one.
-        if stamps.count > 1, let start = stamps[.fnDown], let end = stamps.values.max(), end >= start {
-            m.totalMs = Int((end - start) / 1_000_000)
-        }
-        return m.isEmpty ? nil : m
+        current.snapshotted = true
+        return current.snapshot()
     }
 }

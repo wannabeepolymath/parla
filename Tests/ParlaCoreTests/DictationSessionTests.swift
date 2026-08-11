@@ -208,8 +208,13 @@ final class DictationSessionTests: XCTestCase {
                                             failure: "cleanup timed out", focus: .editable)))
         XCTAssertEqual(fx.first, .hud(.rawFallback("cleanup timed out")))
         XCTAssertFalse(fx.contains { if case .replaceTailIfOurs = $0 { return true }; return false })
-        // A failed cleanup is never stored as the cleaned version.
-        XCTAssertTrue(fx.contains(.appendHistory(raw: "hello world", cleaned: nil, appName: "TextEdit")))
+        // A failed cleanup is never stored as the cleaned version — asserted on a
+        // result that DIFFERS from the raw, because above the two are equal and
+        // history would drop `cleaned` on the raw-match clause alone. Only this
+        // delivery notices if the `failure == nil` half of that clause goes away.
+        XCTAssertTrue(quiet(m.handle(.cleanReady(s, landed, text: "Hello, world.",
+                                                 failure: "cleanup timed out", focus: .editable)))
+            .contains(.appendHistory(raw: "hello world", cleaned: nil, appName: "TextEdit")))
     }
 
     func testTerminalFlatteningAppliesToBothSidesOfTheSwap() {
@@ -789,5 +794,37 @@ final class DictationSessionTests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(deletes, 0)   // the corpus actually exercised the delete paths
+    }
+
+    // MARK: - Structural invariant (the clipboard)
+
+    /// Parla types its text; it never pastes it. The user's clipboard is theirs,
+    /// and a dictation that quietly overwrote it would destroy something they
+    /// cannot get back — so the Hub's Copy button, which the user pressed on
+    /// purpose, is allowed to write it and nothing else in the app is.
+    ///
+    /// Asserted over the source rather than by behaviour: the writes live in the
+    /// AppKit shell, which the core's test target cannot drive, and a behavioural
+    /// test could only ever cover the paths it thought to call — the risk here is
+    /// exactly the path nobody thought of. The enclosing `func` line is the key,
+    /// not a line number, so this survives edits above it.
+    func testTheOnlyPasteboardWriteIsTheHubsCopyButton() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // ParlaCoreTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("Sources")
+        let walk = try XCTUnwrap(FileManager.default.enumerator(at: sources,
+                                                                includingPropertiesForKeys: nil))
+        var uses: Set<String> = []
+        for case let url as URL in walk where url.pathExtension == "swift" {
+            let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
+            for (i, line) in lines.enumerated() where line.contains("NSPasteboard") {
+                let owner = lines[...i].last { $0.contains("func ") }?
+                    .trimmingCharacters(in: .whitespaces) ?? "top level"
+                uses.insert("\(url.lastPathComponent): \(owner)")
+            }
+        }
+        XCTAssertEqual(uses, ["HubModel.swift: func copy(_ text: String) {"])
     }
 }

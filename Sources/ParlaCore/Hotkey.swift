@@ -288,11 +288,18 @@ public final class HotkeyMonitor {
     }
 
     /// keyDown. Returns true when the event must be swallowed (never reach the
-    /// front app). `modifiers` are the key event's own flags, and every chord
-    /// test below is an EXACT match on them (see `KeyChord`).
+    /// front app). `modifiers` are the key event's own flags; the idle chords
+    /// match them EXACTLY (see `KeyChord`), hands-free deliberately does not.
     public func keyDown(keyCode: UInt16, modifiers: KeyChord.Modifiers = [],
                         at time: TimeInterval) -> Bool {
-        if bindings.handsFree.matches(keyCode, modifiers) { // hands-free latch / stop
+        // Hands-free is the one SUPERSET match here. Validation forces the
+        // push-to-talk trigger into this chord, so the branch can only fire while
+        // that trigger is physically held — it can never steal a chord from the
+        // front app, which is the only reason the idle chords below are exact.
+        // Exact would make the latch unreachable in command mode: shift is held
+        // at push-to-talk, so the Space arrives as fn+shift+Space.
+        if keyCode == bindings.handsFree.keyCode,
+           modifiers.isSuperset(of: bindings.handsFree.modifiers) { // latch / stop
             switch session {
             case .push: // convert the held push-to-talk: recording survives the trigger release
                 session = .handsFree
@@ -338,7 +345,8 @@ public final class HotkeyMonitor {
     /// Pick up Hub rebinds. A hand-edited settings.json that would leave Parla
     /// unreachable is ignored in favour of the defaults — the Hub refuses the
     /// same sets up front, this is the file-edited path.
-    private func refreshBindings() {
+    /// Internal, not private: the tests drive this loading path directly.
+    func refreshBindings() {
         let next = store.load().hotkeys
         guard next != loadedBindings else { return }
         loadedBindings = next
