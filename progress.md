@@ -131,6 +131,26 @@ regression. Wired into `.github/workflows/ci.yml`.
 Cleanup numbers move run-to-run (LLM non-determinism) — which is precisely why
 `verify` re-scores committed hypotheses instead of re-calling the model.
 
+### Tier 0 #8 — automated as far as it goes: `parla-insert-check`
+
+`swift run parla-insert-check [bundleID]` types five known strings into a real
+app and reads each one back through AX: a 600-char single line (30 bursts at the
+old size), a multi-line payload, an emoji astride the 200-unit boundary,
+combining marks + RTL, and exactly 201 units. It replaces "dictate into three
+apps and eyeball it" with one command plus one click.
+
+Design points that matter: it refuses outright without Accessibility (synthetic
+CGEvents are silently dropped, so every case would fail for the wrong reason),
+and a field it cannot read back is **SKIP, never PASS** — it distinguishes
+"nothing focused" from "focused but AX exposes no value" so the reader knows
+which to fix.
+
+**Still needs a human for one click.** I could not complete a run from a
+background shell: the focused element stays my own terminal, so every case
+skipped and the tool correctly reported "nothing was verified" rather than
+claiming success. Run it, click into TextEdit/Terminal/Notes, and it gives a
+real verdict — including against Slack and Ghostty by bundle ID.
+
 ### ⚠ Outstanding manual verification — Tier 0 #8
 
 Chunk size is now 200 UTF-16 units (was 20) and the inter-chunk sleep is 1ms
@@ -288,7 +308,21 @@ nested dispatch off the *first* effect.
   parameter was non-escaping by default, but the tryout completion outlives the
   call because transcription is async.
 
-**Why #7 is skipped, not deferred:** the backlog's own finding is that Parla's
+**Why #7 is skipped, not deferred — now measured, not assumed:**
+
+Re-checked against the shipped code rather than the audit's estimate. The
+dictation system prompt literal is **560 chars ≈ 140 tokens** (~350 loaded with
+dictionary, snippets and a category tone hint). Anthropic's minimum cacheable
+prefix is 1024 tokens — and **2048 for Haiku**, which Tier 1 #14 made the
+default. So the gap is *wider* than when the audit was written, not narrower:
+a `cache_control` block today would be silently inert, and crossing the
+threshold means padding the prompt with ~1700 tokens of few-shot examples paid
+on every single request to save on repeats within a 5-minute window. Measured
+cleanup latency is p50 0.80s / p95 7.36s, and there is still no usage data
+showing sustained bursts. Building it would be a token and latency regression
+justified by nothing.
+
+Original reasoning, still valid: the backlog's own finding is that Parla's
 system prompt is ~334 tokens, below the 1,024-token cache minimum, so a
 `cache_control` block today is silently inert. Crossing the threshold means
 *growing* the prompt with few-shot examples, which only pays off above ~4

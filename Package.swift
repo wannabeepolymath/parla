@@ -19,6 +19,9 @@ let package = Package(
         .target(name: "ParlaCore", dependencies: ["whisper"], exclude: ["LICENSE"]),
         .executableTarget(name: "Parla", dependencies: ["ParlaCore"]),
         .executableTarget(name: "parla-eval", dependencies: ["ParlaCore"]),
+        // Types known strings into a real app and reads them back — the half of
+        // the Tier 0 #8 insertion check that unit tests structurally cannot do.
+        .executableTarget(name: "parla-insert-check", dependencies: ["ParlaCore"]),
         .testTarget(name: "ParlaCoreTests", dependencies: ["ParlaCore"]),
     ]
 )

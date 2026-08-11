@@ -188,6 +188,14 @@ public enum Inserter {
     /// The focused element's current selection via AX. nil when there's no
     /// selection, it's empty, or the field is AX-opaque — the caller treats all
     /// three the same (refuse to transform). Read once at command fn-down.
+    /// Full text of the focused field, or nil when AX won't say. Public for
+    /// `parla-insert-check`, which types a known string and reads it back —
+    /// the one property of the 200-unit chunk that no unit test can reach,
+    /// because dropped characters are the target app's behaviour, not ours.
+    public static func focusedFieldText() -> String? {
+        focusedFieldState().map { $0.text as String }
+    }
+
     public static func selectedText() -> String? {
         guard let element = focusedElement() else { return nil }
         var ref: CFTypeRef?
