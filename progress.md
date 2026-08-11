@@ -21,8 +21,8 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | **all** | **29** | **29** | **0** | **0** | **0** |
 
 Suite: **398 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
-Tier 0 #8 **verified against 4 live apps** (below). Tier 1 #14 **still unsettled** —
-blocked on an Anthropic API key, not on effort.
+Tier 0 #8 **verified against 4 live apps**; Tier 1 #14 **measured — Haiku stays**.
+Both were the outstanding manual items; neither is outstanding now.
 
 ---
 
@@ -266,14 +266,14 @@ Item 8 landed alone, after 1–7. Its smoke test is now done and green — see
 | 11 | Deterministic snippets | `ParlaCore/Pipeline.swift`, `Cleanup.swift` | M | low | **done** | wave 3 |
 | 12 | Sample frontmost app at finalize, not fn-down | `Parla/main.swift` | S | low | **done** | wave 2 |
 | 13 | Idle model-unload policy | `ParlaCore/Transcriber.swift`, `main.swift` | M | med | **done** | wave 3 |
-| 14 | Default `cleanupModel` to Haiku 4.5 | `ParlaCore/Settings.swift` | S | low | **done** | ⚠ unverified |
+| 14 | Default `cleanupModel` to Haiku 4.5 | `ParlaCore/Settings.swift` | S | low | **done** | ✅ measured, kept |
 
-### ⚠ Tier 1 #14 shipped unverified
+### ✅ Tier 1 #14 — measured, and the default stands
 
 `cleanupModel` now defaults to `claude-haiku-4-5` (was `claude-sonnet-5`) on
-cost and latency grounds. **No eval has been run against either model** — the
-corpus that would settle it was built in the same wave and has never been
-executed, because a full run needs a whisper model plus an API key.
+cost and latency grounds. It shipped unverified — the corpus that would settle it
+was built in the same wave and had never been executed. **It has now been run;
+the result is below and the default survives it.**
 
 Two corrections to the backlog found while doing it:
 - The backlog claims Haiku is "~4.6× cheaper". The audit's own cost table
@@ -287,25 +287,67 @@ Blast radius beyond the literal default: `CleanupFactory.swift:87-88` substitute
 installs with an empty model field silently move to Haiku. Users with an explicit
 `cleanupModel` are untouched. Revert is one string.
 
-**Before trusting this:** `swift run parla-eval --cleanup-only` against both
-models and compare zero-edit rate and p90 WER.
+**Measured. The default stands: `claude-haiku-4-5` stays.** There is no
+evidence Haiku is materially worse than Sonnet on this corpus, and the reason is
+now numbers rather than an argument.
 
-**Attempted, and blocked on a credential — no numbers yet.** The A/B needs the
-Anthropic provider, and on this machine there is no way to reach it:
-`ANTHROPIC_API_KEY` is unset and `anthropicApiKey` is absent from
-`settings.json`. The configured provider is `openai-compatible` against
-**Groq** (`cleanup.baseURL = https://api.groq.com/openai/v1`,
-`cleanup.model = openai/gpt-oss-120b`), so `--model claude-haiku-4-5` would ask
-*Groq* for a Claude model and fail with an infrastructure error, not a quality
-answer. The whisper model and `eval/results.json` are both present, so
-everything except the key is ready; one `ANTHROPIC_API_KEY=… swift run
-parla-eval …` pair settles it.
+Getting them needed a detour. There is no Anthropic key on this machine
+(`ANTHROPIC_API_KEY` unset, no `anthropicApiKey`, provider is Groq/
+openai-compatible), so `--model claude-haiku-4-5` would have asked *Groq* for a
+Claude model. `parla-eval` gained a `--cleanup-cmd` seam instead: the cleanup leg
+runs through an external command, with **both prompts still built by Parla's own
+`PromptBuilder`**, so what is measured is Parla's prompt and only the transport
+moved. The command is a four-line wrapper around `claude -p`.
 
-Worth noting while reading this: the live `settings.json` has
-`cleanupModel = claude-opus-4-6` *and* an openai-compatible provider, so on this
-machine `cleanupModel` is inert — `CleanupFactory` reads `cleanup.model` for
-that provider. The default this item changed therefore affects new installs and
-Anthropic-provider users, not this one.
+| Run | Model | zero-edit | corpus WER | p50 | p90 | fail >20% |
+|---|---|---|---|---|---|---|
+| A | claude-haiku-4-5 | 19/30 (63.3%) | 3.4% | 0.0% | 20.0% | 3/30 |
+| A′ | claude-haiku-4-5 — **same config** | 15/30 (50.0%) | 5.7% | 0.0% | 25.0% | 4/30 |
+| B | claude-sonnet-5 | 18/30 (60.0%) | 3.1% | 0.0% | 7.1% | 3/30 |
+
+**The same-model pair is the whole result.** Two runs of Haiku against identical
+inputs differ by **13.3pp of zero-edit and 9 of 30 cases**, one of them by 60pp
+on its own. Against that floor:
+
+| Pair | zero-edit flips | net |
+|---|---|---|
+| haiku vs haiku′ — *same model* | 5 lost, 1 gained | −4 |
+| haiku vs sonnet | 4 lost, 2 gained | −2 |
+| haiku′ vs sonnet | 3 lost, 5 gained | **+2** |
+
+The between-model movement is smaller than the within-model movement, and **the
+net sign flips depending on which Haiku run you compare against**. `eval/README.md`
+sets the bar at *six or more cases flipping one way with none flipping back*;
+every pair here is mixed movement, so nothing here beats a coin toss. Two runs
+of the same model before reading an A/B is advice that repaid itself
+immediately — run A alone against B would have read as "Sonnet is 3.3pp worse",
+and run A′ alone as "Sonnet is 10pp better".
+
+What *does* reproduce across both Haiku runs is small and points the same way as
+the shipped default: `injection-tag`, `snippet-signoff` and
+`terminal-chat-newlines` are zero-edit for Haiku both times and not for Sonnet,
+against `list-bullets` the other way — 3–1 to Haiku, still far below the bar.
+
+**The actionable finding is not about models at all.** The failing tail is
+*identical* in all three runs and both models — `code-identifier` 42.9%,
+`numbers-money` 33.3%, `terminal-command` 37.5%, the same cases at the same
+scores. Those are prompt and corpus problems that no model choice fixes, and
+they are where the next hour should go. Per `eval/README.md`, the honest way to
+resolve a close model call is **more cases, not more runs**; the noise measured
+here is the concrete argument for that.
+
+Two things these numbers are **not**:
+
+- **Not comparable to `eval/results.json`.** A CLI wraps its own harness around
+  the model, so 63.3% zero-edit here and 37.5% in the committed Groq baseline
+  are not the same measurement. Only the three runs above compare with each other.
+- **Not a latency result.** Sonnet measured *faster* than Haiku (p50 6.5s vs
+  9.3s), which is backwards and is the tell that these timings are CLI startup
+  and queueing, not model latency. The cost-and-latency case for Haiku is
+  untouched by this and remains unmeasured.
+
+The committed baseline was never written: `--cleanup-only` refuses to overwrite
+it, all three runs went to `/tmp`, and `parla-eval verify` still reports no drift.
 
 ### Eval harness — real but not yet load-bearing
 
@@ -613,4 +655,4 @@ swallowed by design because it produces whitespace.
 | 2026-08-11 | Review round 3 (twice-wrong subsystems): 13 raised, **9 confirmed / 4 refuted**. AudioRecorder came back fully refuted — dry. Hotkey rebuilt wholesale. 381/381 pass. |
 | 2026-08-11 | Review round 4: 6 raised, **4 confirmed / 2 refuted — all nits, zero majors, zero minors.** Dry. 382/382 pass. |
 | 2026-08-11 | **Tier 0 #8 verified: TextEdit, Ghostty, Slack, Cursor — 20/20 cases, 0 dropped characters, exit 0 each.** Required fixing 6 defects in `parla-insert-check` (2 of which produced false FAILs) and raising the AX walk past Electron depth. 398/398 pass. |
-| 2026-08-11 | Tier 1 #14 A/B attempted; **blocked** — no Anthropic key on this machine (provider is Groq/openai-compatible). No numbers recorded, default unchanged. |
+| 2026-08-11 | **Tier 1 #14 settled: `claude-haiku-4-5` stays.** No Anthropic key, so `parla-eval` gained `--cleanup-cmd` and ran Parla's real prompts through `claude -p`. 3 runs: the same-model noise floor (9/30 cases, 13.3pp) exceeds the Haiku-vs-Sonnet signal, whose net sign flips between runs. The failing tail is identical across both models. |

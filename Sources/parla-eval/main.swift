@@ -10,6 +10,14 @@ import ParlaCore
 //                               settings.json is never written
 //   parla-eval --out <path>     read/write fixtures at <path> instead of
 //                               eval/results.json, so two runs can sit side by side
+//   parla-eval --cleanup-cmd <exe>
+//                               run the cleanup leg through an external command
+//                               (system prompt as argv[1], --model as argv[2],
+//                               user message on stdin, cleaned text on stdout)
+//                               instead of an HTTP
+//                               provider — for A/B-ing models you have a CLI for
+//                               but no API key. Compare two such runs with each
+//                               other, never with a real-provider baseline.
 //   parla-eval verify [dir]     re-score the committed eval/results.json with
 //                               today's normalizer and scorer — no model, no
 //                               key, no network. This is the CI gate.
@@ -86,6 +94,7 @@ func takeOption(_ name: String) -> String? {
 
 let modelOverride = takeOption("--model")
 let outPath = takeOption("--out")
+let cleanupCmd = takeOption("--cleanup-cmd")
 
 let mode: Mode = args.contains("compare") ? .compare
     : args.contains("verify") || args.contains("--verify") ? .verify
@@ -491,14 +500,89 @@ if let modelOverride {
     settings.cleanup.model = modelOverride
 }
 
+/// Routes the cleanup leg through an external command instead of an HTTP
+/// provider. It exists for one situation, and it is a real one: you need to
+/// compare two models and there is no API key for them on the machine, but
+/// something on PATH can already reach them (`claude -p`, `ollama run`, `llm`).
+///
+/// What is measured stays Parla's: both prompts come from `PromptBuilder`, the
+/// same call `CleanupClient` makes, so only the transport moves. What is NOT
+/// comparable is the absolute score against a run through a real provider — a
+/// CLI wraps its own harness around the model. Two runs of *this* mode against
+/// each other are a fair A/B; one of these against `eval/results.json` is not.
+///
+/// Contract: argv[1] is the system prompt, argv[2] is `--model`'s value (empty
+/// when it was not passed), the user message arrives on stdin, and the cleaned
+/// text is expected on stdout. A non-zero exit is a cleanup failure carrying
+/// stderr, so a broken command cannot masquerade as an empty polish.
+///
+/// The model reaches the command as an argument rather than an environment
+/// variable of the wrapper's own invention so that the same value is what gets
+/// recorded in each fixture's `engine` field. A run nobody can attribute to a
+/// model is not much of an A/B.
+struct CommandCleanupClient: CleanupProviding {
+    let path: String
+    let model: String
+
+    func clean(transcript: String, context: CleanupContext) async throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = [PromptBuilder.system(context: context), model]
+        let stdIn = Pipe(), stdOut = Pipe(), stdErr = Pipe()
+        p.standardInput = stdIn; p.standardOutput = stdOut; p.standardError = stdErr
+        try p.run()
+        // Drain stderr on its own thread. Reading the two pipes in sequence
+        // deadlocks the moment the child fills the one we are not reading, and
+        // a hung eval is indistinguishable from a slow model.
+        var errData = Data()
+        let errDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            errData = stdErr.fileHandleForReading.readDataToEndOfFile()
+            errDone.signal()
+        }
+        stdIn.fileHandleForWriting.write(Data(PromptBuilder.user(transcript: transcript,
+                                                                 context: context).utf8))
+        stdIn.fileHandleForWriting.closeFile()
+        let outData = stdOut.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        errDone.wait()
+        guard p.terminationStatus == 0 else {
+            let msg = String(data: errData, encoding: .utf8) ?? ""
+            throw CleanupError(description: "cleanup command exited \(p.terminationStatus): "
+                + msg.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return (String(data: outData, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 var client: CleanupProviding?
 if needsCleanup {
-    do {
-        client = try makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
-    } catch { die("\(error)", 2) }
+    if let cleanupCmd {
+        guard FileManager.default.isExecutableFile(atPath: cleanupCmd) else {
+            die("--cleanup-cmd \(cleanupCmd) is not an executable file", 2)
+        }
+        client = CommandCleanupClient(path: cleanupCmd, model: modelOverride ?? "")
+    } else {
+        do {
+            client = try makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
+        } catch { die("\(error)", 2) }
+    }
 }
-let cleanupEngine = settings.cleanup.provider == "anthropic"
-    ? settings.cleanupModel : (settings.cleanup.model ?? settings.cleanup.provider)
+// `engine` is what makes a stale fixture visible, so it has to name what
+// actually produced the text. With --cleanup-cmd the configured provider is not
+// involved at all, and labelling those fixtures with `cleanup.model` claims a
+// run came from a provider that was never called.
+let cleanupEngine: String = {
+    guard let cleanupCmd else {
+        return settings.cleanup.provider == "anthropic"
+            ? settings.cleanupModel : (settings.cleanup.model ?? settings.cleanup.provider)
+    }
+    let exe = URL(fileURLWithPath: cleanupCmd).lastPathComponent
+    // The command picks its own model; --model is the only way it can be named
+    // here, which is why it is passed through to the command as argv[2].
+    return "cmd:\(exe)" + (modelOverride.map { " \($0)" } ?? "")
+}()
 if modelOverride != nil {
     print("cleanup model for this run: \(cleanupEngine) (--model; settings.json untouched)")
 }

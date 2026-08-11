@@ -235,6 +235,7 @@ verbatim `NAME.raw.txt`) and cleanup (model output against `NAME.golden.txt`).
 | `--cleanup-only` | cleanup leg only — no whisper model needed |
 | `--model <id>` | cleanup model for THIS run; `settings.json` is never written |
 | `--out <path>` | read/write fixtures elsewhere, so two runs can sit side by side |
+| `--cleanup-cmd <exe>` | run the cleanup leg through an external command instead of an HTTP provider (see below) |
 | `compare a b` | diff two results files: aggregates per leg and category, then the cases they disagree on most |
 | `verify [dir]` | re-score the committed `eval/results.json` offline — no model, no key, no network |
 | `--self-check` | assert the `compare` arithmetic offline, without a corpus |
@@ -251,6 +252,38 @@ score and fails only when the same bytes produce a different number than the one
 recorded in the fixture. The committed baseline legitimately contains failing
 cases (base.en mangles "Kubernetes"), and re-judging those on every run would
 peg CI red forever and teach everyone to ignore it.
+
+#### `--cleanup-cmd` — A/B a model you have a CLI for but no API key
+
+Routes the cleanup leg through an external command: **system prompt as `argv[1]`,
+`--model`'s value as `argv[2]`, user message on stdin, cleaned text on stdout**,
+non-zero exit treated as a cleanup failure carrying stderr. Both prompts still
+come from Parla's own `PromptBuilder`, so what is measured stays Parla's prompt —
+only the transport moves. Pass `--model` even though the command picks its own:
+it is what lands in each fixture's `engine` field, and a run nobody can attribute
+to a model is not much of an A/B.
+
+```sh
+#!/bin/sh
+cd "$(dirname "$0")/sandbox" || exit 1     # tools off, empty cwd: see below
+exec claude -p --model "$2" --system-prompt "$1" \
+  --disallowedTools "Bash" "Read" "Write" "Edit" "Glob" "Grep" "WebFetch" "WebSearch" "Task"
+```
+
+```
+swift run parla-eval --cleanup-only --model claude-haiku-4-5 \
+  --cleanup-cmd ./cleanup-via-claude.sh --out /tmp/haiku.json
+```
+
+Two caveats, both load-bearing:
+
+- **Compare two `--cleanup-cmd` runs with each other, never with a
+  real-provider baseline.** A CLI wraps its own harness around the model, so the
+  absolute score is not comparable to `eval/results.json`; the relative A/B is.
+- **Disable the tools.** The corpus has an `injection` category — instruction-
+  shaped speech that must be transcribed and never obeyed. Feeding that to an
+  agent that can run `Bash` in your repo is both a wrong measurement and a bad
+  idea; run it tool-less in an empty directory.
 
 ### `scripts/make-asr-corpus.sh`
 

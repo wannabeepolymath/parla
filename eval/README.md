@@ -76,10 +76,14 @@ from Settings.
 
 ## A/B: comparing two cleanup models
 
-The default `cleanupModel` was picked on cost and latency. **Its quality has
-never been measured against the alternatives.** This is the recipe for doing
-that; nobody has run it yet, so treat any claim about which model is better as
-unverified until this produces output.
+The default `cleanupModel` was picked on cost and latency. This is the recipe
+for measuring it. **It has been run once** — haiku-4-5 vs sonnet-5, plus a
+same-model calibration run — and the answer was that this corpus cannot tell
+them apart: the noise between two runs of the *same* model (9 of 30 cases,
+13.3pp of zero-edit) was larger than anything between the two models, and the
+net sign flipped depending on which calibration run you compared against. See
+`progress.md`, "Tier 1 #14". The default stands, and the next useful move is
+more cases, not more runs.
 
 `--model` replaces the cleanup model for one run and never writes
 `settings.json`. It covers both provider shapes — `anthropic` reads
