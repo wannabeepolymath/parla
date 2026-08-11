@@ -6,9 +6,16 @@ import ParlaCore
 //   parla-eval [dir]            full pipeline: wav → whisper → cleanup
 //   parla-eval --asr-only       whisper leg only (no API key needed)
 //   parla-eval --cleanup-only   cleanup leg only (no whisper model needed)
+//   parla-eval --model <id>     use <id> as the cleanup model for THIS run;
+//                               settings.json is never written
+//   parla-eval --out <path>     read/write fixtures at <path> instead of
+//                               eval/results.json, so two runs can sit side by side
 //   parla-eval verify [dir]     re-score the committed eval/results.json with
 //                               today's normalizer and scorer — no model, no
 //                               key, no network. This is the CI gate.
+//   parla-eval compare a b      diff two results files: aggregates per leg and
+//                               category, then the cases they disagree on most
+//   parla-eval --self-check     assert the compare arithmetic offline
 //
 // A case is NAME.golden.txt (the expected cleaned text) plus at least one input:
 //   NAME.wav      — audio; drives the whisper leg
@@ -18,21 +25,13 @@ import ParlaCore
 // "# bundle: <id>" header lines.
 //
 // Exit codes: 0 clean · 1 quality regression (some case scored WER > 20 %) ·
-// 2 misconfiguration (model or key missing) · 3 infrastructure error. A network
-// flake must never read as a quality regression, which is why 3 exists.
+// 2 misconfiguration (model or key missing, unusable compare arguments) ·
+// 3 infrastructure error. A network flake must never read as a quality
+// regression, which is why 3 exists. `compare` never returns 1: one model
+// scoring worse than another is the answer the mode exists to produce, not a
+// failure of the mode.
 
-enum Mode { case full, asrOnly, cleanupOnly, verify }
-
-let argv = Array(CommandLine.arguments.dropFirst())
-let mode: Mode = argv.contains("verify") || argv.contains("--verify") ? .verify
-    : argv.contains("--asr-only") ? .asrOnly
-    : argv.contains("--cleanup-only") ? .cleanupOnly
-    : .full
-let dir = argv.first { !$0.hasPrefix("-") && $0 != "verify" } ?? "eval/cases"
-let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
-let evalRoot = dirURL.deletingLastPathComponent()
-let resultsURL = evalRoot.appendingPathComponent("results.json")
-let contextURL = evalRoot.appendingPathComponent("context.json")
+enum Mode { case full, asrOnly, cleanupOnly, verify, compare }
 
 /// A case scoring worse than this is a failure, not a near miss. macparakeet's
 /// threshold: corpus WER hides exactly the dictations that feel broken.
@@ -40,6 +39,15 @@ let failThreshold = 0.20
 
 func fmt(_ x: Double) -> String { String(format: "%.2f", x) }
 func pct(_ x: Double) -> String { String(format: "%.1f%%", x * 100) }
+/// Metric changes are printed in percentage POINTS: 1.8 % → 1.2 % is −0.6pp.
+/// Calling that "−33 %" would make a two-case wobble read like a landslide.
+func pp(_ delta: Double) -> String { String(format: "%+.1fpp", delta * 100) }
+func padR(_ s: String, _ w: Int) -> String {
+    s.count >= w ? s : s + String(repeating: " ", count: w - s.count)
+}
+func padL(_ s: String, _ w: Int) -> String {
+    s.count >= w ? s : String(repeating: " ", count: w - s.count) + s
+}
 func die(_ msg: String, _ code: Int32) -> Never {
     FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
     quit(code)
@@ -58,6 +66,39 @@ func quit(_ code: Int32) -> Never {
     transcriber = nil
     exit(code)
 }
+
+// MARK: - Arguments
+
+var args = Array(CommandLine.arguments.dropFirst())
+
+/// Removes `--flag value` from `args` and returns the value. Value-taking flags
+/// are consumed BEFORE the positional scan below, or `--model foo` would leave
+/// "foo" looking like the case directory.
+func takeOption(_ name: String) -> String? {
+    guard let i = args.firstIndex(of: name) else { return nil }
+    guard i + 1 < args.count, !args[i + 1].hasPrefix("--") else {
+        die("\(name) needs a value", 2)
+    }
+    let value = args[i + 1]
+    args.removeSubrange(i...(i + 1))
+    return value
+}
+
+let modelOverride = takeOption("--model")
+let outPath = takeOption("--out")
+
+let mode: Mode = args.contains("compare") ? .compare
+    : args.contains("verify") || args.contains("--verify") ? .verify
+    : args.contains("--asr-only") ? .asrOnly
+    : args.contains("--cleanup-only") ? .cleanupOnly
+    : .full
+let positional = args.filter { !$0.hasPrefix("-") && $0 != "verify" && $0 != "compare" }
+let dir = positional.first ?? "eval/cases"
+let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
+let evalRoot = dirURL.deletingLastPathComponent()
+let resultsURL = outPath.map { URL(fileURLWithPath: $0) }
+    ?? evalRoot.appendingPathComponent("results.json")
+let contextURL = evalRoot.appendingPathComponent("context.json")
 
 // MARK: - Case files
 
@@ -97,6 +138,39 @@ func parseCaseFile(_ text: String) -> (headers: [String: String], body: String) 
 
 // MARK: - Reporting
 
+/// One leg's aggregates, scored with TODAY's normalizer and scorer. `report`
+/// and `compare` both read from here, so the two can never end up disagreeing
+/// about what "zero-edit rate" or "corpus WER" means.
+struct Summary {
+    var n = 0, zeroEdit = 0, edits = 0, refWords = 0
+    var rates: [Double] = [], seconds: [Double] = []
+    var byCategory: [String: (edits: Int, ref: Int)] = [:]
+    var corpusWER: Double { refWords > 0 ? Double(edits) / Double(refWords) : 0 }
+    var zeroEditRate: Double { n > 0 ? Double(zeroEdit) / Double(n) : 0 }
+    /// 0 for a category this run never scored — the caller unions both runs'
+    /// category sets, so an absent one has no edits to report.
+    func categoryWER(_ key: String) -> Double {
+        guard let c = byCategory[key], c.ref > 0 else { return 0 }
+        return Double(c.edits) / Double(c.ref)
+    }
+}
+
+func summarize(_ rs: [CaseResult]) -> Summary {
+    var s = Summary()
+    s.n = rs.count
+    for r in rs {
+        let w = Eval.wer(reference: r.reference, hypothesis: r.hypothesis)
+        s.rates.append(w.rate)
+        s.seconds.append(r.seconds)
+        s.edits += w.edits
+        s.refWords += w.referenceWords
+        s.byCategory[r.category, default: (0, 0)].edits += w.edits
+        s.byCategory[r.category, default: (0, 0)].ref += w.referenceWords
+        if Eval.normalize(r.reference) == Eval.normalize(r.hypothesis) { s.zeroEdit += 1 }
+    }
+    return s
+}
+
 /// Scores every result with the CURRENT normalizer and scorer. Full runs and
 /// `verify` both land here, so a change to Eval moves both identically.
 func report(_ results: [CaseResult]) -> Bool {
@@ -104,46 +178,202 @@ func report(_ results: [CaseResult]) -> Bool {
     for leg in ["asr", "cleanup"] {
         let rs = results.filter { $0.leg == leg }
         guard !rs.isEmpty else { continue }
+        let s = summarize(rs)
 
-        var rates: [Double] = []
-        var zeroEdit = 0, edits = 0, refWords = 0
-        var byCategory: [String: (edits: Int, ref: Int)] = [:]
-
-        for r in rs {
+        for r in rs where Eval.normalize(r.reference) != Eval.normalize(r.hypothesis) {
             let w = Eval.wer(reference: r.reference, hypothesis: r.hypothesis)
-            rates.append(w.rate)
-            edits += w.edits
-            refWords += w.referenceWords
-            byCategory[r.category, default: (0, 0)].edits += w.edits
-            byCategory[r.category, default: (0, 0)].ref += w.referenceWords
-
-            if Eval.normalize(r.reference) == Eval.normalize(r.hypothesis) {
-                zeroEdit += 1
-            } else {
-                if w.rate > failThreshold { qualityFailed = true }
-                print("\(w.rate > failThreshold ? "FAIL" : "near") \(leg) \(r.name) (wer \(pct(w.rate)))")
-                print("  golden: \(Eval.normalize(r.reference))")
-                print("  actual: \(Eval.normalize(r.hypothesis))")
-            }
+            if w.rate > failThreshold { qualityFailed = true }
+            print("\(w.rate > failThreshold ? "FAIL" : "near") \(leg) \(r.name) (wer \(pct(w.rate)))")
+            print("  golden: \(Eval.normalize(r.reference))")
+            print("  actual: \(Eval.normalize(r.hypothesis))")
         }
 
-        let n = rs.count
-        let failures = rates.filter { $0 > failThreshold }.count
-        let corpus = refWords > 0 ? Double(edits) / Double(refWords) : 0
+        let n = s.n
+        let failures = s.rates.filter { $0 > failThreshold }.count
         print("""
-        \(leg): n=\(n)  zero-edit \(zeroEdit)/\(n) (\(pct(Double(zeroEdit) / Double(n))))  \
-        wer \(pct(corpus))  p50 \(pct(Eval.percentile(rates, 0.5)))  \
-        p90 \(pct(Eval.percentile(rates, 0.9)))  \
+        \(leg): n=\(n)  zero-edit \(s.zeroEdit)/\(n) (\(pct(s.zeroEditRate)))  \
+        wer \(pct(s.corpusWER))  p50 \(pct(Eval.percentile(s.rates, 0.5)))  \
+        p90 \(pct(Eval.percentile(s.rates, 0.9)))  \
         fail(>\(Int(failThreshold * 100))%) \(failures)/\(n)
         """)
-        let cats = byCategory.sorted { $0.key < $1.key }.map {
-            "\($0.key) \(pct($0.value.ref > 0 ? Double($0.value.edits) / Double($0.value.ref) : 0))"
-        }
+        let cats = s.byCategory.keys.sorted().map { "\($0) \(pct(s.categoryWER($0)))" }
         print("  by category: " + cats.joined(separator: "  "))
-        let secs = rs.map(\.seconds)
-        print("  latency p50/p95: \(fmt(Eval.percentile(secs, 0.5)))s/\(fmt(Eval.percentile(secs, 0.95)))s")
+        print("  latency p50/p95: \(fmt(Eval.percentile(s.seconds, 0.5)))s/\(fmt(Eval.percentile(s.seconds, 0.95)))s")
     }
     return qualityFailed
+}
+
+// MARK: - compare: diff two result files
+
+/// Exit 3 (infrastructure), never 1: a compare that cannot read its inputs has
+/// measured nothing, which is a different thing from measuring a worse model.
+func loadResults(_ path: String) -> [CaseResult] {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+        die("cannot read \(path)", 3)
+    }
+    guard let rs = try? JSONDecoder().decode([CaseResult].self, from: data), !rs.isEmpty else {
+        die("\(path) is not a non-empty parla-eval results file", 3)
+    }
+    return rs
+}
+
+/// Pairs two runs by leg+name — one case name scored on two legs is two
+/// different measurements and must never be diffed against each other. Cases
+/// on one side only come back as notes: a corpus grows between runs and that
+/// is not an error. Sharing *nothing* is, and the caller exits 2 on it.
+func pair(_ a: [CaseResult], _ b: [CaseResult])
+    -> (shared: [(CaseResult, CaseResult)], onlyA: [String], onlyB: [String]) {
+    func keyed(_ rs: [CaseResult]) -> [String: CaseResult] {
+        Dictionary(rs.map { ("\($0.leg)/\($0.name)", $0) }, uniquingKeysWith: { first, _ in first })
+    }
+    let (ka, kb) = (keyed(a), keyed(b))
+    return (ka.keys.filter { kb[$0] != nil }.sorted().map { (ka[$0]!, kb[$0]!) },
+            ka.keys.filter { kb[$0] == nil }.sorted(),
+            kb.keys.filter { ka[$0] == nil }.sorted())
+}
+
+struct Disagreement {
+    let a: CaseResult, b: CaseResult
+    let werA: Double, werB: Double
+    /// The two runs land on opposite sides of the zero-edit line. Worth its own
+    /// flag because a punctuation-only difference moves the product promise
+    /// without moving WER at all — the WER normalizer folds punctuation away.
+    let zeroFlip: Bool
+    var magnitude: Double { abs(werB - werA) }
+}
+
+/// Cases the two runs scored differently, biggest disagreement first. This list
+/// is the "why"; the aggregates above it are only the "whether".
+func disagreements(_ pairs: [(CaseResult, CaseResult)]) -> [Disagreement] {
+    pairs.compactMap { x, y -> Disagreement? in
+        let wx = Eval.wer(reference: x.reference, hypothesis: x.hypothesis).rate
+        let wy = Eval.wer(reference: y.reference, hypothesis: y.hypothesis).rate
+        let zx = Eval.normalize(x.reference) == Eval.normalize(x.hypothesis)
+        let zy = Eval.normalize(y.reference) == Eval.normalize(y.hypothesis)
+        guard abs(wx - wy) > 1e-9 || zx != zy else { return nil }
+        return Disagreement(a: x, b: y, werA: wx, werB: wy, zeroFlip: zx != zy)
+    }
+    // Name breaks ties so the same two files always print the same order.
+    .sorted {
+        if abs($0.magnitude - $1.magnitude) > 1e-9 { return $0.magnitude > $1.magnitude }
+        if $0.zeroFlip != $1.zeroFlip { return $0.zeroFlip }
+        return $0.a.name < $1.a.name
+    }
+}
+
+/// 18 pads past the longest label in use ("  self-correction"), so the metric
+/// columns stay aligned when a category name is long.
+func metricRow(_ label: String, _ x: Double, _ y: Double) {
+    print("  \(padR(label, 18)) \(padL(pct(x), 7)) → \(padL(pct(y), 7))   \(padL(pp(y - x), 8))")
+}
+
+// The compare arithmetic is the one part of this harness that a real run cannot
+// check: exercising it needs two corpus runs, an API key and two round trips per
+// case, which is precisely why it would otherwise ship unverified. These
+// fixtures cost nothing and fail loudly if the counting, the pairing or the
+// disagreement ranking breaks.
+if args.contains("--self-check") {
+    func c(_ leg: String, _ name: String, _ cat: String, _ ref: String, _ hyp: String) -> CaseResult {
+        CaseResult(name: name, category: cat, leg: leg, reference: ref, hypothesis: hyp,
+                   seconds: 1, engine: "e", wer: nil)
+    }
+    // `short` is 2 reference words and `long` is 8 on purpose: corpus WER and a
+    // mean of per-case rates are the same number only when every reference has
+    // the same length, so equal-length fixtures cannot tell the two apart.
+    // `short` also appears on BOTH legs, which is what a name-only pairing would
+    // silently collapse. `tidy` differs by punctuation alone.
+    let long = "alpha bravo charlie delta echo foxtrot golf hotel"
+    let longMiss = "alpha bravo charlie delta echo foxtrot golf zulu"
+    let a = [c("cleanup", "short", "s", "alpha bravo", "zulu yankee"),
+             c("cleanup", "long", "l", long, longMiss),
+             c("cleanup", "tidy", "l", "Ship it.", "Ship it."),
+             c("asr", "short", "s", "alpha bravo", "alpha bravo")]
+    let b = [c("cleanup", "short", "s", "alpha bravo", "alpha bravo"),
+             c("cleanup", "long", "l", long, longMiss),
+             c("cleanup", "tidy", "l", "Ship it.", "Ship it"),
+             c("asr", "short", "s", "alpha bravo", "alpha bravo")]
+
+    let sa = summarize(a.filter { $0.leg == "cleanup" })
+    let sb = summarize(b.filter { $0.leg == "cleanup" })
+    precondition(sa.n == 3 && sa.edits == 3 && sa.refWords == 12 && sa.zeroEdit == 1, "summarize counts")
+    precondition(abs(sa.corpusWER - 3.0 / 12.0) < 1e-9, "corpus WER is edits/refWords")
+    precondition(abs(sa.rates.reduce(0, +) / 3 - sa.corpusWER) > 0.05,
+                 "fixture no longer separates corpus WER from a mean of rates")
+    precondition(abs(sa.zeroEditRate - 1.0 / 3.0) < 1e-9, "zero-edit rate is zeroEdit/n")
+    precondition(abs(sb.corpusWER - 1.0 / 12.0) < 1e-9, "B scores better")
+    precondition(sa.categoryWER("s") == 1 && sa.categoryWER("absent") == 0, "per-category WER")
+
+    let (shared, onlyA, onlyB) = pair(a, b + [c("cleanup", "extra", "l", "alpha", "alpha")])
+    precondition(shared.count == 4, "pairs by leg+name — 'short' is on both legs and must not collapse")
+    precondition(shared.allSatisfy { $0.0.leg == $0.1.leg && $0.0.name == $0.1.name }, "pairs line up")
+    precondition(onlyA.isEmpty && onlyB == ["cleanup/extra"], "one-sided cases are notes, not errors")
+
+    let d = disagreements(shared.filter { $0.0.leg == "cleanup" })
+    precondition(d.map(\.a.name) == ["short", "tidy"], "worst first; 'long' scored the same and drops out")
+    precondition(abs(d[0].werA - 1) < 1e-9 && d[0].werB == 0 && d[0].zeroFlip, "short: B fixed it")
+    // `tidy` scores the same WER on both sides and flips zero-edit. Ranking on
+    // WER alone drops it, and zero-edit is the product promise.
+    precondition(d[1].magnitude < 1e-9 && d[1].zeroFlip, "punctuation-only flip survives")
+
+    print("self-check: compare arithmetic OK")
+    exit(0)
+}
+
+// MARK: - compare: diff two result files
+
+if mode == .compare {
+    guard positional.count == 2 else {
+        die("compare needs two results files: parla-eval compare a.json b.json", 2)
+    }
+    let (pathA, pathB) = (positional[0], positional[1])
+    let (shared, onlyA, onlyB) = pair(loadResults(pathA), loadResults(pathB))
+    guard !shared.isEmpty else {
+        die("no case in common between \(pathA) and \(pathB) — different corpora?", 2)
+    }
+    print("A = \(pathA)")
+    print("B = \(pathB)")
+    if !onlyA.isEmpty { print("note: only in A: \(onlyA.joined(separator: " "))") }
+    if !onlyB.isEmpty { print("note: only in B: \(onlyB.joined(separator: " "))") }
+
+    for leg in ["asr", "cleanup"] {
+        let pairs = shared.filter { $0.0.leg == leg }
+        guard !pairs.isEmpty else { continue }
+        let sa = summarize(pairs.map { $0.0 }), sb = summarize(pairs.map { $0.1 })
+        let engA = Set(pairs.map { $0.0.engine }).sorted().joined(separator: ",")
+        let engB = Set(pairs.map { $0.1.engine }).sorted().joined(separator: ",")
+        print("\n\(leg): n=\(pairs.count)   A = \(engA)   B = \(engB)")
+
+        print("  \(padR("zero-edit", 18)) \(padL("\(sa.zeroEdit)/\(sa.n)", 7)) → "
+            + "\(padL("\(sb.zeroEdit)/\(sb.n)", 7))   \(padL(pp(sb.zeroEditRate - sa.zeroEditRate), 8))")
+        metricRow("corpus WER", sa.corpusWER, sb.corpusWER)
+        metricRow("p50", Eval.percentile(sa.rates, 0.5), Eval.percentile(sb.rates, 0.5))
+        metricRow("p90", Eval.percentile(sa.rates, 0.9), Eval.percentile(sb.rates, 0.9))
+        print("  \(padR("latency p50/p95", 18)) "
+            + "\(fmt(Eval.percentile(sa.seconds, 0.5)))s/\(fmt(Eval.percentile(sa.seconds, 0.95)))s → "
+            + "\(fmt(Eval.percentile(sb.seconds, 0.5)))s/\(fmt(Eval.percentile(sb.seconds, 0.95)))s")
+
+        print("  by category (WER):")
+        for cat in Set(sa.byCategory.keys).union(sb.byCategory.keys).sorted() {
+            metricRow("  " + cat, sa.categoryWER(cat), sb.categoryWER(cat))
+        }
+
+        let diffs = disagreements(pairs)
+        guard !diffs.isEmpty else { print("  every case scored identically"); continue }
+        print("  disagreements (\(diffs.count)/\(pairs.count) cases), worst first — "
+            + "read these, the numbers above only say whether something moved:")
+        for d in diffs.prefix(10) {
+            print("    \(padL(pp(d.werB - d.werA), 8))  \(d.a.name)  A \(pct(d.werA)) → B \(pct(d.werB))"
+                + (d.zeroFlip ? "  [zero-edit flip]" : ""))
+            print("      golden: \(Eval.normalize(d.a.reference))")
+            print("      A:      \(Eval.normalize(d.a.hypothesis))")
+            print("      B:      \(Eval.normalize(d.b.hypothesis))")
+        }
+        if diffs.count > 10 { print("    … and \(diffs.count - 10) more") }
+    }
+    // Exit 0 even when the two runs differ wildly. A quality difference is the
+    // RESULT this mode exists to produce, not a failure of it — same discipline
+    // that keeps a network flake (3) out of the quality regression code (1).
+    exit(0)
 }
 
 // MARK: - verify: re-score committed fixtures, offline
@@ -249,6 +479,18 @@ if let data = try? Data(contentsOf: contextURL),
     print("note: no \(contextURL.lastPathComponent) — running with an empty dictionary and no snippets")
 }
 
+// --model overrides the model for THIS run only: `settings` is a loaded copy and
+// parla-eval never writes it back, so an A/B costs no hand-editing of
+// settings.json. The two provider shapes read different fields — anthropic takes
+// `cleanupModel`, openai-compatible takes `cleanup.model` (nil there means "ask
+// the server for its first model") — and the run only ever uses one of them, so
+// setting both overrides whichever provider is configured. Credentials and base
+// URL still come from Settings; only the model name moves.
+if let modelOverride {
+    settings.cleanupModel = modelOverride
+    settings.cleanup.model = modelOverride
+}
+
 var client: CleanupProviding?
 if needsCleanup {
     do {
@@ -257,6 +499,9 @@ if needsCleanup {
 }
 let cleanupEngine = settings.cleanup.provider == "anthropic"
     ? settings.cleanupModel : (settings.cleanup.model ?? settings.cleanup.provider)
+if modelOverride != nil {
+    print("cleanup model for this run: \(cleanupEngine) (--model; settings.json untouched)")
+}
 
 struct NoEngine: Error {}
 /// The `# bundle:` of the case being run — the destination the cleanup prompt's
@@ -347,13 +592,20 @@ for name in names {
 
 let qualityFailed = report(results)
 
-// Only a full run writes fixtures: a partial mode would clobber the other leg.
-if mode == .full, !results.isEmpty {
+// A partial mode must not write the DEFAULT path: it would clobber the other
+// leg's fixtures in the committed baseline. An explicit --out names a fresh
+// file with no other leg in it, which is what lets `--cleanup-only --out` A/B a
+// cleanup model without the whisper model installed.
+if !results.isEmpty, mode == .full || outPath != nil {
     let enc = JSONEncoder()
     enc.outputFormatting = [.prettyPrinted, .sortedKeys]
     if let data = try? enc.encode(results) {
         try? data.write(to: resultsURL)
-        print("wrote \(resultsURL.path) — commit it so `parla-eval verify` can re-score offline")
+        // An --out file is one side of an A/B, not the baseline; telling you to
+        // commit it would put a non-default model's scores under the CI gate.
+        print("wrote \(resultsURL.path)" + (outPath == nil
+            ? " — commit it so `parla-eval verify` can re-score offline"
+            : " — diff it with `parla-eval compare <a> <b>`"))
     }
 }
 

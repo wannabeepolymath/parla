@@ -20,6 +20,9 @@ import ParlaCore
 // wrong reason. It checks that first and refuses rather than reporting nonsense.
 // Apps with no AX text value (some Electron builds) can be typed into but not
 // read back; those are reported as SKIP, not PASS. A skip is not a pass.
+// It focuses the target's text field itself (AX, same grant), so a run needs
+// nobody at the keyboard; only an app that exposes no text field at all still
+// asks for a click.
 
 let bundleID = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("-") } ?? "com.apple.TextEdit"
 
@@ -27,6 +30,25 @@ func die(_ msg: String, _ code: Int32) -> Never {
     FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
     exit(code)
 }
+
+// Hard watchdog. Every AX element this tool touches gets a messaging timeout,
+// but "bounded everywhere I know about" is not the same as "cannot hang" — an
+// unresponsive target hung this for ten minutes, and per-element timeouts did
+// not stop it. A diagnostic that hangs is strictly worse than one that fails:
+// nobody can tell a wedged check from a slow one, and CI just sits there. This
+// is the only guarantee that does not depend on having found every blocking
+// call, so it exists even though the timeouts should make it unreachable.
+let watchdog = Thread {
+    Thread.sleep(forTimeInterval: 90)
+    FileHandle.standardError.write(Data("""
+        error: timed out after 90s — the target's AX bridge is not answering.
+        Nothing was verified; do NOT read this as a pass.
+        \n
+        """.utf8))
+    exit(4)
+}
+watchdog.stackSize = 1 << 16
+watchdog.start()
 
 guard AXIsProcessTrusted() else {
     die("""
@@ -73,12 +95,92 @@ guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleI
 app.activate()
 Thread.sleep(forTimeInterval: 1.5) // let it come forward and take focus
 
+// Bound every AX call. The default is a 6-second per-message timeout that an
+// unresponsive bridge can hit on EVERY node of a tree walk — this hung for ten
+// minutes against an app whose AX layer was not answering. A diagnostic tool
+// that hangs is worse than one that fails, because nobody can tell which.
+AXUIElementSetMessagingTimeout(AXUIElementCreateApplication(app.processIdentifier), 2.0)
+AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 2.0)
+
 print("parla-insert-check: \(bundleID) (pid \(app.processIdentifier))")
-print("Click into an empty text field in that app now — typing starts in 3s.")
-Thread.sleep(forTimeInterval: 3)
+
+// Take focus the way an assistive client may: find the app's first text area and
+// focus it. Waiting for a human to click was the reason this check never ran —
+// from a shell the focused element stays the calling terminal, so every case
+// reported "focused, but AX exposes no text value" and skipped.
+var grab = Inserter.focusFirstTextInput(pid: app.processIdentifier)
+if grab == .noTextInput, bundleID == "com.apple.TextEdit" {
+    // TextEdit with no open document has no text area in any window. Hand it a
+    // scratch file — the reference target has to work with no setup at all.
+    // Unique per run so the document opens empty: reusing a path we typed into
+    // before would reopen it with the old content and a restored caret.
+    let scratch = FileManager.default.temporaryDirectory
+        .appendingPathComponent("parla-insert-check-\(Int(Date().timeIntervalSince1970)).txt")
+    if (try? Data().write(to: scratch)) != nil,
+       let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+        let sem = DispatchSemaphore(value: 0)
+        NSWorkspace.shared.open([scratch], withApplicationAt: appURL,
+                                configuration: NSWorkspace.OpenConfiguration()) { _, _ in sem.signal() }
+        _ = sem.wait(timeout: .now() + 10)
+        Thread.sleep(forTimeInterval: 1.5) // the window has to exist before the walk can see it
+        grab = Inserter.focusFirstTextInput(pid: app.processIdentifier)
+    }
+}
+
+/// Set when a field was found but would not take focus: every case then skips.
+var focusRefusal: String?
+switch grab {
+case .focused:
+    print("Focused a text field in \(bundleID) via AX — no clicking needed.")
+case .noTextInput:
+    // Distinguish "this app genuinely exposes nothing typeable" from "the AX
+    // bridge isn't answering for this process at all" — they look identical from
+    // the walk and need completely different responses. CoreGraphics can see
+    // on-screen windows without Accessibility, so if CG sees windows and AX sees
+    // none, the tree is not empty, it is unreachable.
+    let cgWindows = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+        as? [[String: Any]] ?? []).filter {
+            ($0[kCGWindowOwnerPID as String] as? pid_t) == app.processIdentifier
+        }.count
+    var axWindows: CFTypeRef?
+    AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
+                                  kAXWindowsAttribute as CFString, &axWindows)
+    let axRoles = Set(((axWindows as? [AXUIElement]) ?? []).map { el -> String in
+        var r: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r)
+        return r as? String ?? "?"
+    })
+    if cgWindows > 0, !axRoles.contains(kAXWindowRole as String) {
+        die("""
+            AX cannot reach \(bundleID)'s windows from this process.
+            CoreGraphics sees \(cgWindows) on-screen window(s); AX returns \
+            \(axRoles.isEmpty ? "none" : "elements with role(s) \(axRoles.sorted())") \
+            instead of AXWindow, which is what a degenerate/unreachable tree looks like.
+            AXIsProcessTrusted() is true, so the grant is recorded — but the bridge is
+            not answering. That happens when the running binary is not the one actually
+            granted (a rebuild changes it), or under a non-interactive/remote session.
+            Run this from a normal Terminal in a logged-in GUI session, granting
+            Accessibility to the exact binary path printed above.
+            """, 2)
+    }
+    // Genuinely nothing typeable — Electron apps expose none until an assistive
+    // client wakes them, and some never do. Fall back and ask for the one thing
+    // only a human can do.
+    print("No AX text field found in \(bundleID). Click into an empty text field there now — typing starts in 3s.")
+    Thread.sleep(forTimeInterval: 3)
+case .refused:
+    // Found the field, focus did not take. Typing now would land in whatever is
+    // frontmost — possibly the user's real work — so type nothing.
+    focusRefusal = "a text field in \(bundleID) refused focus; typing would land somewhere unverified"
+}
 
 var failed = false, skipped = 0
 for c in cases {
+    if let focusRefusal {
+        print("SKIP \(c.name) — \(focusRefusal)")
+        skipped += 1
+        continue
+    }
     guard Inserter.focusTarget() != .secure else {
         die("focus is a secure field or secure input is held — nothing can be typed", 2)
     }

@@ -131,6 +131,14 @@ public enum Inserter {
     /// learning in exactly the apps that need it most.
     public static func focusedElement() -> AXUIElement? {
         let system = AXUIElementCreateSystemWide()
+        // Bound it. The AX default is a 6-second per-message timeout, and this
+        // runs on the main thread on every fn-down — a wedged or unresponsive
+        // target would freeze the app mid-keypress with no way out. Found the
+        // hard way: parla-insert-check hung for ten minutes against an app whose
+        // AX bridge had stopped answering. 1s is far longer than a healthy
+        // reply and short enough that a stall reads as a dropped dictation
+        // rather than a hang.
+        AXUIElementSetMessagingTimeout(system, 1)
         var focused: CFTypeRef?
         if AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
            let focused { return (focused as! AXUIElement) }
@@ -166,6 +174,114 @@ public enum Inserter {
             return .editable
         }
         return .unknown
+    }
+
+    // MARK: - Taking focus without a human (parla-insert-check only)
+
+    /// Outcome of `focusFirstTextInput`. Three cases because each needs a
+    /// different response from the caller: type, ask a human to click, or type
+    /// nothing at all.
+    public enum FocusGrab: Sendable {
+        case focused      // the app confirms our element is the focused one
+        case noTextInput  // no text area/field anywhere in the app's windows
+        case refused      // found one, but focus did not take
+    }
+
+    /// Roles worth aiming a smoke test at, best first: a document body before a
+    /// single-line field, so an open Find bar doesn't win over the text the check
+    /// means to type into. Narrower than `classifyFocus`'s editable set — a combo
+    /// box or search field is editable but not somewhere to put 600 characters.
+    static let textInputRoles = ["AXTextArea", "AXTextField"]
+
+    /// First node `matches` accepts, depth-first, left to right. `maxDepth`
+    /// counts the roots as level 1 and bounds the descent, so a deep — or
+    /// self-referencing — tree can't spin the walk forever. Generic over the node
+    /// type only so tests can drive it with a synthetic tree; an AXUIElement
+    /// cannot be constructed in-process.
+    static func firstMatch<Node>(in roots: [Node], maxDepth: Int,
+                                 children: (Node) -> [Node],
+                                 matches: (Node) -> Bool) -> Node? {
+        guard maxDepth > 0 else { return nil }
+        for node in roots {
+            if matches(node) { return node }
+            if let hit = firstMatch(in: children(node), maxDepth: maxDepth - 1,
+                                    children: children, matches: matches) { return hit }
+        }
+        return nil
+    }
+
+    private static func axChildren(_ element: AXUIElement) -> [AXUIElement] {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
+              let children = ref as? [AXUIElement] else { return [] }
+        return children
+    }
+
+    private static func axRole(_ element: AXUIElement) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &ref) == .success
+        else { return nil }
+        return ref as? String
+    }
+
+    /// Whether `element` is what `appEl`'s process considers focused. Two ways of
+    /// asking because apps answer one or the other: the app names it as its
+    /// focused element, or the element itself reports AXFocused.
+    private static func isFocused(_ element: AXUIElement, of appEl: AXUIElement) -> Bool {
+        var focusedRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+           let focused = focusedRef, CFEqual(focused, element) { return true }
+        var flag: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXFocusedAttribute as CFString, &flag) == .success
+            && (flag as? Bool) == true
+    }
+
+    /// Walk `pid`'s windows for the first text area/field, focus it, and park the
+    /// caret at the end of whatever it already holds.
+    ///
+    /// Both halves exist for `parla-insert-check`, which has to run with nobody
+    /// at the keyboard: focus, because run from a shell the focused element stays
+    /// the calling terminal and every case skips; caret, because a reopened
+    /// document restores its old selection, and typing into a live selection
+    /// replaces it — the user's text, not ours. Setting focus is exactly the
+    /// capability the Accessibility grant confers, and the same one this file
+    /// already uses to read fields. Parla itself never calls this: dictation
+    /// types where the user already is.
+    ///
+    /// `.refused` is not `.focused` with a warning — on it the caller must type
+    /// nothing, because unverified focus means the keystrokes land in whatever
+    /// happens to be frontmost.
+    public static func focusFirstTextInput(pid: pid_t) -> FocusGrab {
+        let appEl = AXUIElementCreateApplication(pid)
+        // Bound each AX message to this app — set on the application element it
+        // covers the reads below it too. Without it a wedged target blocks every
+        // read for the system default, and the walk makes many of them.
+        AXUIElementSetMessagingTimeout(appEl, 1)
+        var windowsRef: CFTypeRef?
+        // Windows, not the app element, so the menu bar's large subtree is never
+        // walked. Depth 12 is arbitrary but well past the 3-4 levels a standard
+        // document window needs; too small only costs the caller its fallback.
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement],
+              // One walk per role rather than one walk matching either, so the
+              // preferred role wins wherever it sits in the tree.
+              let field = textInputRoles.lazy.compactMap({ role in
+                  firstMatch(in: windows, maxDepth: 12, children: axChildren,
+                             matches: { axRole($0) == role })
+              }).first
+        else { return .noTextInput }
+        AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        // Best effort: a field that won't report its value or take a range still
+        // gets typed into, it just leaves the caller's before/after diff to cope.
+        var valueRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(field, kAXValueAttribute as CFString, &valueRef) == .success,
+           let existing = valueRef as? String {
+            var end = CFRange(location: (existing as NSString).length, length: 0)
+            if let range = AXValueCreate(.cfRange, &end) {
+                AXUIElementSetAttributeValue(field, kAXSelectedTextRangeAttribute as CFString, range)
+            }
+        }
+        return isFocused(field, of: appEl) ? .focused : .refused
     }
 
     /// The focused field's full text, cursor position and selection length (both

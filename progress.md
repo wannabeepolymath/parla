@@ -17,10 +17,10 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 |---|---|---|---|---|---|
 | 0 | 8 | 8 | 0 | 0 | 0 |
 | 1 | 14 | 14 | 0 | 0 | 0 |
-| 2 | 7 | 6 | 0 | 0 | 1 |
-| **all** | **29** | **28** | **0** | **0** | **1** |
+| 2 | 7 | 7 | 0 | 0 | 0 |
+| **all** | **29** | **29** | **0** | **0** | **0** |
 
-Suite: **388 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
+Suite: **396 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
 
 ---
 
@@ -279,7 +279,7 @@ nested dispatch off the *first* effect.
 | 4 | Recording persistence + recovery | `ParlaCore/RecordingStore.swift` (new), `Dictation.swift`, Hub | M | low | **done** | wave 5 |
 | 5 | Automatic dictionary learning | `ParlaCore/DictionaryLearner.swift` (new), `Dictation.swift`, Hub | L | med | **done** | wave 5 |
 | 6 | Onboarding flow | `Parla/Hub/Onboarding.swift` (new), `HubWindow.swift`, `main.swift` | L | low | **done** | wave 5 |
-| 7 | Prompt caching | — | M | low | **skipped** | |
+| 7 | Prompt caching | `ParlaCore/Cleanup.swift` | M | low | **done** | threshold-gated |
 
 ### Wave 5 notes
 
@@ -308,7 +308,28 @@ nested dispatch off the *first* effect.
   parameter was non-escaping by default, but the tryout completion outlives the
   call because transcription is async.
 
-**Why #7 is skipped, not deferred — now measured, not assumed:**
+**#7 is implemented — as a gated mechanism, not as padding.**
+
+The audit framed this as a binary: pad the prompt with few-shot examples to
+cross the cache minimum, or skip it. The third option is to ship the mechanism
+and gate it on the prompt genuinely exceeding the configured model's minimum —
+`cache_control` on the system block when it qualifies, **no block at all** when
+it doesn't, and the prompt text left byte-identical. Today that is a documented
+no-op; it activates by itself if the dictionary/snippets grow or a
+lower-threshold model is configured.
+
+Verified minimums (from the `claude-api` skill, cross-checked against
+`08-cost.md:34`): opus-5 512 · sonnet-5 1024 · opus-4-5 4096 · **haiku-4-5
+4096**. They are *not* monotonic across generations, which is why the table
+carries a re-check-per-release warning. An unknown model never caches — a wrong
+low threshold would silently send inert blocks forever.
+
+Measured today: the fully loaded system prompt is 2,128 chars ≈ 425 est. tokens
+against the Haiku default's 4,096. The estimator deliberately undercounts
+(5 chars/token vs the ~4 rule of thumb) so the gate opens late — a missed cache
+costs one uncached request; an inert block costs the next reader's time.
+
+Original deferral reasoning, which the measurement confirms:
 
 Re-checked against the shipped code rather than the audit's estimate. The
 dictation system prompt literal is **560 chars ≈ 140 tokens** (~350 loaded with

@@ -234,6 +234,61 @@ final class CleanupTests: XCTestCase {
         }
     }
 
+    // MARK: - prompt caching
+
+    // The point of the gate: Parla's real prompt is far below every model's
+    // minimum cacheable prefix, so the request carries no cache block at all —
+    // the API would accept an inert one and silently ignore it.
+    func testShortSystemPromptSendsNoCacheControl() async throws {
+        let http = MockHTTP()
+        http.body = Data(#"{"content":[{"type":"text","text":"Hi."}]}"#.utf8)
+        let client = CleanupClient(apiKey: "k", model: "claude-haiku-4-5", http: http)
+        _ = try await client.clean(transcript: "um hi", context: ctx)
+
+        let body = http.lastRequest!.httpBody!
+        let json = try JSONSerialization.jsonObject(with: body) as! [String: Any]
+        XCTAssertTrue(json["system"] is String)
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("cache_control"))
+    }
+
+    // …and it switches itself on, unchanged, once the prompt clears the bar —
+    // here via a large dictionary, not by editing the base prompt.
+    func testOverThresholdPromptCachesTheSystemBlock() async throws {
+        let http = MockHTTP()
+        http.body = Data(#"{"content":[{"type":"text","text":"Hi."}]}"#.utf8)
+        let big = CleanupContext(dictionary: (0..<2000).map { "Kubernetes\($0)" },
+                                 snippets: ["calendar link": "https://cal.com/x"],
+                                 appName: "Slack", bundleID: "com.tinyspeck.slackmacgap")
+        let client = CleanupClient(apiKey: "k", model: "claude-haiku-4-5", http: http)
+        _ = try await client.clean(transcript: "um hi", context: big)
+
+        let json = try JSONSerialization.jsonObject(with: http.lastRequest!.httpBody!) as! [String: Any]
+        let blocks = try XCTUnwrap(json["system"] as? [[String: Any]])
+        XCTAssertEqual(blocks.count, 1)  // one breakpoint, on the stable prefix
+        XCTAssertEqual(blocks[0]["type"] as? String, "text")
+        XCTAssertEqual(blocks[0]["text"] as? String, PromptBuilder.system(context: big))
+        XCTAssertEqual(blocks[0]["cache_control"] as? [String: String], ["type": "ephemeral"])
+        // The transcript is the volatile suffix and is never marked.
+        let user = (json["messages"] as! [[String: Any]])[0]
+        XCTAssertEqual(user["content"] as? String, "<transcript>\num hi")
+    }
+
+    // An unknown model is never cached: a guessed threshold that is too low
+    // would emit inert blocks forever with nothing to surface the mistake.
+    func testUnknownModelIsNeverCached() {
+        let huge = String(repeating: "a", count: 200_000)
+        XCTAssertFalse(PromptCache.shouldCache(model: "gemini-2.5-flash", prompt: huge))
+        XCTAssertFalse(PromptCache.shouldCache(model: "llama3.1-local", prompt: huge))
+    }
+
+    // Each model is gated on its own minimum (Haiku 4.5's is 4× Sonnet 5's),
+    // and ids match by prefix like the pricing table, so date suffixes are fine.
+    func testCacheThresholdIsPerModelAndPrefixMatched() {
+        let medium = String(repeating: "a", count: 10_000)  // ~2k tokens
+        XCTAssertTrue(PromptCache.shouldCache(model: "claude-sonnet-5", prompt: medium))
+        XCTAssertFalse(PromptCache.shouldCache(model: "claude-haiku-4-5-20251001", prompt: medium))
+    }
+
     func testMultipleTextBlocksConcatenated() async throws {
         let http = MockHTTP()
         http.body = Data(#"{"content":[{"type":"text","text":"A"},{"type":"text","text":"B"}]}"#.utf8)

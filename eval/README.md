@@ -21,10 +21,15 @@ swift run parla-eval [dir]            # full pipeline: wav → whisper → clean
 swift run parla-eval --asr-only       # whisper leg only  (no API key needed)
 swift run parla-eval --cleanup-only   # cleanup leg only  (no model needed)
 swift run parla-eval verify           # re-score committed fixtures, offline
+swift run parla-eval compare a b      # diff two results files (see A/B below)
 ```
 
 `dir` defaults to `eval/cases`. The two partial modes exist so an ASR
 regression and a cleanup regression are never conflated.
+
+Two flags modify a run: `--model <id>` swaps the cleanup model for that run
+only, and `--out <path>` writes the fixtures somewhere other than
+`eval/results.json`. Together they are the A/B recipe below.
 
 ## Case kinds
 
@@ -69,6 +74,72 @@ The cleanup context is pinned to `eval/context.json` (dictionary + snippets),
 not reproducible. Only provider credentials (key, model, base URL) still come
 from Settings.
 
+## A/B: comparing two cleanup models
+
+The default `cleanupModel` was picked on cost and latency. **Its quality has
+never been measured against the alternatives.** This is the recipe for doing
+that; nobody has run it yet, so treat any claim about which model is better as
+unverified until this produces output.
+
+`--model` replaces the cleanup model for one run and never writes
+`settings.json`. It covers both provider shapes — `anthropic` reads
+`cleanupModel`, `openai-compatible` reads `cleanup.model` — so pass whatever id
+your configured provider serves. Credentials and base URL still come from
+Settings; only the model name moves.
+
+```
+swift run parla-eval --cleanup-only --model <A> --out /tmp/ab-a.json
+swift run parla-eval --cleanup-only --model <B> --out /tmp/ab-b.json
+swift run parla-eval compare /tmp/ab-a.json /tmp/ab-b.json
+```
+
+`--cleanup-only` keeps whisper out of it: no model download, and the ASR leg
+cannot drift between the two runs. The output goes to `/tmp` deliberately —
+`eval/` is not gitignored, and these files are scratch. Only the default
+`eval/results.json` is the baseline `verify` gates on, and it must stay a run of
+the default model, which is why a partial mode still refuses to write it.
+
+`compare` prints, per leg and per category, zero-edit rate, corpus WER and
+p50/p90 — then **the cases the two runs scored differently, worst first, with
+the golden and both outputs**. Read that list. The aggregates tell you *whether*
+something moved; only the per-case diff tells you *why*, and whether the model
+that scores better is better in ways you want.
+
+It exits `0` even when one model is plainly worse: that is the result, not a
+failure. Non-zero means the comparison could not be made at all — `3` for a
+missing or unreadable file, `2` for two files with no case in common.
+
+### How big a delta is worth acting on?
+
+Cleanup is **not deterministic**. The same model on the same case can return
+different text on two runs, so both metrics move when nothing has changed. Two
+runs of the *same* model are the calibration for this, and are worth doing once
+before reading any A/B. Against today's corpus — **n = 32** cleanup cases, ~370
+reference words — the resolution is coarse:
+
+| Smallest thing that can move | What it shows up as |
+|---|---|
+| one case flipping zero-edit | 3.1pp of zero-edit rate |
+| one word edited | 0.27pp of corpus WER |
+
+So, concretely:
+
+- **One or two cases (≈3–6pp of zero-edit) is noise.** A corpus WER move under
+  ~1pp is three or four edited words across all 32 cases — also noise. Do not
+  move the default on either.
+- **Six or more cases flipping one way with none flipping back** is the smallest
+  result that beats a coin toss at this n (sign test, p ≈ 0.03). Mixed movement
+  needs more than that.
+- **Do not decide on p90.** At n = 32 it is set by the worst three or four
+  cases. Use it to find cases to read, not to pick a model.
+
+Re-running to break a tie helps less than it feels like it should. More runs
+average out the model's per-run noise, but they cannot shrink the uncertainty
+that comes from having only 32 cases, and they keep resampling the same 32
+choices. **The honest way to settle a close call is more cases** — ideally in
+the category where `compare` showed the two models disagreeing — not more runs
+of the cases already here.
+
 ## Recording an audio case
 
 `say` and other TTS **will not do** — the whole point is real speech (fillers,
@@ -106,6 +177,12 @@ cleanup: n=23  zero-edit 21/23 (91.3%)  wer 1.8%  p50 0.0%  p90 5.0%  fail(>20%)
 ```
 
 Exit codes: `0` clean · `1` quality regression (some case scored WER > 20 %) ·
-`2` model or API key missing · `3` infrastructure error (unreadable WAV,
-cleanup request failed). A network flake and a real quality regression must
-never share an exit code.
+`2` model or API key missing, or unusable `compare` arguments · `3`
+infrastructure error (unreadable WAV, cleanup request failed, unreadable
+`compare` input). A network flake and a real quality regression must never
+share an exit code — and for the same reason `compare` never returns `1`: one
+model scoring worse than another is its answer, not its failure.
+
+`swift run parla-eval --self-check` asserts the `compare` arithmetic offline in
+a few milliseconds — no corpus, no key, no network. It is the only check the
+comparison math gets, because exercising it for real costs two full runs.

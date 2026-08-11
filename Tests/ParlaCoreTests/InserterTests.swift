@@ -97,6 +97,58 @@ final class InserterTests: XCTestCase {
         XCTAssertTrue(Inserter.canErase(text: "hello", cursor: 2, selLength: 3, typed: ""))
     }
 
+    // MARK: - AX tree walk (the search behind focusFirstTextInput)
+
+    /// Stand-in for an AX subtree. A live AXUIElement can't be constructed in a
+    /// test, which is the whole reason the walk is generic over its node type;
+    /// everything below the roles and the shape is untestable here.
+    private final class AXNode {
+        let role: String
+        var children: [AXNode]
+        init(_ role: String, _ children: [AXNode] = []) { self.role = role; self.children = children }
+    }
+
+    /// Uses the real role set, so that is under test too — not a copy of it.
+    private func firstTextInput(_ roots: [AXNode], maxDepth: Int) -> AXNode? {
+        Inserter.firstMatch(in: roots, maxDepth: maxDepth,
+                            children: { $0.children },
+                            matches: { Inserter.textInputRoles.contains($0.role) })
+    }
+
+    func testTreeWalkFindsNestedTextInputDepthFirst() {
+        // TextEdit's shape: window > scroll area > text area, behind a toolbar
+        // whose roles must not match.
+        let target = AXNode("AXTextArea")
+        let window = AXNode("AXWindow", [
+            AXNode("AXToolbar", [AXNode("AXButton"), AXNode("AXImage")]),
+            AXNode("AXScrollArea", [target]),
+            AXNode("AXTextField"), // later sibling: depth-first must return the earlier hit
+        ])
+        XCTAssertTrue(firstTextInput([window], maxDepth: 8) === target)
+    }
+
+    func testTreeWalkFindsNothingWhenNoRoleMatches() {
+        // Static text and buttons are not somewhere to type a transcript.
+        let window = AXNode("AXWindow", [AXNode("AXGroup", [AXNode("AXStaticText"), AXNode("AXButton")])])
+        XCTAssertNil(firstTextInput([window], maxDepth: 8))
+    }
+
+    func testTreeWalkStopsAtDepthCap() {
+        // Roots count as level 1, so this text area sits at level 3.
+        let roots = [AXNode("AXWindow", [AXNode("AXScrollArea", [AXNode("AXTextArea")])])]
+        XCTAssertNil(firstTextInput(roots, maxDepth: 2))
+        XCTAssertNotNil(firstTextInput(roots, maxDepth: 3))
+    }
+
+    /// What the cap is actually for: an AX tree can report a child that reports
+    /// an ancestor back, and an unbounded walk would never return.
+    func testTreeWalkTerminatesOnCyclicTree() {
+        let a = AXNode("AXGroup")
+        let b = AXNode("AXGroup", [a])
+        a.children = [b]
+        XCTAssertNil(firstTextInput([a], maxDepth: 12))
+    }
+
     func testAXCenterToAppKitFlipsYThroughPrimaryScreenHeight() {
         // AX top-left origin (10, 20), size 100x50, on a 900pt-tall primary screen.
         // Center in AX space is (60, 45); AppKit y = 900 - 45 = 855.

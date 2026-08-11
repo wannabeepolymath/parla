@@ -181,6 +181,14 @@ public protocol CleanupProviding {
     func clean(transcript: String, context: CleanupContext) async throws -> String
 }
 
+/// Longest-prefix lookup on a model id, shared by the per-model tables below so
+/// they key alike: date-suffixed ids ("claude-haiku-4-5-20251001") match their
+/// family, and a longer key beats a shorter one it extends — otherwise
+/// flash-lite reads as flash.
+private func longestPrefixValue<V>(_ table: [String: V], _ model: String) -> V? {
+    table.keys.filter { model.hasPrefix($0) }.max { $0.count < $1.count }.flatMap { table[$0] }
+}
+
 /// USD list price per million tokens. ponytail: hardcoded and deliberately
 /// short — re-check it against the provider pricing pages each release, because
 /// a stale number here becomes a wrong number in the Hub, which is worse than
@@ -191,7 +199,7 @@ public protocol CleanupProviding {
 /// bill arrives, and the Hub must not conflate the two.
 public enum CleanupPricing {
     /// Keyed by model-id prefix so date-suffixed ids ("claude-haiku-4-5-2025…")
-    /// still match. Longest prefix wins — otherwise flash-lite bills at flash.
+    /// still match — see `longestPrefixValue`.
     static let perMTok: [String: (input: Double, output: Double)] = [
         "claude-opus-4-5": (15, 75),
         "claude-sonnet-5": (3, 15),
@@ -202,9 +210,44 @@ public enum CleanupPricing {
     ]
 
     public static func usd(model: String, promptTokens: Int, completionTokens: Int) -> Double? {
-        guard let key = perMTok.keys.filter({ model.hasPrefix($0) }).max(by: { $0.count < $1.count }),
-              let rate = perMTok[key] else { return nil }
+        guard let rate = longestPrefixValue(perMTok, model) else { return nil }
         return (Double(promptTokens) * rate.input + Double(completionTokens) * rate.output) / 1_000_000
+    }
+}
+
+/// Whether the system prompt is long enough for `cache_control` to do anything.
+///
+/// Below a model's minimum cacheable prefix the API accepts the block and
+/// ignores it — no error, no cache entry — so marking a short prompt is noise
+/// that misleads the next person to read the request. Parla's prompt is a few
+/// hundred tokens, under every minimum below, so this gates the mechanism off
+/// today; it turns itself on if the prompt grows (dictionary, snippets) or the
+/// user configures a model with a lower bar.
+enum PromptCache {
+    /// Minimum cacheable prefix, in tokens, keyed like `CleanupPricing.perMTok`.
+    /// Re-check alongside that table each release: these are *not* monotonic
+    /// across generations (Haiku 4.5 is 4× Sonnet 5), so a new model can move
+    /// the bar in either direction. Figures from Anthropic's prompt-caching
+    /// docs; the Sonnet 5 / Haiku 4.5 pair is the one docs/research/08-cost.md
+    /// §"The tax is not cacheable at the current size" cites.
+    static let minimumPrefixTokens: [String: Int] = [
+        "claude-opus-5": 512,
+        "claude-sonnet-5": 1024,
+        "claude-opus-4-5": 4096,
+        "claude-haiku-4-5": 4096,
+    ]
+
+    /// Above the usual ~4-chars-per-token rule of thumb on purpose: this
+    /// undercounts tokens, so the gate opens late rather than early. Caching one
+    /// prompt later than we could have costs a single uncached request; opening
+    /// early ships a block that silently does nothing.
+    static let charsPerToken = 5
+
+    /// An unrecognised model is never cached: a guessed threshold that is too
+    /// low would emit inert blocks forever with nothing to surface the mistake.
+    static func shouldCache(model: String, prompt: String) -> Bool {
+        guard let minimum = longestPrefixValue(minimumPrefixTokens, model) else { return false }
+        return prompt.count / charsPerToken >= minimum
     }
 }
 
@@ -288,16 +331,25 @@ public struct CleanupClient: CleanupProviding {
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.timeoutInterval = 15
         let maxTokens = context.selection == nil ? 4096 : 8192
-        let body: [String: Any] = [
+        let system = PromptBuilder.system(context: context)
+        var body: [String: Any] = [
             "model": model,
             // Legacy-model ceiling for dictation; transforms accept the legacy incompatibility for double headroom.
             "max_tokens": maxTokens,
-            "system": PromptBuilder.system(context: context),
+            "system": system,
             "messages": [[
                 "role": "user",
                 "content": PromptBuilder.user(transcript: transcript, context: context),
             ]],
         ]
+        // The system prompt is the only part identical between requests (the
+        // transcript is not), so it is the only thing worth a cache breakpoint —
+        // and only when it clears this model's minimum; see `PromptCache`.
+        if PromptCache.shouldCache(model: model, prompt: system) {
+            let block: [String: Any] = ["type": "text", "text": system,
+                                        "cache_control": ["type": "ephemeral"]]
+            body["system"] = [block]
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await http.post(req)
