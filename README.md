@@ -263,16 +263,11 @@ only the transport moves. Pass `--model` even though the command picks its own:
 it is what lands in each fixture's `engine` field, and a run nobody can attribute
 to a model is not much of an A/B.
 
-```sh
-#!/bin/sh
-cd "$(dirname "$0")/sandbox" || exit 1     # tools off, empty cwd: see below
-exec claude -p --model "$2" --system-prompt "$1" \
-  --disallowedTools "Bash" "Read" "Write" "Edit" "Glob" "Grep" "WebFetch" "WebSearch" "Task"
-```
+`scripts/cleanup-via-claude.sh` is such a wrapper:
 
 ```
 swift run parla-eval --cleanup-only --model claude-haiku-4-5 \
-  --cleanup-cmd ./cleanup-via-claude.sh --out /tmp/haiku.json
+  --cleanup-cmd scripts/cleanup-via-claude.sh --out /tmp/haiku.json
 ```
 
 Two caveats, both load-bearing:
