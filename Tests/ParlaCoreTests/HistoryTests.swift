@@ -153,6 +153,63 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(m?.model, "small.en")
     }
 
+    /// The dictation that writes history while a park is outstanding is the LIVE
+    /// one (dictation 2 here has no polish of its own, so it writes at landing).
+    /// The park belongs to dictation 1 and is claimed only by dictation 1's own
+    /// write, which the `.cleanedSwapped` stamp immediately precedes.
+    func testParkIsClaimedByItsOwnWriteNotTheNextDictationsWrite() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        // Dictation 1 lands; its cleanup POST is still out.
+        metrics.mark(.fnDown, at: ms(1000))
+        metrics.mark(.fnUp, at: ms(3000))
+        metrics.mark(.landed, at: ms(3450))
+        metrics.update { $0.model = "small.en" }
+
+        // Dictation 2 runs with cleanup off, so its row is written before 1's
+        // polish comes back.
+        metrics.mark(.fnDown, at: ms(5000))
+        metrics.mark(.fnUp, at: ms(6000))
+        metrics.mark(.landed, at: ms(6100))
+        let second = metrics.snapshot()
+        XCTAssertEqual(second?.captureMs, 1000) // 2's own 5000 → 6000, not 1's 2000
+        XCTAssertNil(second?.model)             // 1's whisper model stays with 1
+
+        // Dictation 1's polish finally resolves and its row is written.
+        metrics.update { $0.cleanupModel = "claude-haiku-4-5"; $0.promptTokens = 400 }
+        metrics.mark(.cleanedSwapped, at: ms(7000))
+        let first = metrics.snapshot()
+        XCTAssertEqual(first?.captureMs, 2000)  // still 1's own capture
+        XCTAssertEqual(first?.cleanupMs, 3550)  // landed 3450 → swapped 7000
+        XCTAssertEqual(first?.model, "small.en")
+        XCTAssertEqual(first?.promptTokens, 400)
+    }
+
+    /// A polish that never comes back must not leave the park sitting there
+    /// swallowing every later dictation's tokens and stamps.
+    func testUnresolvedParkDoesNotOutliveTheNextDictation() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        metrics.mark(.fnDown, at: ms(1000))     // dictation 1: polish never returns
+        metrics.mark(.fnUp, at: ms(2000))
+        metrics.mark(.landed, at: ms(2100))
+
+        metrics.mark(.fnDown, at: ms(4000))     // parks 1
+        metrics.mark(.fnUp, at: ms(4500))
+        metrics.mark(.landed, at: ms(4600))
+        XCTAssertEqual(metrics.snapshot()?.captureMs, 500)
+
+        metrics.mark(.fnDown, at: ms(7000))     // 1 is an orphan by now — drop it
+        metrics.mark(.fnUp, at: ms(8000))
+        metrics.update { $0.promptTokens = 111 }
+        metrics.mark(.landed, at: ms(8100))
+        metrics.mark(.cleanedSwapped, at: ms(8300))
+        let third = metrics.snapshot()
+        XCTAssertEqual(third?.captureMs, 1000)      // 7000 → 8000
+        XCTAssertEqual(third?.cleanupMs, 200)       // its own swap, not the orphan's
+        XCTAssertEqual(third?.promptTokens, 111)    // billed here, not to the orphan
+    }
+
     func testPricingLongestPrefixWinsAndUnknownIsUnpriced() {
         // 400 in + 130 out on Haiku 4.5 ($1/$5 per MTok).
         XCTAssertEqual(CleanupPricing.usd(model: "claude-haiku-4-5-20251001",

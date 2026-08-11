@@ -26,7 +26,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSUIElement</key><true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Parla records while you hold the hotkey to transcribe your speech on-device.</string>
+    <string>Parla keeps the microphone open so dictation starts the moment you press the hotkey. Your speech is only transcribed while you hold it, and never leaves this Mac.</string>
 </dict>
 </plist>
 EOF

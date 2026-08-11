@@ -42,6 +42,11 @@ public final class AudioRecorder {
     /// stop are called from the hotkey handler and the notification observer is
     /// registered on the main queue.
     private var warm = false
+    /// Whether the mic was granted at the moment the *current* engine's input
+    /// unit started. `warm` only records that the app wants warmth, so without
+    /// this a unit built unauthorized (start()'s cold path builds whatever TCC
+    /// says) would be latched warm and reused forever — see shouldTeardown.
+    private var builtAuthorized = false
     private var boundDevice: AudioDeviceID?
     private var rebuildGeneration = 0
 
@@ -293,12 +298,25 @@ public final class AudioRecorder {
         // warm engine at launch and every dictation until relaunch would hear
         // nothing. start()'s cold path is unaffected, and the stop() after the
         // first dictation re-warms for real.
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        guard AudioRecorder.micAuthorized() else { return }
         let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
         guard !AudioRecorder.isBluetooth(device) else { return }
         // A warm engine is a nicety; failing to get one just means the next
         // start() pays the cold open it always used to.
         try? build(device: device)
+    }
+
+    static func micAuthorized() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    /// stop()'s teardown decision, pure so it can be checked without an engine.
+    /// `builtAuthorized` is the crux: a unit started before TCC granted the mic
+    /// runs and delivers zeros forever, and the later grant never reaches it —
+    /// so it must be handed back at stop(), warm or not, and rebuilt against the
+    /// fresh grant. That also covers a grant that lands mid-dictation.
+    static func shouldTeardown(warm: Bool, builtAuthorized: Bool, bluetooth: Bool) -> Bool {
+        !warm || !builtAuthorized || bluetooth
     }
 
     private func build(device: AudioDeviceID?) throws {
@@ -327,6 +345,9 @@ public final class AudioRecorder {
             Trace.mark(.firstPCM) // disabled: one bool test, no alloc, no lock
             self.onLevel?(chunk.map(AudioRecorder.rms) ?? 0)
         }
+        // Read *before* the start that may raise the TCC prompt: whatever the
+        // user answers afterwards cannot reach a unit that is already running.
+        let authorized = AudioRecorder.micAuthorized()
         do {
             try engine.start()
         } catch {
@@ -336,6 +357,7 @@ public final class AudioRecorder {
             throw error
         }
         boundDevice = device
+        builtAuthorized = authorized
         observeConfigChanges()
     }
 
@@ -412,6 +434,7 @@ public final class AudioRecorder {
                                  UInt32(MemoryLayout<AudioDeviceID>.size))
         }
         boundDevice = nil
+        builtAuthorized = false // describes the built engine, and there is none now
         lock.lock(); preRoll.reset(); lock.unlock()
     }
 
@@ -479,10 +502,13 @@ public final class AudioRecorder {
             NSLog("Parla recorder: %d tap buffers failed to convert (%d samples captured)",
                   failures, captured.count)
         }
-        // A cold-path start may have bound a headset; the gate only allows
-        // *holding* a non-Bluetooth device.
-        if !warm || AudioRecorder.isBluetooth(boundDevice) { teardown() }
-        warmUp() // no-op while the engine is still running
+        // A cold-path start may have bound a headset (the gate only allows
+        // *holding* a non-Bluetooth device) or a mic that was not yet granted.
+        if AudioRecorder.shouldTeardown(warm: warm, builtAuthorized: builtAuthorized,
+                                        bluetooth: AudioRecorder.isBluetooth(boundDevice)) {
+            teardown()
+        }
+        warmUp() // no-op while the engine is still running; rebuilds after a teardown
         return captured
     }
 }

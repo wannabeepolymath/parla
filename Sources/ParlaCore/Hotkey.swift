@@ -288,18 +288,24 @@ public final class HotkeyMonitor {
     }
 
     /// keyDown. Returns true when the event must be swallowed (never reach the
-    /// front app). `modifiers` are the key event's own flags; the idle chords
-    /// match them EXACTLY (see `KeyChord`), hands-free deliberately does not.
+    /// front app). `modifiers` are the key event's own flags; every chord matches
+    /// them EXACTLY (see `KeyChord`) — hands-free tolerates shift, see below.
     public func keyDown(keyCode: UInt16, modifiers: KeyChord.Modifiers = [],
                         at time: TimeInterval) -> Bool {
-        // Hands-free is the one SUPERSET match here. Validation forces the
-        // push-to-talk trigger into this chord, so the branch can only fire while
-        // that trigger is physically held — it can never steal a chord from the
-        // front app, which is the only reason the idle chords below are exact.
-        // Exact would make the latch unreachable in command mode: shift is held
-        // at push-to-talk, so the Space arrives as fn+shift+Space.
-        if keyCode == bindings.handsFree.keyCode,
-           modifiers.isSuperset(of: bindings.handsFree.modifiers) { // latch / stop
+        // Hands-free is exact too, with ONE tolerance: SHIFT, and only while a
+        // session is live. Command mode is entered by holding shift at
+        // push-to-talk, so the latch key arrives as fn+shift+Space and exact
+        // would make the latch unreachable there; the union runs both ways so a
+        // binding that itself contains shift still matches without it. Anything
+        // wider steals chords that are not ours — fn+⌘+Space (Spotlight) and
+        // fn+⌃+Space (input source) must cancel and PASS THROUGH, not latch.
+        // Idle stays strictly exact: nothing is held there, and macOS decorates
+        // arrows/Home/End/Page with the fn bit on its own, so a synthetic fn
+        // could otherwise match a chord that belongs to the front app.
+        let latch = session == .idle
+            ? modifiers == bindings.handsFree.modifiers
+            : modifiers.union(.shift) == bindings.handsFree.modifiers.union(.shift)
+        if keyCode == bindings.handsFree.keyCode, latch { // latch / stop
             switch session {
             case .push: // convert the held push-to-talk: recording survives the trigger release
                 session = .handsFree

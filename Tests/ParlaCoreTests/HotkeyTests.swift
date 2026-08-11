@@ -225,15 +225,31 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(out, [])
     }
 
-    func testHandsFreeMatchesAsASupersetUnlikeTheIdleChords() {
-        // The exception to exactness: the latch only fires while the trigger is
-        // held, so extra modifiers must not break it. Exact matching here made
-        // command mode (shift held) fall through to .cancel and leak the Space.
+    func testExtraModifierDoesNotLatchHandsFree() {
+        // SHIFT is the only extra the latch tolerates (command mode holds it —
+        // see testHandsFreeLatchesInCommandMode). fn+⌘+Space is Spotlight and
+        // fn+⌃+Space switches input source: while push-to-talk is held they must
+        // cancel the dictation and PASS THROUGH, not latch hands-free and keep
+        // recording after fn is released.
+        for extra: KeyChord.Modifiers in [.cmd, .ctrl, .opt] {
+            var out: [HotkeyMonitor.Edge] = []
+            let m = monitor(&out)
+            m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+            XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.fn, extra], at: 0.1))
+            XCTAssertEqual(out, [.down(command: false), .cancel])
+        }
+    }
+
+    func testIdleChordWithSyntheticFnDoesNotHitHandsFree() {
+        // Idle is exact like every other chord: nothing is held, so the "the
+        // trigger is physically held" premise doesn't apply. macOS sets the fn
+        // bit on arrows/Home/End/Page by itself, so an idle ⇧+PageDown (select
+        // to the end) arrives as [.fn, .shift] and a loose match swallowed it.
         var out: [HotkeyMonitor.Edge] = []
         let m = monitor(&out)
-        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
-        XCTAssertTrue(m.keyDown(keyCode: 49, modifiers: [.fn, .cmd], at: 0.1))
-        XCTAssertEqual(out, [.down(command: false), .handsFree])
+        m.bindings.handsFree = KeyChord(121, .fn)                     // fn+PageDown
+        XCTAssertFalse(m.keyDown(keyCode: 121, modifiers: [.fn, .shift], at: 0))
+        XCTAssertEqual(out, [])
     }
 
     func testMissingModifierDoesNotFire() {

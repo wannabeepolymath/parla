@@ -20,7 +20,7 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 6 | 0 | 0 | 1 |
 | **all** | **29** | **28** | **0** | **0** | **1** |
 
-Suite: **367 tests, 0 failures.** Build clean.
+Suite: **373 tests, 0 failures.** Build clean.
 
 ---
 
@@ -280,6 +280,40 @@ fn-down while a polish was in flight, an unconsumed `StreamWindow` splicing into
 a later dictation, an unreachable secure-deletion guard on the one path that
 retains the WAV, and six tests that passed whether or not the code was correct.
 
+### Round 2 — reviewing the fixes caught two majors the fixes created
+
+Fixes are unreviewed code. Reviewing commit `de20782` itself raised 12 findings,
+11 confirmed:
+
+- **The warm-engine fix reintroduced the exact bug its own guard was added to
+  prevent.** Wiring `prepare()` latches `warm = true` at launch *before* any
+  permission check, and the TCC guard lives inside `warmUp()`, so it gates only
+  the warm build — `start()`'s cold path builds regardless. With `warm` true,
+  `stop()` never tears down, so a unit built before the mic grant is kept alive
+  forever delivering zeros, and a later grant never reaches it. Reachable by
+  skipping the onboarding permission page. Fixed with a `builtAuthorized` flag
+  read at build time, so an unauthorized engine is always handed back at `stop()`.
+- **The hands-free chord fix was too broad — my error.** I passed the first
+  reviewer's "match as a superset" suggestion through without questioning its
+  scope. The only extra modifier command mode needs is `.shift`; `isSuperset`
+  tolerates all of them, so `fn+⌘+Space` got swallowed (Spotlight stopped
+  opening, and the dictation silently latched into hands-free). In `.idle` it
+  was worse: macOS auto-decorates arrows/Home/End with the fn bit, so idle
+  chords could match a synthetic fn. And the commit **deleted
+  `testExtraModifierDoesNotLatchHandsFree`**, which existed to assert exactly
+  the behaviour being broken. Now: shift-only tolerance, and only while a
+  session is live; idle stays exact; the deleted test is restored.
+
+Also fixed: the metrics parking mis-attributed buckets into a permanent
+off-by-one; `finish()`'s no-model early return kept a stashed WAV without
+consulting the secure signal; the pasteboard-invariant test attributed writes to
+the nearest preceding `func`, so an unsanctioned write beside `copy()` would
+pass; and five user-facing strings — including `NSMicrophoneUsageDescription`,
+which is what the macOS permission dialog shows — still claimed the mic is only
+open while a key is held. The warm mic is the point of the feature, so the copy
+was fixed, not the behaviour. The README now also states plainly that the orange
+mic indicator stays lit while Parla runs.
+
 Seven findings were correctly **refuted** by the verifier — including a claimed
 `stripNonSpeech` over-deletion and a claimed duplicate download path.
 
@@ -297,4 +331,5 @@ Seven findings were correctly **refuted** by the verifier — including a claime
 | 2026-08-11 | Wave 4: Tier 1 #8 `DictationSession` extracted. main.swift 1364 → 458 lines. Two adversarial reviews found 5 defects; all fixed. 284/284 pass. **Tier 1 complete.** |
 | 2026-08-11 | Wave 5: Tier 2 #1–#6 landed. 356/356 pass. **All 28 implementable items done; #7 skipped by the audit's own reasoning.** |
 | 2026-08-11 | Closing pass: `LICENSE-COMMERCIAL.md` added. |
-| 2026-08-11 | Final adversarial review of the whole branch: 32 findings raised, **25 confirmed / 7 refuted**. All 25 fixed. 367/367 pass. |
+| 2026-08-11 | Review round 1 (whole branch): 32 raised, **25 confirmed / 7 refuted**. All fixed. 367/367 pass. |
+| 2026-08-11 | Review round 2 (the fix commit itself): 12 raised, **11 confirmed / 1 refuted** — the fixes had introduced 2 majors. All fixed. 373/373 pass. |

@@ -806,8 +806,10 @@ final class DictationSessionTests: XCTestCase {
     /// Asserted over the source rather than by behaviour: the writes live in the
     /// AppKit shell, which the core's test target cannot drive, and a behavioural
     /// test could only ever cover the paths it thought to call — the risk here is
-    /// exactly the path nobody thought of. The enclosing `func` line is the key,
-    /// not a line number, so this survives edits above it.
+    /// exactly the path nobody thought of. The key is the offending line itself,
+    /// with its enclosing `func` for context and no line number anywhere, so a
+    /// new write parked beside `copy()` is a *new* key rather than one the
+    /// sanctioned function absorbs — and edits above it still change nothing.
     func testTheOnlyPasteboardWriteIsTheHubsCopyButton() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // ParlaCoreTests
@@ -822,9 +824,13 @@ final class DictationSessionTests: XCTestCase {
             for (i, line) in lines.enumerated() where line.contains("NSPasteboard") {
                 let owner = lines[...i].last { $0.contains("func ") }?
                     .trimmingCharacters(in: .whitespaces) ?? "top level"
-                uses.insert("\(url.lastPathComponent): \(owner)")
+                uses.insert("\(url.lastPathComponent): \(owner) → "
+                            + line.trimmingCharacters(in: .whitespaces))
             }
         }
-        XCTAssertEqual(uses, ["HubModel.swift: func copy(_ text: String) {"])
+        XCTAssertEqual(uses, [
+            "HubModel.swift: func copy(_ text: String) { → NSPasteboard.general.clearContents()",
+            "HubModel.swift: func copy(_ text: String) { → NSPasteboard.general.setString(text, forType: .string)",
+        ])
     }
 }

@@ -54,12 +54,16 @@ public final class RecordingStore: @unchecked Sendable {
 
     /// Persist this dictation's audio and return where it went. nil on any
     /// failure — the safety net must never be the thing that fails a dictation.
-    public func stash(_ samples: [Float]) -> URL? {
+    ///
+    /// `now` is the same injected clock `prune` takes, for the same reason: the
+    /// filename is derived from it, so a test can pin the instant and make the
+    /// name-collision dodge certain instead of racing a real millisecond.
+    public func stash(_ samples: [Float], now: Date = Date()) -> URL? {
         guard !samples.isEmpty else { return nil }
-        prune()
+        prune(now: now)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = uniqueURL(base: Self.name(Date()))
+            let url = uniqueURL(base: Self.name(now))
             try Self.writeWAV(samples, to: url)
             return url
         } catch {

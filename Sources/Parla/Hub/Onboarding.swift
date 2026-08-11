@@ -19,7 +19,10 @@ struct OnboardingView: View {
 
     private static let titles = ["Give Parla permission", "Pick a speech model", "Try it out"]
     private static let subtitles = [
-        "Parla listens only while you hold a key, and types the result into whatever you're using.",
+        // Says "keeps the mic open", not "listens only while you hold": since
+        // AudioRecorder.prepare() the input unit runs from launch, so the old
+        // copy promised a closed mic the app does not have.
+        "Parla keeps the mic open so dictation starts instantly, transcribes only while you hold a key, and types the result into whatever you're using.",
         "Speech recognition runs on this Mac. Nothing you say leaves it.",
         "One dictation, straight into this window — nothing is typed anywhere else."
     ]
@@ -121,7 +124,9 @@ struct OnboardingView: View {
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 18) {
             HubSection("Permissions") {
-                HubRow("Microphone", detail: "Records while you hold the push-to-talk key") {
+                HubRow("Microphone",
+                       detail: "Stays open so dictation starts instantly; transcribes only "
+                           + "while you hold the push-to-talk key") {
                     if model.micGranted {
                         StatusChip(text: "Granted")
                     } else {

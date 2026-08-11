@@ -139,4 +139,28 @@ final class AudioRecorderTests: XCTestCase {
             XCTAssertFalse(AudioRecorder.isBluetoothTransport(raw), "\(raw) should stay warmable")
         }
     }
+
+    // MARK: - Teardown gate
+
+    /// The permanently-silent-mic regression: start()'s cold path builds an
+    /// input unit whatever TCC says, and a unit started before the grant
+    /// delivers zeros forever. `warm` alone latched that unit, so every later
+    /// dictation reused it until relaunch.
+    func testEngineBuiltBeforeTheMicGrantIsTornDownEvenWhenWarm() {
+        XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: false,
+                                                   bluetooth: false))
+    }
+
+    /// The whole point of warmth: a legitimately warm engine is kept.
+    func testAuthorizedWarmEngineIsKept() {
+        XCTAssertFalse(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
+                                                    bluetooth: false))
+    }
+
+    func testColdOrBluetoothStillTearsDown() {
+        XCTAssertTrue(AudioRecorder.shouldTeardown(warm: false, builtAuthorized: true,
+                                                   bluetooth: false))
+        XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
+                                                   bluetooth: true))
+    }
 }

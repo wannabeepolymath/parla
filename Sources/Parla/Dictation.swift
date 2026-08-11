@@ -207,11 +207,22 @@ extension AppDelegate {
         // Written BEFORE anything can fail, deleted once a transcript exists: a
         // crash inside the whisper pass otherwise takes the only copy of what
         // the user just said, which is Handy #1332. Every early return below is
-        // a failure path, and each one deliberately leaves the file behind.
+        // a failure path and deliberately leaves the file behind — except when
+        // focus is secure, which outranks the keep and so has to be sampled on
+        // EVERY exit, not just the landing one.
         let recording = RecordingStore.shared.stash(samples)
         guard let transcriber else {
             NSLog("Parla: no whisper model loaded — run scripts/download-model.sh")
-            await MainActor.run { self.send(.legUnavailable(s, message: "No whisper model")) }
+            await MainActor.run {
+                self.send(.legUnavailable(s, message: "No whisper model"))
+                // Behind the HUD for the same reason the landing path is behind
+                // the keystrokes. transcript: nil keeps the file (Handy #1332);
+                // the probe is what stops audio captured into a password field
+                // from sitting on disk for the retention window just because no
+                // model was loaded.
+                RecordingStore.shared.resolve(recording, transcript: nil,
+                                              secure: Inserter.focusTarget() == .secure)
+            }
             return
         }
         let settings = s.settings

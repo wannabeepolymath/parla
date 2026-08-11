@@ -141,7 +141,8 @@ public final class Metrics: @unchecked Sendable {
     private let lock = NSLock()
     private var current = Bucket()
     /// The previous dictation, held back by fn-down because its history row
-    /// hadn't been written yet. Retired by that write.
+    /// hadn't been written yet. Retired by that write, or by the next fn-down
+    /// when the polish it is waiting for never comes back.
     private var parked: Bucket?
 
     public init() {}
@@ -153,10 +154,11 @@ public final class Metrics: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if stamp == .fnDown {
-            // A park whose polish already came back is owed nothing more; drop it
-            // so it can't outlive its dictation and swallow the next one's write.
-            if parked?.polishResolved == true { parked = nil }
-            if current.awaitingHistory { parked = current }
+            // A park is owed at most the polish of the dictation starting here: by
+            // the next fn-down its own write has consumed it, or its POST never
+            // came back at all. An orphan left in place would swallow every later
+            // `update()` and stamp, so the park never survives a second fn-down.
+            parked = current.awaitingHistory ? current : nil
             current = Bucket()
         }
         // Only the polish result belongs to the parked dictation, and only while
@@ -191,7 +193,14 @@ public final class Metrics: @unchecked Sendable {
     public func snapshot() -> PipelineMetrics? {
         lock.lock()
         defer { lock.unlock() }
-        if let p = parked {
+        // Only the parked dictation's own write may claim the park, and that write
+        // is identifiable: `cleanReady` emits `.trace(.cleanedSwapped)` immediately
+        // before `.appendHistory` in one ordered effect list, so a resolved park is
+        // the row being written right now. An unresolved park is still waiting on
+        // its POST, which means this row belongs to the live dictation — handing it
+        // the park would bill it the wrong numbers and, since `current` would never
+        // be marked snapshotted, park it again and lock in a permanent off-by-one.
+        if let p = parked, p.polishResolved {
             parked = nil
             return p.snapshot()
         }

@@ -41,27 +41,21 @@ final class RecordingStoreTests: XCTestCase {
 
     /// Two stashes only collide when both land in the same millisecond, so simply
     /// stashing twice exercises the dodge on maybe half of runs and silently
-    /// proves nothing on the rest. Claim every name this second and the next can
-    /// produce instead: the stash then cannot help but find its own name taken.
+    /// proves nothing on the rest. Pinning `stash(now:)` to the instant a file
+    /// already occupies makes the clash certain, with no wall-clock budget for
+    /// the test to spend or overrun.
     func testStashDodgesAnExistingRecordingInsteadOfOverwritingIt() throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let now = Date()
-        for second in [now, now.addingTimeInterval(1)] {
-            let stem = RecordingStore.name(second).dropLast(3) // …-HHmmss-, minus the SSS
-            for ms in 0..<1000 {
-                try Data().write(to: dir.appendingPathComponent("\(stem)\(String(format: "%03d", ms)).wav"))
-            }
-        }
-        // A failure here means the stash took more than a second, which is its own
-        // bug report — it never means the collision path went untested.
-        let url = try XCTUnwrap(store().stash(tone()))
-        XCTAssertTrue(url.lastPathComponent.hasSuffix("-1.wav"), url.lastPathComponent)
+        let instant = Date(timeIntervalSince1970: 1_700_000_000.5) // non-zero ms too
+        let taken = dir.appendingPathComponent(RecordingStore.name(instant) + ".wav")
+        try Data().write(to: taken)
+
+        let url = try XCTUnwrap(store().stash(tone(), now: instant))
+        XCTAssertEqual(url.lastPathComponent, RecordingStore.name(instant) + "-1.wav")
         XCTAssertEqual(try Eval.loadSamples(url: url).count, 1600)
         // And the name it dodged still holds the file that was there: the point of
         // the dodge is that the earlier recording is not what pays for the clash.
-        let claimed = dir.appendingPathComponent(
-            url.lastPathComponent.replacingOccurrences(of: "-1.wav", with: ".wav"))
-        XCTAssertEqual(try Data(contentsOf: claimed).count, 0)
+        XCTAssertEqual(try Data(contentsOf: taken).count, 0)
     }
 
     // MARK: - Resolve

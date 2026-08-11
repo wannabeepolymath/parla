@@ -124,8 +124,15 @@ fields and empty selections refuse before recording even starts.
 
 Parla needs:
 
-- **Microphone** — to record while you hold the hotkey.
+- **Microphone** — Parla keeps it open from launch so dictation starts instantly; only what you say while holding the hotkey is transcribed.
 - **Accessibility** — to listen for the global hotkey and type text into the frontmost app (System Settings > Privacy & Security > Accessibility).
+
+Because the mic stays open — that is what removes 240–700 ms of audio-engine
+start from every press — macOS shows its orange mic indicator for as long as
+Parla is running, not just while you dictate. Idle audio goes into a 1-second
+in-memory buffer that is continuously overwritten and never written to disk;
+only what you say while holding the hotkey is transcribed, plus the 0.45 s
+before the press so your first word isn't clipped, and all of it on this Mac.
 
 Password fields (`AXSecureTextField`) are detected via Accessibility and
 refused outright: dictation into one shows "Not supported in password
