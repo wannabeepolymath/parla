@@ -1,0 +1,2 @@
+# category: numbers
+We're on version 1.9.1 of whisper.cpp.

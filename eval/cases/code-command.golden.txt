@@ -1,0 +1,2 @@
+# category: code
+Run swift test --filter EvalNormalizeTests.

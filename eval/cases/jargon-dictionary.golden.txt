@@ -1,0 +1,2 @@
+# category: jargon
+We should ship Parla with whisper.cpp and Anthropic cleanup.

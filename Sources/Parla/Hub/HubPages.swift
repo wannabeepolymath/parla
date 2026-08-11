@@ -20,20 +20,10 @@ struct GeneralPage: View {
             }
 
             HubSection("Whisper model", footer: model.modelPath) {
-                if let progress = model.downloadProgress {
-                    HubRow("Downloading base.en…") {
-                        ProgressView(value: progress).frame(width: 160)
-                    }
-                } else if model.modelLoaded {
-                    HubRow(URL(fileURLWithPath: model.modelPath).lastPathComponent,
-                           detail: "On-device transcription is ready") {
-                        StatusChip(text: "Loaded")
-                    }
-                } else {
-                    HubRow("No model loaded",
-                           detail: "Transcription needs a whisper model") {
-                        Button("Download base.en (~148 MB)") { model.onDownloadModel() }
-                            .buttonStyle(HubButtonStyle(kind: .primary))
+                ForEach(ModelCatalog.all) { m in
+                    if m.id != ModelCatalog.all.first?.id { HubDivider() }
+                    HubRow(m.displayName, detail: "\(m.sizeLabel) · \(m.filename)") {
+                        modelControl(m)
                     }
                 }
             }
@@ -118,6 +108,28 @@ struct GeneralPage: View {
             devices.append(.init(uid: uid, name: "Unavailable device"))
         }
         return devices
+    }
+
+    /// Downloading / selected / on disk / not here — in that order, because
+    /// only one download runs at a time and it owns the whole section while it
+    /// does. "Installed" is file existence only: hashing three models on every
+    /// render is exactly ghost-pepper #163.
+    @ViewBuilder
+    private func modelControl(_ m: ModelCatalog.Model) -> some View {
+        if model.downloadingModel == m, let progress = model.downloadProgress {
+            ProgressView(value: progress).frame(width: 160)
+        } else if model.downloadingModel != nil {
+            EmptyView() // one download at a time
+        } else if !ModelCatalog.isInstalled(m) {
+            Button("Download") { model.onDownloadModel(m) }
+                .buttonStyle(HubButtonStyle(kind: model.isSelected(m) ? .primary : .normal))
+        } else if model.isSelected(m) {
+            StatusChip(text: model.modelLoaded ? "In use" : "Selected",
+                       color: model.modelLoaded ? Theme.success : Theme.danger)
+        } else {
+            Button("Use") { model.selectModel(m) }
+                .buttonStyle(HubButtonStyle())
+        }
     }
 
     private func permissionRow(_ name: String, granted: Bool, pane: String,

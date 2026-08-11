@@ -8,10 +8,11 @@ public struct TranscriberError: Error, CustomStringConvertible {
 public final class WhisperTranscriber {
     private let ctx: OpaquePointer
 
+    /// Where the catalog's default model lives. Kept as the fallback for a
+    /// `settings.whisperModelPath` that isn't set — the model *choice* is the
+    /// catalog's, not this file's.
     public static func defaultModelPath() -> String {
-        FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Parla/models/ggml-base.en.bin").path
+        ModelCatalog.path(for: ModelCatalog.default)
     }
 
     public init(modelPath: String) throws {
@@ -117,6 +118,36 @@ public final class WhisperTranscriber {
         // single space leaves no doubled or edge spaces.
         return text.split(whereSeparator: { $0.isWhitespace }).filter { !isMarker($0) }.joined(separator: " ")
     }
+}
+
+/// When the whisper context is freed after going idle. Holding it for the whole
+/// process lifetime was free at 148 MB and is wrong at 574 MB+: vocalinux #591
+/// measured an idle GPU context draining a laptop battery in 1-1.5 h with zero
+/// transcription, which is why they shipped `model_keepalive.py`.
+public enum ModelUnloadPolicy: Equatable, Sendable {
+    case never
+    /// Free the context after each transcription. Deliberately *not* reachable
+    /// from the idle tick: the watcher runs every 10 s and would otherwise be
+    /// free to fire between two passes of one dictation.
+    case immediately
+    case afterIdle(seconds: TimeInterval)
+
+    public static let `default` = ModelUnloadPolicy.afterIdle(seconds: 300)
+
+    /// The 10 s watcher's decision. Recording always wins — Handy's watcher
+    /// touches the activity stamp instead of unloading, so a six-minute
+    /// dictation can never be interrupted by its own idle timer.
+    public func shouldUnloadOnTick(idle: TimeInterval, recording: Bool) -> Bool {
+        guard !recording else { return false }
+        switch self {
+        case .never, .immediately: return false
+        case .afterIdle(let seconds): return idle >= seconds
+        }
+    }
+
+    /// Checked after a transcription completes, where "not recording" is
+    /// already established by the caller.
+    public var unloadsAfterTranscription: Bool { self == .immediately }
 }
 
 /// Reference box so a Swift abort closure survives the trip through whisper's

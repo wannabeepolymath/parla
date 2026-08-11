@@ -11,7 +11,7 @@ final class SettingsTests: XCTestCase {
     func testDefaultsWhenFileMissing() {
         let store = tempStore()
         let s = store.load()
-        XCTAssertEqual(s.cleanupModel, "claude-sonnet-5")
+        XCTAssertEqual(s.cleanupModel, "claude-haiku-4-5")
         XCTAssertTrue(s.dictionary.isEmpty)
         XCTAssertTrue(s.snippets.isEmpty)
         XCTAssertNil(store.lastError) // missing file is fine, not an error
@@ -63,7 +63,7 @@ final class SettingsTests: XCTestCase {
         try Data(#"{"dictionary":["Kubernetes"]}"#.utf8).write(to: store.url)
         let s = store.load()
         XCTAssertEqual(s.dictionary, ["Kubernetes"])
-        XCTAssertEqual(s.cleanupModel, "claude-sonnet-5")   // default survives
+        XCTAssertEqual(s.cleanupModel, "claude-haiku-4-5")  // default survives
         XCTAssertEqual(s.cleanup, CleanupSettings())          // default block
     }
 

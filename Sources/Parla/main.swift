@@ -49,6 +49,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // shows a disabled "Downloading…" item instead of the download action.
     var downloadTask: URLSessionDownloadTask?
     var downloadObservation: NSKeyValueObservation?
+    // Idle model-unload. `transcriber` is the *resident* context, which the
+    // watcher may free; `modelReady` is "a model file loaded successfully at
+    // least once" and survives an unload — every health check reads that one,
+    // so an unloaded model doesn't put ⚠️ in the menu bar.
+    var modelReady = false
+    var loadedModelPath: String?
+    var lastModelUse = Date()
+    var unloadTimer: Timer?
+    let unloadPolicy = ModelUnloadPolicy.default
     // Set by the once-a-day GitHub Releases check; nil until a newer release is
     // found, then menuNeedsUpdate surfaces an "Update available" item.
     var availableUpdate: UpdateCheck.Update?
@@ -58,7 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // lazily on first open.
     lazy var hubModel: HubModel = {
         let m = HubModel(store: store, history: history)
-        m.onDownloadModel = { [weak self] in self?.downloadModel() }
+        m.onDownloadModel = { [weak self] model in self?.download(model) }
         m.onOpenSettingsFile = { [weak self] in self?.openSettings() }
         m.onSaved = { [weak self] in
             guard let self else { return }
@@ -66,8 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.hud.idleBarSize = HUD.idleSize(s.hudIdleSize)
             self.hud.showAlways = s.showHudAlways
             self.recorder.inputDeviceUID = s.inputDeviceUID
+            // The Hub's model picker writes whisperModelPath through this same
+            // save, so a changed path is the signal to swap the loaded context.
+            if (s.whisperModelPath ?? WhisperTranscriber.defaultModelPath()) != self.loadedModelPath {
+                self.loadModel()
+            }
         }
-        m.modelLoaded = transcriber != nil
+        m.modelLoaded = modelReady
         return m
     }()
     lazy var hubController = HubWindowController(model: hubModel)
@@ -101,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
         requestPermissions()
         loadModel()
+        startUnloadWatcher()
         let launchSettings = currentSettings()
         hud.idleBarSize = HUD.idleSize(launchSettings.hudIdleSize)
         hud.showAlways = launchSettings.showHudAlways
@@ -150,6 +165,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         NSLog("%@", "Parla mic start failed: \(error)"); return
                     }
                     self.isRecording = true
+                    // Reload now if the idle watcher freed the context: transform()
+                    // runs off-main and must find it already resident.
+                    self.activeTranscriber()
                     self.showRecording(); self.hud.show(.listening(command: true)); Sound.start()
                     return
                 }
@@ -206,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Shadow streaming: run the pass loop on EVERY dictation, not just
                 // live-typing ones, so finish() only ever pays for the unconfirmed
                 // tail. Actual typing inside the loop is gated on liveTyping.
-                if let transcriber = self.transcriber {
+                if let transcriber = self.activeTranscriber() {
                     // Chain onto the previous finish so partial passes never run
                     // concurrently with the final pass (whisper ctx isn't reentrant).
                     self.processTask = Task { [prev = self.processTask] in
@@ -363,6 +381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // while there's no model / settings are broken / permissions missing.
                 guard !self.isRecording else { return }
                 self.showIdle()
+                self.unloadAfterTranscription()
             }
         }
         guard let transcriber else {
@@ -619,6 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard !self.isRecording else { return }
                 self.showIdle()
+                self.unloadAfterTranscription()
             }
         }
         guard let transcriber else {
@@ -826,8 +846,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func loadModel() {
         let path = store.load().whisperModelPath ?? WhisperTranscriber.defaultModelPath()
+        // Re-check what we downloaded before handing it to whisper: the corrupt
+        // payload can predate the validator (vibe #353), and the verdict is
+        // cached on (size, mtime) so the 574 MB hash happens once, not per
+        // launch. A model outside Parla's own models dir is the user's and is
+        // never checked — see ModelCatalog.verifyInstalled.
+        if let bad = ModelCatalog.verifyInstalled(path: path) {
+            NSLog("%@", "Parla: refusing model — \(bad.description)")
+            transcriber = nil
+            modelReady = false
+            loadedModelPath = nil
+            hubModel.modelLoaded = false
+            hud.show(.error("Model file is damaged — download it again"))
+            showIdle()
+            return
+        }
         transcriber = try? WhisperTranscriber(modelPath: path)
-        hubModel.modelLoaded = transcriber != nil
+        modelReady = transcriber != nil
+        loadedModelPath = modelReady ? path : nil
+        lastModelUse = Date()
+        hubModel.modelLoaded = modelReady
         showIdle()
         if let transcriber {
             // First whisper inference pays Metal shader/graph setup (hundreds of ms) —
@@ -843,6 +881,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                            shouldAbort: { self.isRecording })
                 NSLog("Parla: whisper warmup done")
             }
+        }
+    }
+
+    /// The resident context, reloading it if the idle watcher freed it, and the
+    /// one place the activity stamp is touched. Called on main at fn-down —
+    /// after `recorder.start()`, so the reload never costs captured speech.
+    /// ponytail: the reload is synchronous, so a cold 574 MB model stalls the
+    /// UI for a few hundred ms once per idle period. Move it onto processTask
+    /// if that ever shows up in a trace.
+    @discardableResult
+    func activeTranscriber() -> WhisperTranscriber? {
+        lastModelUse = Date()
+        if transcriber == nil, modelReady { loadModel() }
+        return transcriber
+    }
+
+    /// 10 s idle watcher. It refuses to unload while recording and touches the
+    /// activity stamp instead (Handy's shape), and the free itself is queued on
+    /// the processTask chain so it can never race a whisper pass — the ctx
+    /// isn't reentrant and freeing it mid-pass is a crash, not a leak.
+    func startUnloadWatcher() {
+        unloadTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            guard let self, self.transcriber != nil else { return }
+            if self.isRecording { self.lastModelUse = Date(); return }
+            let idle = Date().timeIntervalSince(self.lastModelUse)
+            guard self.unloadPolicy.shouldUnloadOnTick(idle: idle, recording: false) else { return }
+            self.unloadModel(reason: "idle \(Int(idle))s")
+        }
+    }
+
+    func unloadModel(reason: String) {
+        processTask = Task { [prev = processTask] in
+            await prev?.value
+            await MainActor.run {
+                // A dictation may have started while we waited in the queue.
+                guard !self.isRecording, self.transcriber != nil else { return }
+                self.transcriber = nil
+                NSLog("%@", "Parla: whisper model unloaded (\(reason))")
+            }
+        }
+    }
+
+    /// The `.immediately` policy, handled here rather than on the tick so it
+    /// can only ever fire between dictations.
+    func unloadAfterTranscription() {
+        guard unloadPolicy.unloadsAfterTranscription else { return }
+        DispatchQueue.main.async { [self] in
+            guard !isRecording else { return }
+            unloadModel(reason: "policy: immediately")
         }
     }
 
@@ -876,7 +963,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// store.lastError reflects the most recent load() — refreshed at launch, and on
     /// any dictation or menu open that finds settings.json changed (currentSettings).
     func showIdle() {
-        let healthy = transcriber != nil && store.lastError == nil && micGranted && axGranted
+        // modelReady, not `transcriber != nil`: an idle unload is not a problem
+        // the user needs to see a ⚠️ about.
+        let healthy = modelReady && store.lastError == nil && micGranted && axGranted
         if healthy, let icon = Self.menuBarIcon {
             statusItem.button?.title = ""
             statusItem.button?.image = icon
@@ -981,18 +1070,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(url)
     }
 
-    /// Kicks off the base.en download; menuNeedsUpdate hides this action while
-    /// downloadTask is non-nil so a second click can't start a duplicate.
-    @objc func downloadModel() {
-        guard downloadTask == nil,
-              let url = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin")
-        else { return }
+    /// Menu action: fetch the catalog default. The Hub picker calls
+    /// `download(_:)` directly for any other model.
+    @objc func downloadModel() { download(ModelCatalog.default) }
+
+    /// menuNeedsUpdate hides the action while downloadTask is non-nil so a
+    /// second click can't start a duplicate.
+    func download(_ model: ModelCatalog.Model) {
+        guard downloadTask == nil else { return }
         setStatus("⬇️ 0%")
-        let task = URLSession.shared.downloadTask(with: url) { [weak self] tmp, _, error in
-            // The tmp file is deleted the moment this handler returns — move it
-            // to its destination NOW, before hopping to main for the UI.
-            let moveError: Error? = error ?? tmp.flatMap { Self.installModel(from: $0) }
-            DispatchQueue.main.async { self?.finishDownload(error: moveError ?? (tmp == nil ? CleanupError(description: "no file") : nil)) }
+        let dest = URL(fileURLWithPath: ModelCatalog.path(for: model))
+        let task = URLSession.shared.downloadTask(with: model.url) { [weak self] tmp, _, error in
+            // The tmp file is deleted the moment this handler returns — verify
+            // and move it NOW, before hopping to main for the UI. URLSession's
+            // temp file IS vibe PR #1245's `.part` staging; re-staging it into
+            // one of our own would cost another 574 MB of I/O for nothing.
+            let failure: Error?
+            if let error {
+                failure = error
+            } else if let tmp {
+                do { try ModelCatalog.install(staged: tmp, as: model, at: dest); failure = nil }
+                catch { failure = error }
+            } else {
+                failure = ModelFileError(description: "no file")
+            }
+            DispatchQueue.main.async { self?.finishDownload(model: model, error: failure) }
         }
         // KVO on the task's own Progress — least code for a live percentage,
         // no delegate class needed.
@@ -1004,31 +1106,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         downloadTask = task
         hubModel.downloadProgress = 0
+        hubModel.downloadingModel = model
         task.resume()
     }
 
-    /// Move the downloaded model into place. Runs on the URLSession callback
-    /// queue (must complete before the completion handler returns). nil = ok.
-    private static func installModel(from tmp: URL) -> Error? {
-        do {
-            let dest = URL(fileURLWithPath: WhisperTranscriber.defaultModelPath())
-            try FileManager.default.createDirectory(
-                at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
-            try FileManager.default.moveItem(at: tmp, to: dest)
-            return nil
-        } catch { return error }
-    }
-
-    private func finishDownload(error: Error?) {
+    private func finishDownload(model: ModelCatalog.Model, error: Error?) {
         downloadObservation = nil
         downloadTask = nil
         hubModel.downloadProgress = nil
+        hubModel.downloadingModel = nil
         if let error {
             NSLog("%@", "Parla model download failed: \(error)")
-            hud.show(.error("Model download failed"))
+            // A verification failure is not a network failure: the file arrived
+            // and was wrong (proxy error page, truncation, re-upload). Saying so
+            // stops the user retrying a download that will keep failing.
+            hud.show(.error(error is ModelFileError
+                            ? "Downloaded model failed verification" : "Model download failed"))
             showIdle()
             return
+        }
+        // Switch to what the user just waited for. Written through the store
+        // rather than hubModel.settings: hubModel's copy is default-constructed
+        // until the window is first opened, so writing it would save those
+        // defaults over the user's real settings.json.
+        var s = store.load()
+        let path = ModelCatalog.path(for: model)
+        if s.whisperModelPath != path {
+            s.whisperModelPath = path
+            try? store.save(s)
+            hubModel.refresh()
         }
         loadModel() // clears the ⚠️ when it succeeds (showIdle() inside)
     }
@@ -1057,13 +1163,14 @@ extension AppDelegate: NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        if transcriber == nil {
-            if downloadTask != nil {
-                let item = NSMenuItem(title: "Downloading base.en…", action: nil, keyEquivalent: "")
+        if !modelReady {
+            if let downloading = hubModel.downloadingModel {
+                let item = NSMenuItem(title: "Downloading \(downloading.displayName)…", action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
             } else {
-                let item = NSMenuItem(title: "Download model (base.en, ~148 MB)",
+                let m = ModelCatalog.default
+                let item = NSMenuItem(title: "Download model (\(m.displayName), \(m.sizeLabel))",
                                        action: #selector(downloadModel), keyEquivalent: "")
                 item.target = self
                 menu.addItem(item)

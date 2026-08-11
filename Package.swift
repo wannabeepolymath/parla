@@ -14,7 +14,9 @@ let package = Package(
         // SPM's remote binaryTarget can't map. Refresh: download whisper-vX-xcframework.zip,
         // keep the macos-arm64_x86_64 slice, trim Info.plist to it.
         .binaryTarget(name: "whisper", path: "Frameworks/whisper.xcframework"),
-        .target(name: "ParlaCore", dependencies: ["whisper"]),
+        // ParlaCore ships its own MIT LICENSE (the app is AGPL); it's documentation
+        // living next to the code it covers, not a build input.
+        .target(name: "ParlaCore", dependencies: ["whisper"], exclude: ["LICENSE"]),
         .executableTarget(name: "Parla", dependencies: ["ParlaCore"]),
         .executableTarget(name: "parla-eval", dependencies: ["ParlaCore"]),
         .testTarget(name: "ParlaCoreTests", dependencies: ["ParlaCore"]),

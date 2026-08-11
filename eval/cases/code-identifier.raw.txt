@@ -1,0 +1,1 @@
+rename the function to flatten for terminal in snake case

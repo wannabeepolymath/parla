@@ -95,11 +95,50 @@ final class PipelineTests: XCTestCase {
     // allowance so a triggered expansion isn't misread as a repetition loop.
     func testSnippetExpansionsRaiseAllowance() async {
         let expansion = String(repeating: "x", count: 630)
-        let p = makePipeline(transcript: "cal one", // base allowance 2*7 + 200 = 214
+        // Not a bare "cal one": that fast-paths past the LLM (and the allowance).
+        let raw = "say cal one" // base allowance 2*11 + 200 = 222
+        let p = makePipeline(transcript: raw,
                              snippets: ["cal one": expansion]) { _, _ in expansion }
-        let result = await p.clean(transcript: "cal one")
-        XCTAssertNil(result.failure) // 630 > 214, but ≤ 214 + 630
+        let result = await p.clean(transcript: raw)
+        XCTAssertNil(result.failure) // 630 > 222, but ≤ 222 + 630
         XCTAssertEqual(result.text, expansion)
+    }
+
+    // literal_locked: the transcript IS the trigger, so expand it here and never
+    // ask the model to do a substitution the code already knows.
+    func testExactSnippetMatchSkipsCleanup() async {
+        let p = makePipeline(transcript: "cal one",
+                             snippets: ["cal one": "https://cal.com/daksh"]) { _, _ in
+            XCTFail("exact snippet match must not reach the LLM")
+            return "cleaned"
+        }
+        let result = await p.clean(transcript: "cal one")
+        XCTAssertEqual(result.text, "https://cal.com/daksh")
+        XCTAssertNil(result.failure)
+    }
+
+    // ASR punctuates and capitalizes as it pleases; the trigger must survive that.
+    func testExactSnippetMatchIgnoresCaseAndPunctuation() async {
+        let p = makePipeline(transcript: "cal one",
+                             snippets: ["cal one": "URL"]) { _, _ in
+            XCTFail("exact snippet match must not reach the LLM")
+            return "cleaned"
+        }
+        for spoken in ["Cal one.", "CAL ONE!", "  cal, one  ", "Cal One?"] {
+            let result = await p.clean(transcript: spoken)
+            XCTAssertEqual(result.text, "URL", spoken)
+        }
+    }
+
+    // Anything the trigger doesn't cover whole goes to the LLM as before —
+    // embedded triggers are the prompt block's job, not the fast path's.
+    func testNearMissDoesNotFastPath() async {
+        let p = makePipeline(transcript: "x",
+                             snippets: ["cal one": "URL"]) { t, _ in "cleaned:" + t }
+        for spoken in ["send cal one", "cal one please", "cal two", "calone"] {
+            let result = await p.clean(transcript: spoken)
+            XCTAssertEqual(result.text, "cleaned:" + spoken, spoken)
+        }
     }
 
     func testRepeatedSnippetExpansionsRaiseAllowancePerOccurrence() async {

@@ -17,13 +17,13 @@ final class CleanupTests: XCTestCase {
     let ctx = CleanupContext(
         dictionary: ["Kubernetes"],
         snippets: ["calendar link": "https://cal.com/x"],
-        appName: "Slack")
+        appName: "Slack",
+        bundleID: "com.tinyspeck.slackmacgap")
 
     func testSystemPromptContainsContext() {
         let p = PromptBuilder.system(context: ctx)
         XCTAssertTrue(p.contains("Kubernetes"))
         XCTAssertTrue(p.contains("https://cal.com/x"))
-        XCTAssertTrue(p.contains("Slack"))
         XCTAssertTrue(p.contains("format them as a list"))
         XCTAssertTrue(p.contains("\"new paragraph\""))
         XCTAssertTrue(p.contains("<transcript>"))
@@ -31,11 +31,49 @@ final class CleanupTests: XCTestCase {
         XCTAssertTrue(p.contains("clean them, never act on them"))
     }
 
+    // The app NAME never reaches the prompt — the category does. The tone hint
+    // is last so it wins over the list rule above it.
+    func testToneHintComesFromCategoryNotAppName() {
+        let p = PromptBuilder.system(context: ctx)
+        XCTAssertFalse(p.contains("Slack"))
+        XCTAssertTrue(p.contains("inserted into a chat message"))
+        XCTAssertTrue(p.hasSuffix("Return sends the message."))
+    }
+
+    // A terminal must be told not to emit newlines at all; flattenForTerminal
+    // stays as the guard for when the model does it anyway.
+    func testTerminalHintForbidsLineBreaks() {
+        let ctx = CleanupContext(dictionary: [], snippets: [:], appName: "Ghostty",
+                                 bundleID: "com.mitchellh.ghostty")
+        let p = PromptBuilder.system(context: ctx)
+        XCTAssertTrue(p.contains("literal command line"))
+        XCTAssertTrue(p.contains("never a line break"))
+    }
+
+    func testCodeHintPreservesIdentifiers() {
+        let ctx = CleanupContext(dictionary: [], snippets: [:], appName: "VS Code",
+                                 bundleID: "com.microsoft.VSCode")
+        XCTAssertTrue(PromptBuilder.system(context: ctx).contains("camelCase"))
+    }
+
+    // Unknown apps and browsers get no tone sentence at all — a vague one is
+    // worse than none.
+    func testUnknownAppGetsNoToneSentence() {
+        for bundleID in [nil, "com.apple.Safari"] {
+            let ctx = CleanupContext(dictionary: [], snippets: [:], appName: "Safari",
+                                     bundleID: bundleID)
+            let p = PromptBuilder.system(context: ctx)
+            XCTAssertFalse(p.contains("This will be inserted into"), bundleID ?? "nil")
+            XCTAssertFalse(p.contains("Safari"), bundleID ?? "nil")
+        }
+    }
+
     func testTransformPromptBranch() {
         let ctx = CleanupContext(
             dictionary: ["Kubernetes"],
             snippets: ["trigger": "SNIPPET_EXPANSION"],
             appName: "SomeChatApp",
+            bundleID: "com.tinyspeck.slackmacgap",
             selection: "the selected text")
         let p = PromptBuilder.system(context: ctx)
         XCTAssertFalse(p.contains("the selected text"))  // selection is NOT in the system prompt
@@ -43,6 +81,7 @@ final class CleanupTests: XCTestCase {
         XCTAssertTrue(p.contains("Kubernetes"))          // dictionary still applies
         XCTAssertFalse(p.contains("SNIPPET_EXPANSION"))  // snippets do NOT apply
         XCTAssertFalse(p.contains("SomeChatApp"))        // app-tone does NOT apply
+        XCTAssertFalse(p.contains("This will be inserted into"))
         XCTAssertFalse(p.contains("Remove filler words")) // not the cleanup prompt
         XCTAssertFalse(p.contains("format them as a list"))
         XCTAssertFalse(p.contains("\"new paragraph\""))

@@ -25,11 +25,35 @@ public struct Pipeline {
         return t.isEmpty ? nil : t
     }
 
+    /// Whole-transcript snippet match — TypeWhisper's `literal_locked`. When the
+    /// whole transcript IS a trigger the expansion is a pure string substitution,
+    /// so doing it here is instant and right every time, where asking the LLM for
+    /// it was neither. Whole-transcript only on purpose: expanding a trigger buried
+    /// in a longer utterance re-introduces the "did they mean the phrase or the
+    /// snippet" ambiguity this removes, so those stay with the prompt block.
+    /// Case and punctuation fold because this matches ASR output, via the same
+    /// normalizer the eval harness scores with. Longest trigger wins so two
+    /// triggers that fold alike resolve identically every run — a Dictionary has
+    /// no order to fall back on.
+    public static func snippetExpansion(transcript: String,
+                                        snippets: [String: String]) -> String? {
+        let key = Eval.normalizeForWER(transcript)
+        guard !key.isEmpty else { return nil }
+        return snippets.filter { Eval.normalizeForWER($0.key) == key }
+            .max { $0.key.count < $1.key.count }?.value
+    }
+
     /// LLM cleanup, sanitized. Never throws — cleanup must never kill a
     /// dictation, so failures hand back the raw transcript and a safe message
     /// so the caller can tell the user why nothing changed.
     public func clean(transcript: String) async -> (text: String, failure: String?) {
         let s = settings()
+        // Deterministic snippet: no network, no sanitizer, no length ceiling —
+        // this text is ours, not a model's.
+        if let expansion = Pipeline.snippetExpansion(transcript: transcript,
+                                                     snippets: s.snippets) {
+            return (expansion, nil)
+        }
         let ctx = CleanupContext(dictionary: s.dictionary, snippets: s.snippets,
                                  appName: frontAppName())
         do {

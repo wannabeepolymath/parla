@@ -1,0 +1,1 @@
+run swift test dash dash filter eval normalize tests

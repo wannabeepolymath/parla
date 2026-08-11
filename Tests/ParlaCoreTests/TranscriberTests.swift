@@ -19,6 +19,42 @@ final class TranscriberTests: XCTestCase {
         XCTAssertThrowsError(try WhisperTranscriber(modelPath: "/nonexistent.bin"))
     }
 
+    func testDefaultModelPathIsTheCatalogDefault() {
+        XCTAssertEqual(WhisperTranscriber.defaultModelPath(),
+                       ModelCatalog.path(for: ModelCatalog.default))
+    }
+
+    // MARK: - Unload policy
+
+    func testIdlePolicyUnloadsOnlyPastItsTimeout() {
+        let p = ModelUnloadPolicy.afterIdle(seconds: 300)
+        XCTAssertFalse(p.shouldUnloadOnTick(idle: 299, recording: false))
+        XCTAssertTrue(p.shouldUnloadOnTick(idle: 300, recording: false))
+        XCTAssertTrue(p.shouldUnloadOnTick(idle: 10_000, recording: false))
+        XCTAssertEqual(ModelUnloadPolicy.default, p)
+    }
+
+    /// The rule the whole policy exists to preserve: a dictation longer than the
+    /// timeout must never have its own model freed out from under it.
+    func testRecordingNeverUnloads() {
+        for policy: ModelUnloadPolicy in [.never, .immediately, .afterIdle(seconds: 300)] {
+            XCTAssertFalse(policy.shouldUnloadOnTick(idle: 100_000, recording: true))
+        }
+    }
+
+    func testNeverAndImmediatelyDoNotUnloadOnTheTick() {
+        XCTAssertFalse(ModelUnloadPolicy.never.shouldUnloadOnTick(idle: 100_000, recording: false))
+        // .immediately is handled after each transcription instead, so the 10s
+        // watcher can't fire it between two passes of one dictation.
+        XCTAssertFalse(ModelUnloadPolicy.immediately.shouldUnloadOnTick(idle: 100_000, recording: false))
+    }
+
+    func testOnlyImmediatelyUnloadsAfterTranscription() {
+        XCTAssertTrue(ModelUnloadPolicy.immediately.unloadsAfterTranscription)
+        XCTAssertFalse(ModelUnloadPolicy.never.unloadsAfterTranscription)
+        XCTAssertFalse(ModelUnloadPolicy.afterIdle(seconds: 0).unloadsAfterTranscription)
+    }
+
 
     func testBlankAudioMarkerStripped() {
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[BLANK_AUDIO]"), "")

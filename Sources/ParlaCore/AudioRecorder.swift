@@ -10,21 +10,45 @@ public final class AudioRecorder {
     /// Why a capture ended by itself, rather than by the user releasing fn.
     public enum EndReason: Equatable { case sampleLimit, deviceLost }
 
+    public enum RecorderError: Error {
+        /// The input node reported a 0 Hz / 0 ch format. `installTap` throws an
+        /// ObjC exception on one of those, which Swift cannot catch — so refuse
+        /// first. Seen when a route change lands mid-build (FluidVoice #752).
+        case noInputFormat
+    }
+
     /// Hard ceiling on one capture: 10 minutes at 16 kHz (~38 MB of Float).
     /// Also the ceiling on a forgotten hands-free latch, which is otherwise
     /// indefinite sustained Metal load — the app's only thermal risk.
     public static let maxSamples = 10 * 60 * 16_000
 
-    private let engine = AVAudioEngine()
+    /// Core Audio fires a burst of route changes for one physical event, and
+    /// each rebuild provokes the next one. Only the last scheduled rebuild runs.
+    static let rebuildDebounce: TimeInterval = 0.5
+
+    private var engine = AVAudioEngine()
     private var samples: [Float] = []
     private var failedBuffers = 0
     private var ended: EndReason?
     private var configObserver: NSObjectProtocol?
     private let lock = NSLock()
 
-    /// Owned by the audio thread while the engine runs, by the caller either
-    /// side of that — never touched by both, so it needs no lock.
+    /// Tap-side state, under `lock`: `capturing` decides whether a converted
+    /// chunk joins the dictation or the pre-roll ring.
+    private var capturing = false
+    private var preRoll = PreRollRing()
+
+    /// Engine-side state. Only ever touched on the main thread: prepare/start/
+    /// stop are called from the hotkey handler and the notification observer is
+    /// registered on the main queue.
+    private var warm = false
+    private var boundDevice: AudioDeviceID?
+    private var rebuildGeneration = 0
+
+    /// Shared with the audio thread now that the engine can outlive a capture:
+    /// stop() flushes the filter tail while the tap is still converting pre-roll.
     private let resampler = Resampler()
+    private let resamplerLock = NSLock()
 
     /// Called with each converted buffer's RMS level. Fires on the audio
     /// thread — callers must hop to main before touching UI.
@@ -118,23 +142,45 @@ public final class AudioRecorder {
         return device
     }
 
-    /// Transport label of the device a start() would open: the selected one, or
-    /// the system default when no UID is set. Trace-only (see Trace.transportName).
-    private static func transport(of device: AudioDeviceID?) -> String {
+    /// Transport of the device a start() would open: the selected one, or the
+    /// system default when no UID is set.
+    private static func transportRaw(of device: AudioDeviceID?) -> UInt32? {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyTransportType,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        guard let id = device ?? defaultInputDevice() else { return "unknown" }
+        guard let id = device ?? defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
+        else { return nil }
         var raw: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &raw) == noErr else { return "unknown" }
-        return Trace.transportName(raw)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &raw) == noErr else { return nil }
+        return raw
     }
 
-    private static func defaultInputDevice() -> AudioDeviceID? {
+    /// Trace-only label (see Trace.transportName).
+    private static func transport(of device: AudioDeviceID?) -> String {
+        Trace.transportName(transportRaw(of: device) ?? kAudioDeviceTransportTypeUnknown)
+    }
+
+    /// The warm-engine gate, pure half. Holding a Bluetooth *input* open drags
+    /// the link from A2DP down to 16 kHz HFP/SCO for as long as it is held —
+    /// the user's music degrades and headset battery roughly halves — and idle
+    /// prewarm on the route changes that causes is self-sustaining
+    /// (docs/research/03-latency.md §7: 3,714 route changes in 40 h idle).
+    static func isBluetoothTransport(_ raw: UInt32) -> Bool {
+        raw == kAudioDeviceTransportTypeBluetooth || raw == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// An unclassifiable transport is treated as not-Bluetooth: refusing to warm
+    /// on every device we cannot read would disable the feature outright.
+    static func isBluetooth(_ device: AudioDeviceID?) -> Bool {
+        guard let raw = transportRaw(of: device) else { return false }
+        return isBluetoothTransport(raw)
+    }
+
+    private static func defaultDevice(_ selector: AudioObjectPropertySelector) -> AudioDeviceID? {
         var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var id = AudioDeviceID(0)
@@ -143,6 +189,29 @@ public final class AudioRecorder {
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id) == noErr,
             id != kAudioObjectUnknown else { return nil }
         return id
+    }
+
+    /// Something is driving the default output, so whatever it is was in the
+    /// room and the mic's pre-roll picked it up. Pressing fn cannot un-record
+    /// audio the user did not intend to hand over, so the ring is dropped.
+    /// ponytail: `IsRunningSomewhere` is true for an app merely holding the
+    /// output open, so this over-discards. Erring that way is the safe one; a
+    /// precise signal needs the private MediaRemote API.
+    static func mediaPlaying() -> Bool {
+        guard let id = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice) else { return false }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &running) == noErr else { return false }
+        return running != 0
+    }
+
+    /// Monotonic seconds. Date jumps with NTP and would poison a pre-roll age.
+    static func nowSeconds() -> TimeInterval {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 
     /// Root-mean-square amplitude of samples; 0 for empty input.
@@ -193,60 +262,174 @@ public final class AudioRecorder {
         if hitCap { endCapture(.sampleLimit) }
     }
 
-    public func start() throws {
-        samples.removeAll()
-        failedBuffers = 0
-        ended = nil
-        // Previous recording ended with an endOfStream flush; reset so the next
-        // one starts on a clean filter without rebuilding on the audio thread.
-        resampler.reset()
+    // MARK: - Warm engine
+
+    /// Build the engine, bind the device, install the tap and start capturing
+    /// into the pre-roll ring — everything `start()` used to do inside the
+    /// fn-down handler (240–270 ms on built-in mics, 650–700 ms on USB;
+    /// docs/research/03-latency.md §1). Call at launch and on device change.
+    ///
+    /// Also latches warmth on: without it the recorder behaves exactly as it did
+    /// before, cold-opening per press and tearing down at stop. Warm means the
+    /// mic indicator stays lit while Parla is idle, so it is the app's call.
+    public func prepare() {
+        warm = true
+        warmUp()
+    }
+
+    /// Idempotent build of the warm engine, subject to the Bluetooth gate.
+    private func warmUp() {
+        guard warm, !engine.isRunning else { return }
+        let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
+        guard !AudioRecorder.isBluetooth(device) else { return }
+        // A warm engine is a nicety; failing to get one just means the next
+        // start() pays the cold open it always used to.
+        try? build(device: device)
+    }
+
+    private func build(device: AudioDeviceID?) throws {
+        engine = AVAudioEngine() // fresh: a reused engine caches the old device's format
         let input = engine.inputNode
         // Point the AUHAL input unit at the chosen device before reading its
-        // format. Engine is idle here (start is only called after stop). An
-        // unresolvable UID leaves the unit on the system default. ponytail: set
-        // per-start so unplugging the selected mic self-heals to default.
-        let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
+        // format. An unresolvable UID leaves the unit on the system default.
+        // ponytail: resolved per build so unplugging the selected mic self-heals.
         if let device, let unit = input.audioUnit {
             var dev = device
             AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
                                  kAudioUnitScope_Global, 0, &dev,
                                  UInt32(MemoryLayout<AudioDeviceID>.size))
         }
-        // Behind the trace gate so a normal start pays no extra HAL queries.
-        if Trace.enabled { Trace.setTransport(AudioRecorder.transport(of: device)) }
         let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputFormat }
+        resamplerLock.lock(); resampler.reset(); resamplerLock.unlock()
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
             guard let self else { return }
-            Trace.mark(.firstPCM) // disabled: one bool test, no alloc, no lock
+            self.resamplerLock.lock()
             let chunk = self.resampler.convert(buf, to: AudioRecorder.targetFormat)
-            self.append(chunk)
+            self.resamplerLock.unlock()
+            guard self.route(chunk) else { return }
+            // Stamped only for live chunks: a warm tap is already running when
+            // fn goes down, so stamping pre-roll would report ~0 ms every time.
+            Trace.mark(.firstPCM) // disabled: one bool test, no alloc, no lock
             self.onLevel?(chunk.map(AudioRecorder.rms) ?? 0)
         }
         do {
             try engine.start()
-            Trace.mark(.recorderStartReturned)
-            // A mic that goes away mid-dictation (unplugged, seized by another
+        } catch {
+            // A failed build must leave the recorder restartable.
+            input.removeTap(onBus: 0)
+            engine.stop()
+            throw error
+        }
+        boundDevice = device
+        observeConfigChanges()
+    }
+
+    /// Tap-side fan-out. Returns true when the chunk joined the dictation, false
+    /// when it went to the pre-roll ring (warm engine, no capture in flight).
+    private func route(_ chunk: [Float]?) -> Bool {
+        lock.lock()
+        let live = capturing
+        if !live, let chunk { preRoll.write(chunk, now: AudioRecorder.nowSeconds()) }
+        lock.unlock()
+        guard live else { return false }
+        append(chunk)
+        return true
+    }
+
+    private func observeConfigChanges() {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            let live = self.capturing
+            self.lock.unlock()
+            guard live else {
+                // Idle: the route moved under a warm engine (device swapped,
+                // AirPods connected, rate changed). Rebuild once the burst ends.
+                self.scheduleRebuild()
+                return
+            }
+            // Mid-dictation a mic that goes away (unplugged, seized by another
             // app) leaves the tap silent forever. End the capture with a reason
             // so stop() still finalizes what was already spoken.
             // ponytail: only a lost input format ends it — a benign
             // reconfiguration (default device swapped, rate changed) keeps a
             // valid format. Follow-up: that swap leaves the tap on the old
             // device, which needs a restart, not an end.
-            if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
-            configObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-            ) { [weak self] _ in
-                guard let self else { return }
-                let format = self.engine.inputNode.inputFormat(forBus: 0)
-                guard format.sampleRate == 0 || format.channelCount == 0 else { return }
-                self.endCapture(.deviceLost)
-            }
-        } catch {
-            // A failed start must leave the recorder restartable.
-            input.removeTap(onBus: 0)
-            engine.stop()
-            throw error
+            let format = self.engine.inputNode.inputFormat(forBus: 0)
+            guard format.sampleRate == 0 || format.channelCount == 0 else { return }
+            self.endCapture(.deviceLost)
         }
+    }
+
+    /// Trailing debounce behind a generation counter: a rebuild itself provokes
+    /// the next configuration change, so an undebounced handler is a loop that
+    /// never settles (docs/research/03-latency.md §7, trap 2).
+    private func scheduleRebuild() {
+        rebuildGeneration &+= 1
+        let generation = rebuildGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + AudioRecorder.rebuildDebounce) { [weak self] in
+            guard let self, self.rebuildGeneration == generation else { return }
+            self.lock.lock()
+            let live = self.capturing
+            self.lock.unlock()
+            guard !live else { return } // a dictation started during the debounce
+            self.teardown()
+            self.warmUp() // re-reads the transport: AirPods leave the engine cold
+        }
+    }
+
+    /// Stop the engine and hand the device back. Stopping is not enough on its
+    /// own: the AUHAL unit stays bound, which keeps a headset in the 16 kHz HFP
+    /// profile, so the unit is explicitly pointed at kAudioObjectUnknown.
+    private func teardown() {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = nil
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
+        engine.stop()
+        if let unit = input.audioUnit {
+            var unknown = AudioDeviceID(kAudioObjectUnknown)
+            AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                 kAudioUnitScope_Global, 0, &unknown,
+                                 UInt32(MemoryLayout<AudioDeviceID>.size))
+        }
+        boundDevice = nil
+        lock.lock(); preRoll.reset(); lock.unlock()
+    }
+
+    // MARK: - Capture
+
+    public func start() throws {
+        let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
+        // Behind the trace gate so a normal start pays no extra HAL queries.
+        if Trace.enabled { Trace.setTransport(AudioRecorder.transport(of: device)) }
+        // A warm engine bound to some other mic is worse than no warm engine.
+        if engine.isRunning && boundDevice != device { teardown() }
+
+        // The ring is claimed before `capturing` flips so the splice has no gap
+        // and no overlap: every chunk lands on exactly one side of it.
+        let mediaPlaying = engine.isRunning ? AudioRecorder.mediaPlaying() : false
+        lock.lock()
+        let preRolled = preRoll.take(now: AudioRecorder.nowSeconds(), mediaPlaying: mediaPlaying)
+        samples = preRolled
+        failedBuffers = 0
+        ended = nil
+        capturing = true
+        lock.unlock()
+
+        if !engine.isRunning {
+            // Cold path — what every press used to pay. Also the Bluetooth path:
+            // the gate refuses to *hold* a headset open, not to record from one.
+            do { try build(device: device) } catch {
+                lock.lock(); capturing = false; lock.unlock()
+                throw error
+            }
+        }
+        Trace.mark(.recorderStartReturned)
     }
 
     /// Copy of the samples captured so far, under the lock. Safe to call
@@ -258,17 +441,69 @@ public final class AudioRecorder {
     }
 
     public func stop() -> [Float] {
-        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
-        configObserver = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        // The tap is gone, so the resampler is ours again: take the tail it has
-        // been holding back across every .noDataNow feed.
-        let tail = resampler.flush()
         lock.lock()
-        defer { lock.unlock() }
+        capturing = false
+        lock.unlock()
+        // Take the tail the resampler has been holding back across every
+        // .noDataNow feed, then ready it for the pre-roll that follows.
+        resamplerLock.lock()
+        let tail = resampler.flush()
+        resampler.reset()
+        resamplerLock.unlock()
+        lock.lock()
         samples.append(contentsOf: tail)
-        return samples
+        let captured = samples
+        // Whatever the tap wrote while stop() ran is this dictation's own tail,
+        // already transcribed — never prepend it to the next one.
+        preRoll.reset()
+        lock.unlock()
+        // A cold-path start may have bound a headset; the gate only allows
+        // *holding* a non-Bluetooth device.
+        if !warm || AudioRecorder.isBluetooth(boundDevice) { teardown() }
+        warmUp() // no-op while the engine is still running
+        return captured
+    }
+}
+
+/// The 1.0 s of already-resampled 16 kHz mono the warm engine's tap keeps behind
+/// it, so `start()` can prepend the speech that landed before the key went down.
+/// Capacity and prepend length are Hex's numbers, adopted unchanged by both
+/// macparakeet and FluidVoice (docs/research/03-latency.md §2).
+struct PreRollRing {
+    static let capacity = 16_000        // 1.0 s at the target rate
+    static let prependSamples = 7_200   // 0.45 s
+    /// A ring this stale means the tap stopped feeding (device suspended, engine
+    /// wedged); prepending it would splice in audio from a different moment.
+    static let maxAge: TimeInterval = 2
+
+    private var samples: [Float] = []
+    private var lastWrite: TimeInterval?
+
+    /// Explicit: private storage would otherwise make the synthesized one
+    /// file-private, and the tests build the ring directly.
+    init() {}
+
+    mutating func write(_ chunk: [Float], now: TimeInterval) {
+        samples.append(contentsOf: chunk)
+        // ponytail: ≤64 KB memmove per tap buffer (~every 85 ms) to keep this a
+        // plain array; a head-index ring if it ever shows up in a profile.
+        if samples.count > Self.capacity { samples.removeFirst(samples.count - Self.capacity) }
+        lastWrite = now
+    }
+
+    /// The newest ≤0.45 s, and always empties the ring so nothing is prepended
+    /// twice. Nothing when the ring is stale, or when media was playing at press
+    /// time — that pre-roll is the user's speakers, not the user, and no pause
+    /// after the fact can un-record it.
+    mutating func take(now: TimeInterval, mediaPlaying: Bool) -> [Float] {
+        defer { reset() }
+        guard !mediaPlaying, let lastWrite, now - lastWrite <= Self.maxAge else { return [] }
+        return Array(samples.suffix(Self.prependSamples))
+    }
+
+    mutating func reset() {
+        samples.removeAll(keepingCapacity: true)
+        lastWrite = nil
     }
 }
 

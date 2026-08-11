@@ -1,0 +1,1 @@
+run git status and then git log dash dash one line

@@ -25,7 +25,9 @@ public struct CleanupSettings: Codable, Equatable {
 public struct Settings: Codable, Equatable {
     public var dictionary: [String] = []
     public var snippets: [String: String] = [:]
-    public var cleanupModel: String = "claude-sonnet-5"
+    // Cleanup is a constrained rewrite, not a reasoning task: Haiku is far
+    // cheaper per dictation and materially faster. Sonnet stays one Hub field away.
+    public var cleanupModel: String = "claude-haiku-4-5"
     public var anthropicApiKey: String? = nil
     public var whisperModelPath: String? = nil
     public var cleanup: CleanupSettings = CleanupSettings()

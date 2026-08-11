@@ -79,6 +79,45 @@ final class AudioTests: XCTestCase {
         XCTAssertEqual(at44kSteady.count, 1_600, accuracy: 200)
         XCTAssertGreaterThan(at44k.map(abs).max() ?? 0, 0.5) // signal survived the rebuild
     }
+
+    /// The warm engine converts pre-roll and live capture through the *same*
+    /// Resampler, so prepending the ring at start() must not leave a seam. A
+    /// second converter for the idle path would restart its filter exactly at
+    /// the splice — the audible artefact would sit on the user's first word.
+    func testPreRollSplicesIntoCaptureWithoutASeam() throws {
+        let idlePieces = 7 // 0.7s into the ring — more than the 0.45s prepend
+        let resampler = Resampler()
+        var ring = PreRollRing()
+        var captured: [Float] = []
+        var emitted = 0, liveEmitted = 0
+        for piece in 0..<10 {
+            let buf = sineBuffer(rate: 48_000, channels: 1, frames: 4_800, offset: piece * 4_800)
+            let chunk = try XCTUnwrap(resampler.convert(buf, to: AudioRecorder.targetFormat))
+            emitted += chunk.count
+            if piece < idlePieces { ring.write(chunk, now: Double(piece)) }
+            else {
+                if piece == idlePieces {
+                    captured = ring.take(now: Double(idlePieces), mediaPlaying: false)
+                }
+                captured += chunk
+                liveEmitted += chunk.count
+            }
+        }
+        let tail = resampler.flush()
+        captured += tail
+
+        // Per-call output isn't a flat 1600: the first buffer is short by the
+        // filter priming delay and later ones run slightly over as the converter
+        // drains that backlog. Only the total is fixed, so assert the total —
+        // 10 × 4800 frames at 48k is exactly 16000 samples at 16k.
+        XCTAssertEqual(emitted + tail.count, 16_000)
+        // Exactly the prepend plus everything emitted after the take, counted
+        // rather than approximated, so an off-by-N in the ring can't hide in a
+        // tolerance. The ring's older 0.25s is dropped by the 0.45s cap.
+        XCTAssertEqual(captured.count, PreRollRing.prependSamples + liveEmitted + tail.count)
+        let step = (1..<captured.count).map { abs(captured[$0] - captured[$0 - 1]) }.max() ?? 0
+        XCTAssertLessThan(step, 0.25) // 440Hz at 16kHz steps by at most ~0.173
+    }
 }
 
 func XCTAssertEqual(_ a: Int, _ b: Int, accuracy: Int,

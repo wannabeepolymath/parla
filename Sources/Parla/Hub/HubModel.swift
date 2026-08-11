@@ -20,7 +20,7 @@ final class HubModel: ObservableObject {
     let store: SettingsStore
     let history: HistoryStore
     // Wired by AppDelegate to its existing actions.
-    var onDownloadModel: () -> Void = {}
+    var onDownloadModel: (ModelCatalog.Model) -> Void = { _ in }
     var onOpenSettingsFile: () -> Void = {}
     var onSaved: () -> Void = {}
 
@@ -33,6 +33,7 @@ final class HubModel: ObservableObject {
     @Published var saveError: String?
     @Published var modelLoaded = false
     @Published var downloadProgress: Double? // non-nil while downloading
+    @Published var downloadingModel: ModelCatalog.Model?
     @Published var historyEntries: [HistoryEntry] = []
     @Published var launchAtLogin = false
     @Published var micGranted = false
@@ -48,6 +49,16 @@ final class HubModel: ObservableObject {
 
     var modelPath: String {
         settings.whisperModelPath ?? WhisperTranscriber.defaultModelPath()
+    }
+
+    func isSelected(_ model: ModelCatalog.Model) -> Bool {
+        ModelCatalog.path(for: model) == modelPath
+    }
+
+    /// Point Parla at an already-downloaded model. The debounced save fires
+    /// AppDelegate's onSaved, which reloads the context when the path changed.
+    func selectModel(_ model: ModelCatalog.Model) {
+        settings.whisperModelPath = ModelCatalog.path(for: model)
     }
 
     /// Re-read everything from disk — called when the window opens/becomes key

@@ -1,0 +1,4 @@
+# category: terminal
+# app: Slack
+# bundle: com.tinyspeck.slackmacgap
+Can you take a look at the PR when you get a chance? Thanks

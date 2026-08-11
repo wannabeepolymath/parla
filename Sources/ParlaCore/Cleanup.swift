@@ -3,15 +3,20 @@ import Foundation
 public struct CleanupContext {
     public var dictionary: [String]
     public var snippets: [String: String]
+    /// Display label only (history, logs). The prompt's tone hint comes from
+    /// `category` — an app NAME is arbitrary free text to interpolate into a
+    /// prompt, so behaviour would depend on whatever the app calls itself.
     public var appName: String?
+    public var category: AppCategory
     /// Non-nil ⇒ command mode: the user message is a spoken instruction, this is
     /// the selected text to transform. Flips PromptBuilder to a transform prompt.
     public var selection: String?
     public init(dictionary: [String], snippets: [String: String], appName: String?,
-                selection: String? = nil) {
+                bundleID: String? = nil, selection: String? = nil) {
         self.dictionary = dictionary
         self.snippets = snippets
         self.appName = appName
+        self.category = TextRules.category(bundleID: bundleID)
         self.selection = selection
     }
 }
@@ -70,17 +75,53 @@ public enum PromptBuilder {
                 + context.dictionary.joined(separator: ", ") + "."
         }
         if !context.snippets.isEmpty {
-            p += "\n\nSnippets — if the transcript matches or contains one of these "
+            // "contains", not "matches": a transcript that IS a trigger never
+            // reaches the LLM — Pipeline.snippetExpansion expands it first.
+            p += "\n\nSnippets — if the transcript contains one of these "
                 + "trigger phrases, replace the phrase with its expansion:\n"
             for (k, v) in context.snippets.sorted(by: { $0.key < $1.key }) {
                 p += "- \"\(k)\" -> \(v)\n"
             }
         }
-        if let app = context.appName {
-            p += "\n\nThe text will be inserted into \(app). Match the tone typical "
-                + "for that app (casual for chat, formal for email, plain for code/terminals)."
-        }
+        // Last block in the prompt on purpose: for terminals and chat it has to
+        // override the list rule above, and models weight late instructions most.
+        if let hint = toneHint(context.category) { p += "\n\n" + hint }
         return p
+    }
+
+    /// One fixed sentence per destination category. Unknown (and browsers) get
+    /// nothing — a vague "match the tone" preamble is worse than no preamble.
+    static func toneHint(_ category: AppCategory) -> String? {
+        switch category {
+        case .terminal:
+            return """
+            This will be inserted into a terminal. Treat it as a literal command \
+            line: preserve flags, paths, casing and symbols exactly, and do not add \
+            a trailing period, Markdown or code fences. Output ONE line: never a \
+            line break, even for a list; join items with spaces or "&&" as spoken.
+            """
+        case .code:
+            return """
+            This will be inserted into a code editor. Keep identifiers, camelCase, \
+            snake_case, file names and symbols exactly as spoken. Do not wrap them \
+            in prose or add Markdown.
+            """
+        case .chat:
+            return """
+            This will be inserted into a chat message. Keep it casual and concise, \
+            and omit the trailing period on a short single sentence. Do not add \
+            greetings, sign-offs or emoji the speaker did not say. Output ONE line: \
+            never a line break, even for a list; Return sends the message.
+            """
+        case .prose:
+            return """
+            This will be inserted into an email or document. Use complete sentences \
+            and readable paragraphs. Keep the speaker's formality; do not add a \
+            greeting, sign-off or subject that was not spoken.
+            """
+        case .unknown:
+            return nil
+        }
     }
 
     /// User message: the delimited transcript, or in command mode the spoken

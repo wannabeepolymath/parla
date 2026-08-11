@@ -2,25 +2,69 @@ import XCTest
 @testable import ParlaCore
 
 final class TextRulesTests: XCTestCase {
-    // MARK: isTerminal
+    // MARK: category
     func testKnownTerminalsMatch() {
         for id in ["com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp",
                    "com.github.wez.wezterm", "net.kovidgoyal.kitty",
                    "com.mitchellh.ghostty", "org.alacritty", "co.zeit.hyper"] {
-            XCTAssertTrue(TextRules.isTerminal(bundleID: id), id)
+            XCTAssertEqual(TextRules.category(bundleID: id), .terminal, id)
         }
     }
 
-    func testNonTerminalAndNil() {
-        XCTAssertFalse(TextRules.isTerminal(bundleID: "com.apple.Safari"))
-        XCTAssertFalse(TextRules.isTerminal(bundleID: nil))
-        XCTAssertFalse(TextRules.isTerminal(bundleID: ""))
+    func testKnownChatAndProseAndCodeMatch() {
+        for id in ["com.tinyspeck.slackmacgap", "com.hnc.Discord", "com.apple.MobileSMS",
+                   "net.whatsapp.WhatsApp", "ru.keepcoder.Telegram", "org.telegram.desktop"] {
+            XCTAssertEqual(TextRules.category(bundleID: id), .chat, id)
+        }
+        for id in ["com.apple.mail", "com.microsoft.Outlook", "com.microsoft.Word",
+                   "com.apple.Notes", "notion.id", "md.obsidian"] {
+            XCTAssertEqual(TextRules.category(bundleID: id), .prose, id)
+        }
+        for id in ["com.apple.dt.Xcode", "dev.zed.Zed", "com.todesktop.230313mzl4w4u92"] {
+            XCTAssertEqual(TextRules.category(bundleID: id), .code, id)
+        }
+    }
+
+    func testUnknownAndNil() {
+        XCTAssertEqual(TextRules.category(bundleID: "com.apple.Safari"), .unknown)
+        XCTAssertEqual(TextRules.category(bundleID: nil), .unknown)
+        XCTAssertEqual(TextRules.category(bundleID: ""), .unknown)
+    }
+
+    // The bug substring matching ships with: "onepassword" contains "word",
+    // "barcode" contains "code", "Terminology" contains "termino". None of these
+    // are the app the substring belongs to.
+    func testNearMissesThatSubstringMatchingGetsWrong() {
+        for id in ["com.agilebits.onepassword7", "com.1password.1password",
+                   "com.example.barcodescanner", "com.agiletortoise.Terminology",
+                   "com.apple.iWork.Keynote", "com.apple.MobileSMSBackup",
+                   "com.tinyspeck.slackmacgap.helper", "co.zeit.hyperlink"] {
+            XCTAssertEqual(TextRules.category(bundleID: id), .unknown, id)
+        }
+    }
+
+    // The VS Code prefix must stop at the product: com.microsoft.* also holds
+    // Word and Outlook, which are prose, not code.
+    func testPrefixMatchingIsAnchoredToTheProductNotTheVendor() {
+        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.VSCode"), .code)
+        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.VSCodeInsiders"), .code)
+        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Word"), .prose)
+        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Outlook"), .prose)
+        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Excel"), .unknown)
+        // JetBrains namespaces its whole family, so the vendor prefix is correct there.
+        XCTAssertEqual(TextRules.category(bundleID: "com.jetbrains.intellij"), .code)
+        XCTAssertEqual(TextRules.category(bundleID: "com.jetbrains.pycharm"), .code)
+        // ...but only as a prefix, not anywhere in the string.
+        XCTAssertEqual(TextRules.category(bundleID: "org.fake.com.jetbrains.clone"), .unknown)
     }
 
     func testFlattenNewlineTargets() {
         XCTAssertTrue(TextRules.flattensNewlines(bundleID: "com.apple.Terminal"))
         XCTAssertTrue(TextRules.flattensNewlines(bundleID: "com.tinyspeck.slackmacgap"))
+        // Editors and documents keep their line breaks.
         XCTAssertFalse(TextRules.flattensNewlines(bundleID: "com.apple.TextEdit"))
+        XCTAssertFalse(TextRules.flattensNewlines(bundleID: "com.apple.dt.Xcode"))
+        XCTAssertFalse(TextRules.flattensNewlines(bundleID: "com.microsoft.VSCode"))
         XCTAssertFalse(TextRules.flattensNewlines(bundleID: nil))
     }
 

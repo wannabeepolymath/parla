@@ -1,0 +1,14 @@
+{
+  "dictionary": [
+    "Parla",
+    "whisper.cpp",
+    "Anthropic",
+    "TextRules.swift",
+    "audioWorthTranscribing",
+    "EvalNormalizeTests",
+    "Ghostty"
+  ],
+  "snippets": {
+    "my usual sign off": "Best, Daksh"
+  }
+}

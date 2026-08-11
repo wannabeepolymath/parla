@@ -1,0 +1,2 @@
+# category: code
+Rename the function to flatten_for_terminal.

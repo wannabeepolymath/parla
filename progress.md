@@ -16,11 +16,11 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | Tier | Items | done | wip | todo | skipped |
 |---|---|---|---|---|---|
 | 0 | 8 | 8 | 0 | 0 | 0 |
-| 1 | 14 | 6 | 0 | 8 | 0 |
+| 1 | 14 | 13 | 0 | 1 | 0 |
 | 2 | 7 | 0 | 0 | 6 | 1 |
-| **all** | **29** | **14** | **0** | **14** | **1** |
+| **all** | **29** | **21** | **0** | **7** | **1** |
 
-Suite: **190 tests, 0 failures.** Build clean.
+Suite: **240 tests, 0 failures.** Build clean.
 
 ---
 
@@ -112,17 +112,54 @@ is a history of insertion regressions in exactly the apps it touches.
 | 1 | Env-gated latency trace | `ParlaCore/Trace.swift` (new), `main.swift`, `AudioRecorder.swift` | S | none | **done** | wave 2 |
 | 2 | Get `Settings` off the keypress path | `ParlaCore/Settings.swift`, `main.swift` | S | low | **done** | wave 2 |
 | 3 | Set `params.language = "en"`; drop stale `flash_attn` | `ParlaCore/Transcriber.swift` | S | low | **done** | wave 2 |
-| 4 | Model catalog + hardened download | `ParlaCore/Transcriber.swift`, `Parla/main.swift`, Hub | M | med | todo | |
-| 5 | WER harness (replaces exact-match) | `ParlaCore/Eval.swift`, `parla-eval/`, `eval/cases/` | M | low | todo | |
+| 4 | Model catalog + hardened download | `ParlaCore/ModelCatalog.swift` (new), `Transcriber.swift`, `main.swift`, Hub | M | med | **done** | wave 3 |
+| 5 | WER harness (replaces exact-match) | `ParlaCore/Eval.swift`, `parla-eval/`, `eval/cases/` | M | low | **done** | wave 3 |
 | 6 | CI — `swift build` + `swift test` | `.github/workflows/ci.yml` | S | none | **done** | wave 2 |
-| 7 | Mic prepare/start split + pre-roll ring, BT excluded | `ParlaCore/AudioRecorder.swift` | M | med | todo | |
+| 7 | Mic prepare/start split + pre-roll ring, BT excluded | `ParlaCore/AudioRecorder.swift` | M | med | **done** | wave 3 |
 | 8 | Extract `DictationSession` state machine | `ParlaCore/DictationSession.swift`, `Parla/main.swift` | M-L | med | todo | |
 | 9 | Process + capture lifecycle safety | `Parla/main.swift`, `ParlaCore/AudioRecorder.swift` | M | low | **done** | wave 2 |
-| 10 | `AppCategory` enum replacing free-text app sentence | `ParlaCore/Cleanup.swift`, `TextRules.swift` | M | low | todo | |
-| 11 | Deterministic snippets | `ParlaCore/Pipeline.swift`, `Cleanup.swift` | M | low | todo | |
+| 10 | `AppCategory` enum replacing free-text app sentence | `ParlaCore/Cleanup.swift`, `TextRules.swift` | M | low | **done** | wave 3 |
+| 11 | Deterministic snippets | `ParlaCore/Pipeline.swift`, `Cleanup.swift` | M | low | **done** | wave 3 |
 | 12 | Sample frontmost app at finalize, not fn-down | `Parla/main.swift` | S | low | **done** | wave 2 |
-| 13 | Idle model-unload policy | `ParlaCore/Transcriber.swift` | M | med | todo | |
-| 14 | Default `cleanupModel` to Haiku 4.5 | `ParlaCore/Settings.swift` | S | low | todo | |
+| 13 | Idle model-unload policy | `ParlaCore/Transcriber.swift`, `main.swift` | M | med | **done** | wave 3 |
+| 14 | Default `cleanupModel` to Haiku 4.5 | `ParlaCore/Settings.swift` | S | low | **done** | ⚠ unverified |
+
+### ⚠ Tier 1 #14 shipped unverified
+
+`cleanupModel` now defaults to `claude-haiku-4-5` (was `claude-sonnet-5`) on
+cost and latency grounds. **No eval has been run against either model** — the
+corpus that would settle it was built in the same wave and has never been
+executed, because a full run needs a whisper model plus an API key.
+
+Two corrections to the backlog found while doing it:
+- The backlog claims Haiku is "~4.6× cheaper". The audit's own cost table
+  (`08-cost.md:40-41`) computes **3.0×** from the rates it recorded. 3.0× is the
+  defensible number; the direction of the change is unaffected.
+- `README.md:143` already documented the default as `claude-haiku-4-5`, so the
+  docs were ahead of the code. This makes them agree.
+
+Blast radius beyond the literal default: `CleanupFactory.swift:87-88` substitutes
+`Settings().cleanupModel` when a user's configured model is blank, so existing
+installs with an empty model field silently move to Haiku. Users with an explicit
+`cleanupModel` are untouched. Revert is one string.
+
+**Before trusting this:** `swift run parla-eval --cleanup-only` against both
+models and compare zero-edit rate and p90 WER.
+
+### Eval harness — real but not yet load-bearing
+
+`parla-eval` now scores WER (p50/p90/failure-rate) with one canonical normalizer
+applied to both sides, splits ASR-only from cleanup-only so the two regressions
+are distinguishable, and has a `verify` mode that re-scores committed hypotheses
+offline. 23 text cases added (fillers, self-correction, lists, numbers, code,
+terminal, injection, jargon, snippets).
+
+Two honest gaps: `eval/results.json` does not exist yet, so `verify` currently
+reports zero fixtures and passes vacuously — it only becomes a CI gate once
+someone commits a real run. And the two `.wav` cases have no `.raw.txt`
+reference, so **the ASR leg is entirely unscored**; text cases do not substitute
+for recorded audio, and the silence/long-form categories where the guards live
+cannot be exercised at text level at all.
 
 ## Tier 2 — later
 
@@ -156,3 +193,4 @@ nothing. Revisit after #2 has real numbers.
 | 2026-08-11 | Wave 1: Tier 0 #1–#7 landed. 6 agents on disjoint files, 0 conflicts. 173/173 pass. |
 | 2026-08-11 | Tier 0 #8 landed alone (chunk 20→200). 174/174 pass. Manual smoke test still outstanding. |
 | 2026-08-11 | Wave 2: Tier 1 #1, #2, #3, #6, #9, #12 landed. 190/190 pass. |
+| 2026-08-11 | Wave 3: Tier 1 #4, #5, #7, #10, #11, #13, #14 landed. 240/240 pass. Model catalog hashes + sizes verified against Hugging Face. |

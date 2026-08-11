@@ -1,0 +1,4 @@
+# category: terminal
+# app: Terminal
+# bundle: com.apple.Terminal
+Run git status and then git log --oneline.

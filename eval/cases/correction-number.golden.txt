@@ -1,0 +1,2 @@
+# category: self-correction
+The timeout is 10 seconds.

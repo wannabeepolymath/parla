@@ -1,0 +1,5 @@
+# category: lists
+The plan is:
+1. Fix the resampler.
+2. Raise the RMS floor.
+3. Grow the eval corpus.

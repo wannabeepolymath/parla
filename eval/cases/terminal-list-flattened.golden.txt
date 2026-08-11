@@ -1,0 +1,4 @@
+# category: terminal
+# app: Ghostty
+# bundle: com.mitchellh.ghostty
+- npm install - npm run build - npm test
