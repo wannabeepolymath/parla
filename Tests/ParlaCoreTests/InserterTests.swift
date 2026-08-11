@@ -149,6 +149,29 @@ final class InserterTests: XCTestCase {
         XCTAssertNil(firstTextInput([a], maxDepth: 12))
     }
 
+    /// The walk has to reach an Electron composer. Measured on this machine with
+    /// AXManualAccessibility set: Slack's AXTextArea sits at depth 24 and
+    /// Cursor's at 18, both under an AXWebArea at depth 8. The old cap of 12
+    /// could not see either, so `focusFirstTextInput` returned `.noTextInput`
+    /// for every Chromium app — exactly the ones ISSUES.md 5-7 is about.
+    func testTreeWalkReachesElectronCompositorDepth() {
+        var node = AXNode("AXTextArea")
+        for _ in 0..<23 { node = AXNode("AXGroup", [node]) } // target now at level 24
+        XCTAssertNil(firstTextInput([node], maxDepth: 12))
+        XCTAssertNotNil(firstTextInput([node], maxDepth: 40))
+    }
+
+    /// Why the depth cap alone stopped being enough once it rose to 40. This
+    /// cycle branches two ways, so bounding levels alone admits 2^40 nodes;
+    /// it returns only because `NodeBudget` bounds them. Deleting the budget
+    /// does not make this fail — it makes it hang, which is the point: past a
+    /// shallow depth the bound has to be on nodes, not on levels.
+    func testTreeWalkTerminatesOnBranchingCycleAtElectronDepth() {
+        let a = AXNode("AXGroup")
+        a.children = [AXNode("AXGroup", [a]), AXNode("AXGroup", [a])]
+        XCTAssertNil(firstTextInput([a], maxDepth: 40))
+    }
+
     func testAXCenterToAppKitFlipsYThroughPrimaryScreenHeight() {
         // AX top-left origin (10, 20), size 100x50, on a 900pt-tall primary screen.
         // Center in AX space is (60, 45); AppKit y = 900 - 45 = 855.

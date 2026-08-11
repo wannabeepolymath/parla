@@ -23,8 +23,54 @@ import ParlaCore
 // It focuses the target's text field itself (AX, same grant), so a run needs
 // nobody at the keyboard; only an app that exposes no text field at all still
 // asks for a click.
+//
+// TERMINALS NEED `--echo-file`. A terminal's AX value is the *visible screen*,
+// not a document: measured against Ghostty it is a fixed 52-line, 183-column
+// buffer that scrolls. The before/after diff every other target uses assumes an
+// append-only field, and 630 characters scroll the "before" off the top, so the
+// diff is not merely noisy — it is undefined. Point the readback at a file
+// instead, and the terminal is verified on bytes rather than on pixels:
+//
+//   # in the terminal under test, in a window you don't mind losing:
+//   stty -icanon min 1 time 0; exec cat > /tmp/parla-echo.txt
+//   # then, from anywhere:
+//   swift run parla-insert-check com.mitchellh.ghostty --echo-file /tmp/parla-echo.txt
+//
+// `stty -icanon` matters: in canonical mode the tty holds a line until Return,
+// so the 630-character case would read back empty and be reported as total
+// character loss. Without a readback it can trust, this tool SKIPs — it never
+// guesses.
 
-let bundleID = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("-") } ?? "com.apple.TextEdit"
+/// `--echo-file <path>` replaces the AX readback with a file the target echoes
+/// into. Parsed before `bundleID` so the path is never mistaken for one.
+let echoFile: String? = {
+    guard let i = CommandLine.arguments.firstIndex(of: "--echo-file"),
+          i + 1 < CommandLine.arguments.count else { return nil }
+    return CommandLine.arguments[i + 1]
+}()
+/// `--field-role <AXRole>` aims the walk at one role instead of the default
+/// best-first pair. The first text input an app exposes is not always one you
+/// may safely type into: Slack's preferred AXTextArea is the message composer,
+/// and this check types newlines, which post. `--field-role AXTextField` picks
+/// its conversation search box instead — the same Chromium text-input path,
+/// reaching nobody else's screen.
+let fieldRole: String? = {
+    guard let i = CommandLine.arguments.firstIndex(of: "--field-role"),
+          i + 1 < CommandLine.arguments.count else { return nil }
+    return CommandLine.arguments[i + 1]
+}()
+/// `--field-index N` (1-based) picks a later match of the chosen role. Cursor
+/// and VS Code expose their AI chat box as an AXTextArea *before* the editor,
+/// and this check types newlines, which in that box send a prompt.
+let fieldIndex: Int = {
+    guard let i = CommandLine.arguments.firstIndex(of: "--field-index"),
+          i + 1 < CommandLine.arguments.count,
+          let n = Int(CommandLine.arguments[i + 1]), n >= 1 else { return 1 }
+    return n
+}()
+let bundleID = CommandLine.arguments.dropFirst()
+    .filter { $0 != echoFile && $0 != fieldRole && Int($0) == nil }
+    .first { !$0.hasPrefix("-") } ?? "com.apple.TextEdit"
 
 func die(_ msg: String, _ code: Int32) -> Never {
     FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
@@ -108,7 +154,7 @@ print("parla-insert-check: \(bundleID) (pid \(app.processIdentifier))")
 // focus it. Waiting for a human to click was the reason this check never ran —
 // from a shell the focused element stays the calling terminal, so every case
 // reported "focused, but AX exposes no text value" and skipped.
-var grab = Inserter.focusFirstTextInput(pid: app.processIdentifier)
+var grab = Inserter.focusFirstTextInput(pid: app.processIdentifier, roles: fieldRole.map { [$0] }, index: fieldIndex)
 if grab == .noTextInput, bundleID == "com.apple.TextEdit" {
     // TextEdit with no open document has no text area in any window. Hand it a
     // scratch file — the reference target has to work with no setup at all.
@@ -123,7 +169,7 @@ if grab == .noTextInput, bundleID == "com.apple.TextEdit" {
                                 configuration: NSWorkspace.OpenConfiguration()) { _, _ in sem.signal() }
         _ = sem.wait(timeout: .now() + 10)
         Thread.sleep(forTimeInterval: 1.5) // the window has to exist before the walk can see it
-        grab = Inserter.focusFirstTextInput(pid: app.processIdentifier)
+        grab = Inserter.focusFirstTextInput(pid: app.processIdentifier, roles: fieldRole.map { [$0] }, index: fieldIndex)
     }
 }
 
@@ -174,6 +220,71 @@ case .refused:
     focusRefusal = "a text field in \(bundleID) refused focus; typing would land somewhere unverified"
 }
 
+/// Read the field once it stops changing, rather than after a fixed wait.
+///
+/// A fixed sleep is a guess about someone else's event queue, and it guessed
+/// wrong in both directions: the `\n\n` separator between cases got no drain at
+/// all, so the next case's `before` was read one keystroke short and that
+/// keystroke was then counted as text we had typed (a 33-unit payload reported
+/// as 34 with a leading newline). And 600 ms is optimistic for an Electron app,
+/// where a short read reports "characters were DROPPED". Both produce the one
+/// verdict this tool must never produce by accident: a FAIL that sends someone
+/// to revert the chunk size over the host app's latency.
+///
+/// Two consecutive equal samples 150 ms apart is settled. `nil` both times —
+/// AX exposing no value — settles immediately, which keeps the SKIP path fast.
+/// `changingFrom` is the readback taken before typing. Waiting for stability
+/// alone is not enough when the readback lags the keystrokes: "hasn't started
+/// yet" and "finished" look identical, and two equal samples 150 ms apart
+/// declared victory on the old value. Measured against Cursor, whose editor
+/// reaches disk via a 200 ms autosave debounce: the 630-character case read
+/// back unchanged and skipped on every run, while the file on disk held all 630
+/// characters, byte-exact. So when a change is expected, wait for one first and
+/// only then wait for it to stop. Still no change by the deadline is reported
+/// as it was — unchanged — and the caller turns that into a SKIP, never a FAIL.
+func settledText(changingFrom previous: String? = nil, timeout: TimeInterval = 8) -> String? {
+    func read() -> String? {
+        guard let echoFile else { return Inserter.focusedFieldText() }
+        return try? String(contentsOfFile: echoFile, encoding: .utf8)
+    }
+    let deadline = Date().addingTimeInterval(timeout)
+    Thread.sleep(forTimeInterval: 0.3) // never sample before typing has started
+    if let previous {
+        while Date() < deadline, read() == previous { Thread.sleep(forTimeInterval: 0.15) }
+    }
+    var last = read()
+    while Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.15)
+        let now = read()
+        if now == last { return now }
+        last = now
+    }
+    return last // still moving at the deadline: report what we last saw
+}
+
+/// Differences the host app makes on purpose, and which are not what this check
+/// is about. Two show up in practice: TextEdit and Notes capitalize the first
+/// word of a sentence (`NSAutomaticCapitalizationEnabled`, on out of the box),
+/// and a single-line field stores a space where it cannot store a newline —
+/// Slack's conversation search does this to all three at once. Both substitute
+/// a character *in place*: same UTF-16 count, same positions, nothing dropped,
+/// reordered, or split across a chunk seam, which is the entire property this
+/// check tests. Reporting either as FAIL would send the next reader to revert
+/// `max: 200` over a setting in the Edit menu, so they are passes — never
+/// silent ones. Anything else returns nil and stays a real failure.
+func hostTextPolicy(landed: String, expected: String) -> String? {
+    guard landed != expected, landed.utf16.count == expected.utf16.count else { return nil }
+    func spaced(_ s: String) -> String { s.replacingOccurrences(of: "\n", with: " ") }
+    // The gate: identical once case and newline-vs-space are set aside.
+    guard spaced(landed).lowercased() == spaced(expected).lowercased() else { return nil }
+    var why: [String] = []
+    if expected.contains("\n"), !landed.contains("\n") {
+        why.append("newlines stored as spaces (single-line field)")
+    }
+    if spaced(landed) != spaced(expected) { why.append("auto-capitalized") }
+    return why.isEmpty ? "host text policy, same length and positions" : why.joined(separator: " + ")
+}
+
 var failed = false, skipped = 0
 for c in cases {
     if let focusRefusal {
@@ -186,23 +297,55 @@ for c in cases {
     }
     // Read the field before and after so pre-existing content doesn't count
     // against us; that is also how Inserter itself verifies before erasing.
-    let before = Inserter.focusedFieldText() ?? ""
+    let before = settledText() ?? ""
     Inserter.typeUnicode(c.text)
-    Thread.sleep(forTimeInterval: 0.6) // let the app's event queue drain
-    guard let after = Inserter.focusedFieldText() else {
+    guard let after = settledText(changingFrom: before) else {
         // Distinguish the two very different reasons, because they need
         // different actions: nothing focused (click into a field) versus a
         // focused field AX won't read (point at a different app).
-        let why = Inserter.focusTarget() == .none
-            ? "nothing is focused — click into a text field in \(bundleID) first"
-            : "focused, but AX exposes no text value for this field"
+        let why = echoFile.map { "cannot read the echo file \($0)" }
+            ?? (Inserter.focusTarget() == .none
+                ? "nothing is focused — click into a text field in \(bundleID) first"
+                : "focused, but AX exposes no text value for this field")
         print("SKIP \(c.name) — \(why)")
         skipped += 1
         continue
     }
+    // The whole diff rests on the readback being append-only. It is not, for a
+    // terminal: the AX value is the visible screen, so a long payload scrolls
+    // `before` off the top and `after.dropFirst(before.count)` returns a slice
+    // of unrelated text. That is worse than no answer — it prints FAIL and
+    // "characters were DROPPED" for an app that dropped nothing, and the
+    // documented response to a FAIL here is to revert the chunk size. If the
+    // prefix is gone, we cannot know what landed, so we say exactly that.
+    guard after.hasPrefix(before) else {
+        print("SKIP \(c.name) — the readback is not append-only: what was there "
+            + "before is no longer a prefix of what is there now, so nothing can be "
+            + "attributed to this run."
+            + (echoFile == nil ? " Terminals do this; re-run with --echo-file." : ""))
+        skipped += 1
+        continue
+    }
     let landed = String(after.dropFirst(before.count))
+    // A readback that did not move at all is not evidence of loss. VS Code and
+    // Cursor's editor publishes an empty AXValue and says so in its
+    // AXDescription ("The editor is not accessible at this time. To enable
+    // screen reader optimized mode, use Shift+Option+F1"), so every case would
+    // diff "" against "" and be reported as total character loss by an app that
+    // dropped nothing. We cannot tell that apart from a genuine total drop
+    // through AX alone — so say which we can't tell, and verify the app a way
+    // that doesn't go through AX (--echo-file) instead of guessing.
+    if landed.isEmpty, !c.text.isEmpty {
+        print("SKIP \(c.name) — the field's readback did not change at all. Either it "
+            + "does not publish its contents to AX, or nothing was typed; this cannot "
+            + "distinguish them. Re-run with --echo-file to verify \(bundleID) on bytes.")
+        skipped += 1
+        continue
+    }
     if landed == c.text {
         print("PASS \(c.name) (\(c.text.utf16.count) units)")
+    } else if let policy = hostTextPolicy(landed: landed, expected: c.text) {
+        print("PASS \(c.name) (\(c.text.utf16.count) units) — \(policy); no characters lost")
     } else {
         failed = true
         print("FAIL \(c.name)")
@@ -210,6 +353,13 @@ for c in cases {
         print("  landed   \(landed.utf16.count) units: \(landed.prefix(60))…")
         if landed.count < c.text.count { print("  -> characters were DROPPED") }
     }
+    // Cosmetic only, and not always delivered: a payload that is *nothing but*
+    // newlines does not reach Ghostty at all, and a single "\n" arrives as a
+    // literal "a" — virtualKey 0 (the A key) showing through when the app
+    // ignores the unicode string. Newlines inside text are unaffected ("X\n\nY"
+    // lands exactly), and Parla never sends a bare newline to a terminal because
+    // TextRules.flattenForTerminal strips them first. The diff above is
+    // positional, so a separator that vanishes changes no verdict.
     Inserter.typeUnicode("\n\n")
 }
 
@@ -218,6 +368,17 @@ if skipped == cases.count {
         + "field exposes an AX value (TextEdit, Terminal, Notes) to get a real result.")
     exit(3)
 }
-print(failed ? "\nFAILED — do not ship the 200-unit chunk against \(bundleID)"
-             : "\nOK — \(cases.count - skipped)/\(cases.count) verified against \(bundleID)")
-exit(failed ? 1 : 0)
+if failed {
+    print("\nFAILED — do not ship the 200-unit chunk against \(bundleID)")
+    exit(1)
+}
+// A partial skip is not a pass either. Exiting 0 with unverified cases is how a
+// green CI line comes to stand for work nobody did, and this tool's whole point
+// is that it never reports more than it checked.
+if skipped > 0 {
+    print("\nINCONCLUSIVE — \(cases.count - skipped)/\(cases.count) verified against "
+        + "\(bundleID), \(skipped) unverified. Nothing failed, but nothing covers those.")
+    exit(3)
+}
+print("\nOK — \(cases.count)/\(cases.count) verified against \(bundleID)")
+exit(0)

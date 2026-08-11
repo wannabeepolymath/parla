@@ -273,10 +273,47 @@ units.
 `swift run` builds an unsigned binary under `.build`, and macOS grants
 Accessibility per binary, so that path has to be added under System Settings >
 Privacy & Security > Accessibility (a rebuild can require re-granting). A field
-it can type into but not read back is **SKIP, never PASS**; if every case skips
-it exits 3, so a run that verified nothing cannot look like success. A 90s
-watchdog exits 4 rather than hanging. Otherwise: 0 ok, 1 a case failed, 2
-permission or target problem.
+it can type into but not read back is **SKIP, never PASS**, and skips are never
+folded into success: every case skipping exits 3, and so does a *partial* skip,
+because a green line that stands for work nobody did is the failure mode this
+tool exists to prevent. A 90s watchdog exits 4 rather than hanging. Otherwise:
+0 all cases verified, 1 a case failed, 2 permission or target problem.
+
+Three flags, each of which exists because some real app could not be checked
+without it:
+
+| Flag | Why |
+|---|---|
+| `--echo-file <path>` | Read the text back from a file the target echoes into instead of over AX. Required for **terminals**: their AX value is the visible screen (Ghostty: a fixed 52-line, 183-column buffer), so a 630-character payload scrolls the "before" off the top and the before/after diff is undefined rather than merely noisy. Also the only way to read an **editor** that publishes no AX value — see below. |
+| `--field-role <AXRole>` | Aim the walk at one role. The first text input an app exposes is not always safe to type into: Slack's preferred `AXTextArea` is the message composer, where a newline **posts to a real channel**. `--field-role AXTextField` picks its conversation search box — same Chromium input path, reaching nobody. |
+| `--field-index <N>` | Pick the Nth match (1-based). Cursor and VS Code expose their **AI chat box** as an `AXTextArea` *before* the editor, and a newline there sends a prompt. |
+
+**Terminals** (byte-exact, no AX readback involved) — in a window you don't mind
+losing, and note `stty -icanon`, or canonical mode holds the 630-character line
+until Return and it reads back empty:
+
+```
+stty -icanon min 1 time 0; exec cat > /tmp/parla-echo.txt
+swift run parla-insert-check com.mitchellh.ghostty --echo-file /tmp/parla-echo.txt
+```
+
+**VS Code / Cursor.** The editor reports an empty `AXValue` and says why in its
+`AXDescription` ("The editor is not accessible at this time…"), so AX cannot
+verify it at all. Give it a scratch workspace with autosave and read the file:
+
+```
+mkdir -p /tmp/parla-check/.vscode && : > /tmp/parla-check/scratch.txt
+echo '{ "files.autoSave": "afterDelay", "files.autoSaveDelay": 200 }' > /tmp/parla-check/.vscode/settings.json
+open -a Cursor /tmp/parla-check && open -a Cursor /tmp/parla-check/scratch.txt
+swift run parla-insert-check <bundleID> --echo-file /tmp/parla-check/scratch.txt
+```
+
+A difference that is the host app's own text policy — TextEdit capitalizing the
+first word of a sentence, a single-line field storing a space where it cannot
+store a newline — is reported as a **PASS with the reason named**, because both
+substitute a character in place: same UTF-16 count, same positions, nothing
+dropped or split at a chunk seam. Calling those FAIL would send the next reader
+to revert `max: 200` over a setting in the Edit menu.
 
 ### Environment switches
 

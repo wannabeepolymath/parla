@@ -20,7 +20,9 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 7 | 0 | 0 | 0 |
 | **all** | **29** | **29** | **0** | **0** | **0** |
 
-Suite: **396 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
+Suite: **398 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
+Tier 0 #8 **verified against 4 live apps** (below). Tier 1 #14 **still unsettled** —
+blocked on an Anthropic API key, not on effort.
 
 ---
 
@@ -58,7 +60,7 @@ are never parallelised.
 | 5 | Fence transcript + injection guards in cleanup prompt | `ParlaCore/Cleanup.swift` | S | low | **done** | wave 1 |
 | 6 | Strip whisper markers per segment | `ParlaCore/Transcriber.swift` + tests | S | low | **done** | wave 1 |
 | 7 | Delete `AXEnhancedUserInterface` write | `ParlaCore/Inserter.swift:97` | S | low | **done** | wave 1 |
-| 8 | Chunk 20→200 units, cut inter-chunk sleep | `ParlaCore/Inserter.swift` | S | **med** | **done** | ⚠ smoke test pending |
+| 8 | Chunk 20→200 units, cut inter-chunk sleep | `ParlaCore/Inserter.swift` | S | **med** | **done** | ✅ verified, 4 apps |
 
 ### Wave 1 notes
 
@@ -145,26 +147,95 @@ and a field it cannot read back is **SKIP, never PASS** — it distinguishes
 "nothing focused" from "focused but AX exposes no value" so the reader knows
 which to fix.
 
-**Still needs a human for one click.** I could not complete a run from a
-background shell: the focused element stays my own terminal, so every case
-skipped and the tool correctly reported "nothing was verified" rather than
-claiming success. Run it, click into TextEdit/Terminal/Notes, and it gives a
-real verdict — including against Slack and Ghostty by bundle ID.
+**No longer needs a human at all** — see the verified result below. The previous
+session's blocker (AX reporting 0 windows for TextEdit while CGWindowList saw 3)
+did not reproduce; Accessibility is inherited by binaries launched from this
+session's process tree, and `AXIsProcessTrusted()` plus a live `AXWindows` read
+both answer. What actually stopped it was the tool, in six separate places.
 
-### ⚠ Outstanding manual verification — Tier 0 #8
+### ✅ Tier 0 #8 verified — 4 apps, 20/20 cases, nothing dropped
 
-Chunk size is now 200 UTF-16 units (was 20) and the inter-chunk sleep is 1ms
-(was 5ms). `typeBackspaces` was deliberately left at 5ms — erasing is the
-dangerous path and `ISSUES.md` §6 is about erase safety.
+Chunk size is 200 UTF-16 units (was 20) and the inter-chunk sleep is 1ms (was
+5ms). `typeBackspaces` was deliberately left at 5ms — erasing is the dangerous
+path and `ISSUES.md` §6 is about erase safety. **The 200-unit chunk stands; do
+not revert.**
 
-Unit tests cover the chunking property and the 600-char → 3-bursts regression.
-They cannot cover how a real app frames the bursts. **Someone has to dictate a
-long multi-line transcript into Slack, Ghostty and VS Code and confirm no
-dropped characters and no `[Pasted text #N]` fan-out.** This is the one Tier 0
-change with a real regression surface (`ISSUES.md` §5–7 is a history of
-insertion bugs in exactly these apps), and it is the only automated-test gap in
-Tier 0. Revert to `max: 20` / `usleep(5_000)` if it misbehaves — the change is
-two constants.
+| Target | How it was read back | Result |
+|---|---|---|
+| TextEdit (AppKit) | AX value | **5/5** |
+| Ghostty (terminal) | bytes, via `cat > file` | **5/5** |
+| Slack (Chromium) | AX value, search field | **5/5** |
+| Cursor (Chromium editor) | bytes, via autosaved file | **5/5** |
+
+VS Code is **not installed on this machine**; Cursor is a VS Code fork with the
+same Electron/Chromium text-input path and stands in for it. That substitution
+is the one gap in the coverage the backlog asked for.
+
+Two of the four are byte-exact against a file, which is stronger than an AX
+readback: the 630-character payload was independently confirmed present and
+complete in both. No `[Pasted text #N]` fan-out anywhere.
+
+**Getting a real verdict took fixing six defects in the check itself** — it had
+never completed a run, so none of them had ever been exercised. Two would have
+produced a *false* FAIL, and the documented response to a FAIL here is to revert
+the chunk size, so an unfixed tool would have argued for reverting a change that
+is fine:
+
+1. **The drain sleep was on the wrong side of the loop.** The `\n\n` separator
+   got no settle at all, so the next case's `before` was read one keystroke
+   short and that keystroke counted as text we had typed — a 33-unit payload
+   reported as 34. Replaced with a settle-until-stable read.
+2. **Stability alone could not tell "finished" from "hasn't started".** Two
+   equal samples 150 ms apart declared victory on the *old* value, so Cursor's
+   600-char case skipped on every run while the file on disk held all 630
+   characters. The after-read now waits for a change first, then for it to stop.
+3. **`maxDepth: 12` could not see any Electron app.** Measured: Slack's composer
+   is at depth 24, Cursor's editor at 18, its scratch-workspace editor at 29 —
+   all under an `AXWebArea` at depth 8. Every Chromium target returned
+   `.noTextInput` and fell back to asking a human to click, which is exactly what
+   the tool exists to avoid. Now 40, plus `AXManualAccessibility` before the
+   walk (`focusTarget()` already did this; the walk didn't).
+4. **Raising the depth broke the termination guarantee**, so `firstMatch` gained
+   a `NodeBudget`: a self-referencing node with two children is 2^depth, and the
+   existing cyclic test only had branching factor 1, so it passed either way. A
+   new test uses branching factor 2 at depth 40 — without the budget it does not
+   fail, it hangs.
+5. **Chromium applies AX focus asynchronously.** The set succeeds and returns
+   immediately; the read on the next line still says false, so Cursor was
+   reported `.refused` and every case skipped. Now polls up to 1s. AppKit apps
+   answer on the first poll and pay nothing.
+6. **A permanently-empty readback was scored as total character loss.** VS Code
+   and Cursor's editor publishes an empty `AXValue` and says so in its
+   `AXDescription`; `"" vs ""` diffed to "characters were DROPPED". Now a SKIP
+   naming both possibilities, since AX cannot distinguish them.
+
+Also: **a terminal's AX value is not a document.** Ghostty's is the visible
+screen — a fixed 52-line, 183-column buffer that scrolls — so the before/after
+diff is undefined, not merely noisy, and a 630-character payload scrolls its own
+"before" off the top. That is what `--echo-file` is for, and an append-only
+guard now SKIPs rather than inventing a verdict when the prefix is gone.
+
+Three findings that are **not** defects, recorded so nobody re-investigates:
+
+- **TextEdit auto-capitalizes** the first word of a sentence
+  (`NSAutomaticCapitalizationEnabled`, on by default), so three cases came back
+  with one letter changed at identical length. Same for a **single-line field
+  storing a space where it cannot store a newline** (Slack's search box did this
+  to all three newlines). Both substitute a character *in place* — nothing
+  dropped, reordered or split at a seam — so both are now PASS with the reason
+  printed. They were the two false FAILs.
+- **A newline-only payload does not reach Ghostty at all**, and a bare `"\n"`
+  arrives as a literal **`a`** — `virtualKey: 0` (the A key) showing through when
+  the app ignores the unicode string, the same hazard the comment at
+  `Inserter.swift:56` already warns about. Newlines *inside* text are unaffected
+  (`"X\n\nY"` lands exactly). Left alone: `TextRules.flattenForTerminal` strips
+  newlines before they ever reach a terminal, and a 200-unit chunk of nothing but
+  newlines is not producible from speech. It makes the check's separator vanish
+  in terminals, which changes no verdict — the diff is positional.
+- Slack was checked through its **conversation search box**, not its message
+  composer. The composer is the first `AXTextArea` the walk finds, and this check
+  types newlines, which would have posted five messages to a real channel.
+  `--field-role` / `--field-index` exist for that reason.
 
 ### Not yet done from Wave 1's items
 
@@ -175,8 +246,8 @@ two constants.
   importable from `ParlaCoreTests`. Needs a seam in ParlaCore to be testable —
   revisit during Tier 1 #8 (`DictationSession` extraction), which creates one.
 
-Item 8 lands alone, after 1–7, and needs a real smoke test — `ISSUES.md` §5–7
-is a history of insertion regressions in exactly the apps it touches.
+Item 8 landed alone, after 1–7. Its smoke test is now done and green — see
+"Tier 0 #8 verified" above.
 
 ## Tier 1 — high value, more work
 
@@ -218,6 +289,23 @@ installs with an empty model field silently move to Haiku. Users with an explici
 
 **Before trusting this:** `swift run parla-eval --cleanup-only` against both
 models and compare zero-edit rate and p90 WER.
+
+**Attempted, and blocked on a credential — no numbers yet.** The A/B needs the
+Anthropic provider, and on this machine there is no way to reach it:
+`ANTHROPIC_API_KEY` is unset and `anthropicApiKey` is absent from
+`settings.json`. The configured provider is `openai-compatible` against
+**Groq** (`cleanup.baseURL = https://api.groq.com/openai/v1`,
+`cleanup.model = openai/gpt-oss-120b`), so `--model claude-haiku-4-5` would ask
+*Groq* for a Claude model and fail with an infrastructure error, not a quality
+answer. The whisper model and `eval/results.json` are both present, so
+everything except the key is ready; one `ANTHROPIC_API_KEY=… swift run
+parla-eval …` pair settles it.
+
+Worth noting while reading this: the live `settings.json` has
+`cleanupModel = claude-opus-4-6` *and* an openai-compatible provider, so on this
+machine `cleanupModel` is inert — `CleanupFactory` reads `cleanup.model` for
+that provider. The default this item changed therefore affects new installs and
+Anthropic-provider users, not this one.
 
 ### Eval harness — real but not yet load-bearing
 
@@ -524,3 +612,5 @@ swallowed by design because it produces whitespace.
 | 2026-08-11 | Review round 2 (the fix commit itself): 12 raised, **11 confirmed / 1 refuted** — the fixes had introduced 2 majors. All fixed. 373/373 pass. |
 | 2026-08-11 | Review round 3 (twice-wrong subsystems): 13 raised, **9 confirmed / 4 refuted**. AudioRecorder came back fully refuted — dry. Hotkey rebuilt wholesale. 381/381 pass. |
 | 2026-08-11 | Review round 4: 6 raised, **4 confirmed / 2 refuted — all nits, zero majors, zero minors.** Dry. 382/382 pass. |
+| 2026-08-11 | **Tier 0 #8 verified: TextEdit, Ghostty, Slack, Cursor — 20/20 cases, 0 dropped characters, exit 0 each.** Required fixing 6 defects in `parla-insert-check` (2 of which produced false FAILs) and raising the AX walk past Electron depth. 398/398 pass. |
+| 2026-08-11 | Tier 1 #14 A/B attempted; **blocked** — no Anthropic key on this machine (provider is Groq/openai-compatible). No numbers recorded, default unchanged. |

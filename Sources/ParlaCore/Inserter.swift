@@ -193,18 +193,33 @@ public enum Inserter {
     /// box or search field is editable but not somewhere to put 600 characters.
     static let textInputRoles = ["AXTextArea", "AXTextField"]
 
+    /// Nodes a single `firstMatch` may visit. Depth alone stopped being a
+    /// sufficient bound once the limit had to rise past an Electron tree: a
+    /// self-referencing node with two children is 2^depth, so the depth that
+    /// makes Slack reachable also makes a cycle unwalkable. A reference type so
+    /// one budget spans the whole recursion, and defaulted so the pure-logic
+    /// tests keep calling `firstMatch(in:maxDepth:children:matches:)` unchanged.
+    final class NodeBudget {
+        var left: Int
+        init(_ n: Int) { left = n }
+    }
+
     /// First node `matches` accepts, depth-first, left to right. `maxDepth`
-    /// counts the roots as level 1 and bounds the descent, so a deep — or
-    /// self-referencing — tree can't spin the walk forever. Generic over the node
-    /// type only so tests can drive it with a synthetic tree; an AXUIElement
-    /// cannot be constructed in-process.
+    /// counts the roots as level 1 and bounds the descent; `budget` bounds the
+    /// breadth, so a deep — or self-referencing — tree can't spin the walk
+    /// forever. Generic over the node type only so tests can drive it with a
+    /// synthetic tree; an AXUIElement cannot be constructed in-process.
     static func firstMatch<Node>(in roots: [Node], maxDepth: Int,
+                                 budget: NodeBudget = NodeBudget(20_000),
                                  children: (Node) -> [Node],
                                  matches: (Node) -> Bool) -> Node? {
         guard maxDepth > 0 else { return nil }
         for node in roots {
+            guard budget.left > 0 else { return nil }
+            budget.left -= 1
             if matches(node) { return node }
             if let hit = firstMatch(in: children(node), maxDepth: maxDepth - 1,
+                                    budget: budget,
                                     children: children, matches: matches) { return hit }
         }
         return nil
@@ -251,23 +266,55 @@ public enum Inserter {
     /// `.refused` is not `.focused` with a warning — on it the caller must type
     /// nothing, because unverified focus means the keystrokes land in whatever
     /// happens to be frontmost.
-    public static func focusFirstTextInput(pid: pid_t) -> FocusGrab {
+    ///
+    /// `roles` narrows what counts as a target, best-first, and defaults to
+    /// `textInputRoles`. It exists because the first text input in an app is not
+    /// always a safe one to type 600 characters into: in Slack the preferred
+    /// AXTextArea is the message composer, where a newline posts to a real
+    /// channel, while the AXTextField beside it is the conversation search box —
+    /// same Chromium input path, no side effect on anyone else.
+    ///
+    /// `index` (1-based) picks a later match of the same role when the first is
+    /// the wrong one — Cursor and VS Code expose their AI chat box as an
+    /// AXTextArea ahead of the editor, and a newline there sends a prompt.
+    public static func focusFirstTextInput(pid: pid_t, roles: [String]? = nil,
+                                           index: Int = 1) -> FocusGrab {
+        let roles = roles ?? textInputRoles
         let appEl = AXUIElementCreateApplication(pid)
         // Bound each AX message to this app — set on the application element it
         // covers the reads below it too. Without it a wedged target blocks every
         // read for the system default, and the walk makes many of them.
         AXUIElementSetMessagingTimeout(appEl, 1)
+        // Chromium/Electron apps ship no AX tree until an assistive client asks
+        // for one, and the walk below is the ask. Same flag, same reasoning as
+        // `focusTarget()` — and emphatically NOT AXEnhancedUserInterface, which
+        // outlives us and blurs the composer (see the note there).
+        AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        usleep(50_000) // give the app a beat to build its AX tree
         var windowsRef: CFTypeRef?
         // Windows, not the app element, so the menu bar's large subtree is never
-        // walked. Depth 12 is arbitrary but well past the 3-4 levels a standard
-        // document window needs; too small only costs the caller its fallback.
+        // walked. Depth 40 because 12 was measured wrong on the apps that matter
+        // most: Slack's message composer sits at depth 24 and Cursor's editor at
+        // 18, both under an AXWebArea at depth 8, so a 12-level walk returned
+        // .noTextInput for every Electron app — the whole Slack/VS Code half of
+        // ISSUES.md 5-7 — and fell back to asking a human to click. A real tree
+        // costs a few hundred nodes (Slack: 459 to depth 26), and `NodeBudget`
+        // keeps a cyclic one from turning the extra depth into a hang.
         guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &windowsRef) == .success,
               let windows = windowsRef as? [AXUIElement],
               // One walk per role rather than one walk matching either, so the
               // preferred role wins wherever it sits in the tree.
-              let field = textInputRoles.lazy.compactMap({ role in
-                  firstMatch(in: windows, maxDepth: 12, children: axChildren,
-                             matches: { axRole($0) == role })
+              let field = roles.lazy.compactMap({ role -> AXUIElement? in
+                  // The counter rides in `matches` so the nth hit needs no
+                  // second kind of walk: it accepts only when the running count
+                  // reaches `index`, and `firstMatch` stops there as usual.
+                  var seen = 0
+                  return firstMatch(in: windows, maxDepth: 40, children: axChildren,
+                                    matches: {
+                                        guard axRole($0) == role else { return false }
+                                        seen += 1
+                                        return seen == index
+                                    })
               }).first
         else { return .noTextInput }
         AXUIElementSetAttributeValue(field, kAXFocusedAttribute as CFString, kCFBooleanTrue)
@@ -281,7 +328,17 @@ public enum Inserter {
                 AXUIElementSetAttributeValue(field, kAXSelectedTextRangeAttribute as CFString, range)
             }
         }
-        return isFocused(field, of: appEl) ? .focused : .refused
+        // Poll, don't ask once. Setting AXFocused on a Chromium node hands the
+        // request to the renderer process and returns success immediately, so a
+        // read on the next line still says false and a perfectly good field is
+        // reported `.refused` — measured against Cursor, where the set succeeds,
+        // and app- and system-level focus both agree a beat later. AppKit apps
+        // answer on the first poll, so this costs them nothing.
+        for _ in 0..<20 {
+            if isFocused(field, of: appEl) { return .focused }
+            usleep(50_000)
+        }
+        return .refused
     }
 
     /// The focused field's full text, cursor position and selection length (both
