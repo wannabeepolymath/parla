@@ -20,7 +20,7 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 6 | 0 | 0 | 1 |
 | **all** | **29** | **28** | **0** | **0** | **1** |
 
-Suite: **373 tests, 0 failures.** Build clean.
+Suite: **381 tests, 0 failures.** Build clean.
 
 ---
 
@@ -317,6 +317,53 @@ mic indicator stays lit while Parla runs.
 Seven findings were correctly **refuted** by the verifier — including a claimed
 `stripNonSpeech` over-deletion and a claimed duplicate download path.
 
+### Round 3 — the matcher was patched twice and wrong twice
+
+Findings by round: **25 → 11 → 9**. The useful signal is not the count, it is
+that the same two subsystems kept reappearing. By round 3 `AudioRecorder` came
+back **fully refuted** (all four audio findings died in verification) — the warm
+engine is dry. `Hotkey` produced three more majors, so it was rebuilt as a whole
+rather than patched a third time.
+
+- **The hands-free STOP matcher had never been fixed.** Round 2 fixed the
+  *latch* and left its sibling two lines below alone: no `modifiers` term at
+  all, under a comment claiming "bare this time: the trigger has been released,
+  so no chord can match". A verifier swept all 32 modifier sets from the latched
+  state: **64 swallowed, 0 passed through** — ⌘Space, ⌃Space, ⇧Return and
+  ⌘Return destroyed at the tap. Pre-existing, and correctly reclassified by the
+  reviewer as an incomplete fix rather than a new regression.
+- **Two majors from one root cause:** `CGEventFlags` has no left/right
+  distinction, so either key of a modifier pair sets the bit while `handle()`
+  only sees the keycode it is bound to. Pressing the twin of a rebound trigger
+  left the session stuck in `.push`, and the idle latch swallowed keystrokes
+  with no edge forever.
+- **Hand-written arrow/Home/End/Page/F-key chords in settings.json could never
+  match**, because macOS decorates those keycodes with a synthetic fn bit the
+  hand-written spelling does not carry.
+
+The rebuild was mutation-tested per fix by extracting the pure matcher into a
+standalone harness: reverting fix 1 → 116 failing assertions, 2 → 3, 3 → 1,
+4 → 1, 5 → 4. The missing latched-state modifier sweep is now a test.
+
+### The copy fix from round 2 was itself wrong
+
+I reported last round that fixing the copy rather than the warm-mic behaviour
+was the right trade. The trade was right; my execution was not — the rewrite
+replaced one false claim with three:
+
+- "idle audio ... never written to disk" was **false**: the 0.45 s pre-roll is
+  prepended to the capture and written by `RecordingStore` like the rest of it.
+  That is exactly the sentence a privacy-conscious reader would rely on.
+- "keeps the mic open from launch" is untrue for Bluetooth, which is
+  deliberately excluded (holding one open forces 16 kHz call quality and halves
+  headset battery).
+- "transcribes only while you hold" contradicts the shipped hands-free latch —
+  including in `NSMicrophoneUsageDescription`, the one string macOS shows in the
+  permission dialog.
+
+All three now state what the code actually does, with the retention window, the
+deletion point and the eval-corpus opt-in named explicitly.
+
 ## Log
 
 | When | What |
@@ -333,3 +380,4 @@ Seven findings were correctly **refuted** by the verifier — including a claime
 | 2026-08-11 | Closing pass: `LICENSE-COMMERCIAL.md` added. |
 | 2026-08-11 | Review round 1 (whole branch): 32 raised, **25 confirmed / 7 refuted**. All fixed. 367/367 pass. |
 | 2026-08-11 | Review round 2 (the fix commit itself): 12 raised, **11 confirmed / 1 refuted** — the fixes had introduced 2 majors. All fixed. 373/373 pass. |
+| 2026-08-11 | Review round 3 (twice-wrong subsystems): 13 raised, **9 confirmed / 4 refuted**. AudioRecorder came back fully refuted — dry. Hotkey rebuilt wholesale. 381/381 pass. |

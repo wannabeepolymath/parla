@@ -163,6 +163,31 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(out, [.down(command: false), .handsFree, .up(short: false)])
     }
 
+    func testLatchedStateSweepSwallowsOnlyWhitespace() {
+        // The sweep that was missing: from the LATCHED state every one of the 32
+        // modifier sets on Space and Return was swallowed, so ⌘Space (Spotlight),
+        // ⌃Space (input source) and ⌘Return (send) died at the tap. Swallowing is
+        // only justified for the sets that would type whitespace — bare and
+        // shifted — plus the latch chord itself.
+        for raw in 0..<32 {
+            let mods = KeyChord.Modifiers(rawValue: raw)
+            for key: UInt16 in [49, 36] {
+                var out: [HotkeyMonitor.Edge] = []
+                let m = monitor(&out)
+                m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+                _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)   // latch
+                m.handle(keyCode: 63, modifiers: [], at: 0.2)           // trigger released
+                let bare = mods.subtracting(.shift)
+                let stops = bare.isEmpty || (key == 49 && bare == .fn)  // whitespace, or the chord
+                let what = KeyChord(key, mods).display
+                XCTAssertEqual(m.keyDown(keyCode: key, modifiers: mods, at: 1), stops, what)
+                XCTAssertEqual(out, stops
+                    ? [.down(command: false), .handsFree, .up(short: false)]
+                    : [.down(command: false), .handsFree], what)  // else: still recording
+            }
+        }
+    }
+
     func testHandsFreeLatchesInCommandMode() {
         // Command mode is entered by holding shift at push-to-talk, so shift is
         // still down when the latch key arrives: the Space carries [.fn, .shift].
@@ -171,6 +196,33 @@ final class HotkeyTests: XCTestCase {
         m.handle(keyCode: 63, modifiers: [.fn, .shift], at: 0)
         XCTAssertTrue(m.keyDown(keyCode: 49, modifiers: [.fn, .shift], at: 0.1)) // swallowed, not typed
         XCTAssertEqual(out, [.down(command: true), .handsFree])
+    }
+
+    func testCommandModeLatchTailIsSwallowedAfterTheStop() {
+        // Shift stays down through command mode, so the tail Space of the stop
+        // chord arrives as fn+shift+Space. Without the same tolerance the live
+        // latch has, that space leaked into the field right before the transcript.
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn, .shift], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn, .shift], at: 0.1)            // latch
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn, .shift], at: 2)              // stop (fn still held)
+        XCTAssertTrue(m.keyDown(keyCode: 49, modifiers: [.fn, .shift], at: 2.1)) // tail: swallowed
+        XCTAssertEqual(out, [.down(command: true), .handsFree, .up(short: false)])
+    }
+
+    func testIdleLatchChordPassesThroughWhenTheTriggerIsNotHeld() {
+        // The trigger bit can be set without Parla ever seeing the press: the
+        // twin key (CGEventFlags has no left/right), a key held before the tap
+        // started, or one pressed while the Hub was recording a binding. Nothing
+        // is recording, so ⌥Space belongs to the front app (non-breaking space).
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.bindings.pushToTalk = KeyChord(61)          // right option
+        m.bindings.handsFree = KeyChord(49, .opt)
+        XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.opt], at: 0))
+        XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.opt], at: 1)) // and again, forever
+        XCTAssertEqual(out, [])
     }
 
     // MARK: esc + paste-last while idle
@@ -241,15 +293,27 @@ final class HotkeyTests: XCTestCase {
     }
 
     func testIdleChordWithSyntheticFnDoesNotHitHandsFree() {
-        // Idle is exact like every other chord: nothing is held, so the "the
-        // trigger is physically held" premise doesn't apply. macOS sets the fn
-        // bit on arrows/Home/End/Page by itself, so an idle ⇧+PageDown (select
-        // to the end) arrives as [.fn, .shift] and a loose match swallowed it.
+        // macOS sets the fn bit on arrows/Home/End/Page by itself, so an idle
+        // ⇧+PageDown (select to the end) arrives as [.fn, .shift] and spells the
+        // binding exactly. Only the trigger being down makes it ours, and here
+        // nothing is held, so it belongs to the front app.
         var out: [HotkeyMonitor.Edge] = []
         let m = monitor(&out)
         m.bindings.handsFree = KeyChord(121, .fn)                     // fn+PageDown
         XCTAssertFalse(m.keyDown(keyCode: 121, modifiers: [.fn, .shift], at: 0))
         XCTAssertEqual(out, [])
+    }
+
+    func testHandWrittenArrowChordFiresOnTheDecoratedEvent() throws {
+        // The other half of that synthetic bit: a chord typed into settings.json
+        // carries no fn, the event always does, so every hand-written arrow /
+        // Home / End / Page / F-key chord was dead on arrival.
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.bindings.pasteLast = try JSONDecoder().decode(
+            KeyChord.self, from: Data("\"ctrl+cmd+down\"".utf8))
+        XCTAssertTrue(m.keyDown(keyCode: 125, modifiers: [.ctrl, .cmd, .fn], at: 0))
+        XCTAssertEqual(out, [.pasteLast])
     }
 
     func testMissingModifierDoesNotFire() {
@@ -269,6 +333,23 @@ final class HotkeyTests: XCTestCase {
         m.handle(keyCode: 63, modifiers: [.fn], at: 0)     // fn is nobody's trigger now
         m.handle(keyCode: 61, modifiers: [.opt], at: 1)
         m.handle(keyCode: 61, modifiers: [], at: 2)
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+    }
+
+    func testTwinOfTheReboundTriggerFinishesTheSession() {
+        // Left and right option set the SAME flag bit, so after the bound right
+        // option is released the bit is still set and no ".up" can fire from it;
+        // the release that clears the bit is the twin's, whose keyCode a keyCode
+        // guard ignores — the session stayed in .push and the next key cancelled.
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.bindings.pushToTalk = KeyChord(61)                 // right option
+        m.bindings.handsFree = KeyChord(49, .opt)
+        m.handle(keyCode: 61, modifiers: [.opt], at: 0)      // right down → push
+        m.handle(keyCode: 58, modifiers: [.opt], at: 0.1)    // left down too
+        m.handle(keyCode: 61, modifiers: [.opt], at: 0.2)    // right up: left still holds the bit
+        XCTAssertEqual(out, [.down(command: false)])         // still recording
+        m.handle(keyCode: 58, modifiers: [], at: 0.5)        // left up: bit clears
         XCTAssertEqual(out, [.down(command: false), .up(short: false)])
     }
 
@@ -342,6 +423,11 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(try parse("alt + shift + space"), KeyChord(49, [.opt, .shift]))
         XCTAssertEqual(try parse("fn"), KeyChord(63))          // fn as the key
         XCTAssertEqual(try parse("fn+space"), KeyChord(49, .fn)) // fn as a modifier
+        // Hand-written and recorded must converge on the keys macOS decorates
+        // with fn all by itself, or the chord can never match an event.
+        XCTAssertEqual(try parse("ctrl+cmd+down"), KeyChord(125, [.ctrl, .cmd, .fn]))
+        XCTAssertEqual(try parse("cmd+f13"), KeyChord(105, [.cmd, .fn]))
+        XCTAssertNotEqual(KeyChord(63, .fn), KeyChord(63))       // not on 63: fn IS the key there
         XCTAssertThrowsError(try parse("ctrl+nope"))
         XCTAssertThrowsError(try parse("hyper+v"))
     }
@@ -410,6 +496,15 @@ final class HotkeyTests: XCTestCase {
         b.pushToTalk = KeyChord(61)            // right option
         XCTAssertNotNil(b.problem())           // hands-free still fn+Space ⇒ unreachable
         b.handsFree = KeyChord(49, .opt)
+        XCTAssertNil(b.problem())
+    }
+
+    func testHandsFreeOnAnFnDecoratedKeyStaysReachable() {
+        // fn+Down stores no fn (macOS adds it to every arrow press anyway), so
+        // the "must include fn" check must not read it as unreachable — that
+        // would revert the whole set to the defaults behind the user's back.
+        var b = HotkeyBindings()
+        b.handsFree = KeyChord(125, .fn)       // fn+Down
         XCTAssertNil(b.problem())
     }
 

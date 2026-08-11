@@ -210,6 +210,70 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(third?.promptTokens, 111)    // billed here, not to the orphan
     }
 
+    /// The interleaving a "replace the park on every fn-down" rule destroys:
+    /// dictation 2 is cancelled (Esc, or a short tap) while dictation 1's polish
+    /// is still out. A cancel never lands, so it proves nothing about 1's POST —
+    /// evicting the park on dictation 3's fn-down bills 1's swap and tokens to 3.
+    func testCancelledDictationDoesNotEvictAParkWhosePolishIsStillOut() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        // Dictation 1 lands; its cleanup POST is still out.
+        metrics.mark(.fnDown, at: ms(1000))
+        metrics.mark(.fnUp, at: ms(3000))
+        metrics.mark(.landed, at: ms(3450))
+        metrics.update { $0.model = "small.en" }
+
+        // Dictation 2 starts (parking 1) and is cancelled: no fn-up, no landing,
+        // no history row — nothing that says anything about 1.
+        metrics.mark(.fnDown, at: ms(5000))
+        // Dictation 3 starts while 1's POST is *still* out.
+        metrics.mark(.fnDown, at: ms(6000))
+        metrics.mark(.fnUp, at: ms(7000))
+
+        // 1's polish finally resolves and 1's row is written.
+        metrics.update { $0.cleanupModel = "claude-haiku-4-5"; $0.promptTokens = 400 }
+        metrics.mark(.cleanedSwapped, at: ms(7200))
+        let first = metrics.snapshot()
+        XCTAssertEqual(first?.captureMs, 2000)  // 1's own fn-down→fn-up, not 3's
+        XCTAssertEqual(first?.cleanupMs, 3750)  // landed 3450 → swapped 7200
+        XCTAssertEqual(first?.model, "small.en")
+        XCTAssertEqual(first?.promptTokens, 400)
+
+        // Dictation 3 kept its own stamps and was billed none of 1's numbers.
+        metrics.mark(.landed, at: ms(7400))
+        metrics.mark(.cleanedSwapped, at: ms(7600))
+        let third = metrics.snapshot()
+        XCTAssertEqual(third?.captureMs, 1000)  // 6000 → 7000
+        XCTAssertEqual(third?.cleanupMs, 200)   // 7400 → 7600, not 1's swap
+        XCTAssertNil(third?.promptTokens)
+        XCTAssertNil(third?.cleanupModel)
+    }
+
+    /// The other half of the rule: a park whose swap already came back is owed
+    /// nothing even when the dictations after it never land (here one that heard
+    /// no transcript). Its own write never claimed it because history was off
+    /// when it swapped, so it must be dropped rather than handed to a later row.
+    func testResolvedParkIsNotClaimedByALaterDictationsRow() {
+        let metrics = Metrics()
+        let ms: (UInt64) -> UInt64 = { $0 * 1_000_000 }
+        metrics.mark(.fnDown, at: ms(1000))         // dictation 1, history off
+        metrics.mark(.fnUp, at: ms(2500))
+        metrics.mark(.landed, at: ms(2600))         // …so no row is ever written
+
+        metrics.mark(.fnDown, at: ms(4000))         // parks 1
+        metrics.update { $0.promptTokens = 400 }
+        metrics.mark(.cleanedSwapped, at: ms(4200)) // 1's polish is back, unclaimed
+        metrics.mark(.fnUp, at: ms(4500))           // dictation 2: silence…
+        metrics.mark(.finalPassDone, at: ms(4600))  // …no transcript, never lands
+
+        metrics.mark(.fnDown, at: ms(7000))         // dictation 3, history back on
+        metrics.mark(.fnUp, at: ms(8000))
+        metrics.mark(.landed, at: ms(8100))
+        let third = metrics.snapshot()
+        XCTAssertEqual(third?.captureMs, 1000)      // 7000 → 8000, not 1's 1500
+        XCTAssertNil(third?.promptTokens)           // 1's tokens stayed with 1
+    }
+
     func testPricingLongestPrefixWinsAndUnknownIsUnpriced() {
         // 400 in + 130 out on Haiku 4.5 ($1/$5 per MTok).
         XCTAssertEqual(CleanupPricing.usd(model: "claude-haiku-4-5-20251001",

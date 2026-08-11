@@ -19,10 +19,13 @@ struct OnboardingView: View {
 
     private static let titles = ["Give Parla permission", "Pick a speech model", "Try it out"]
     private static let subtitles = [
-        // Says "keeps the mic open", not "listens only while you hold": since
-        // AudioRecorder.prepare() the input unit runs from launch, so the old
-        // copy promised a closed mic the app does not have.
-        "Parla keeps the mic open so dictation starts instantly, transcribes only while you hold a key, and types the result into whatever you're using.",
+        // Says the mic is held open, not "listens only while you hold": since
+        // AudioRecorder.prepare() the input unit runs between dictations, so the
+        // old copy promised a closed mic the app does not have. "What you
+        // dictate" rather than "while you hold" because fn+Space latches
+        // hands-free and keeps recording past the release. The Bluetooth
+        // exception to holding it open is on the permission row below.
+        "Parla holds the mic open between dictations so one starts instantly, transcribes only what you dictate, and types the result into whatever you're using.",
         "Speech recognition runs on this Mac. Nothing you say leaves it.",
         "One dictation, straight into this window — nothing is typed anywhere else."
     ]
@@ -125,8 +128,8 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 18) {
             HubSection("Permissions") {
                 HubRow("Microphone",
-                       detail: "Stays open so dictation starts instantly; transcribes only "
-                           + "while you hold the push-to-talk key") {
+                       detail: "Held open between dictations (not Bluetooth ones) so one starts "
+                           + "instantly; only what you dictate is transcribed") {
                     if model.micGranted {
                         StatusChip(text: "Granted")
                     } else {

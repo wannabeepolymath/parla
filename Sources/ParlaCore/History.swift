@@ -105,9 +105,14 @@ public final class Metrics: @unchecked Sendable {
         /// Set by the history write — the only signal that a dictation is done
         /// with this collector.
         var snapshotted = false
+        /// Reached the field. Also the proof that any *earlier* dictation's
+        /// polish leg has returned: landing happens inside the leg that the
+        /// processTask chain runs one at a time, and the previous leg holds the
+        /// chain across its polish await and its `.cleanedSwapped` send.
+        var hasLanded: Bool { stamps[.landed] != nil }
         /// Landed, but no history row yet: the cleanup POST that fills in the
         /// tokens may still be out, so this bucket must survive the next fn-down.
-        var awaitingHistory: Bool { stamps[.landed] != nil && !snapshotted }
+        var awaitingHistory: Bool { hasLanded && !snapshotted }
         /// The polish came back — nothing further is owed to this dictation.
         var polishResolved: Bool { stamps[.cleanedSwapped] != nil }
 
@@ -141,8 +146,8 @@ public final class Metrics: @unchecked Sendable {
     private let lock = NSLock()
     private var current = Bucket()
     /// The previous dictation, held back by fn-down because its history row
-    /// hadn't been written yet. Retired by that write, or by the next fn-down
-    /// when the polish it is waiting for never comes back.
+    /// hadn't been written yet. Retired by that write, or dropped at an fn-down
+    /// that can prove nothing more is owed to it — see the table in `mark`.
     private var parked: Bucket?
 
     public init() {}
@@ -154,11 +159,36 @@ public final class Metrics: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if stamp == .fnDown {
-            // A park is owed at most the polish of the dictation starting here: by
-            // the next fn-down its own write has consumed it, or its POST never
-            // came back at all. An orphan left in place would swallow every later
-            // `update()` and stamp, so the park never survives a second fn-down.
-            parked = current.awaitingHistory ? current : nil
+            // Eviction table. The park exists for exactly one thing — a cleanup
+            // POST that outlives the dictation that issued it — so the only
+            // question here is whether the park can still be owed one. Two facts
+            // answer it, and nothing else does:
+            //   (1) its own `.cleanedSwapped` already came back, or
+            //   (2) the dictation ending here reached `.landed`, which the
+            //       processTask chain permits only after the park's polish leg
+            //       returned (see `hasLanded`).
+            //
+            //   how the dictation ending here ended | park is           | action
+            //   ------------------------------------|-------------------|------------------
+            //   landed, its row already written     | owed nothing (2)  | drop the park
+            //   landed, row still to come           | owed nothing (2)  | park this one
+            //   cancelled (Esc / short tap)         | unknown, no (2)   | keep unless (1)
+            //   refused (focus went secure)         | unknown, no (2)   | keep unless (1)
+            //   mic failed to start                 | unknown, no (2)   | keep unless (1)
+            //   no transcript (silence / too short) | unknown, no (2)   | keep unless (1)
+            //
+            // The four "unknown" rows are why this is not "replace the park on
+            // every fn-down": those dictations never land, so they say nothing
+            // about a POST that is still out, and evicting on them throws away
+            // the numbers and re-bills the late swap to the wrong dictation.
+            //
+            // ponytail: "row still to come" also matches a dictation that landed
+            // while history was disabled — no row is ever written for it, so it
+            // parks as if a polish were out. Nothing reads metrics while history
+            // is off; if that ever has to be exact, have the polish leg say a
+            // POST is outstanding instead of inferring it from a missing write.
+            if current.hasLanded || parked?.polishResolved == true { parked = nil }
+            if current.awaitingHistory { parked = current }
             current = Bucket()
         }
         // Only the polish result belongs to the parked dictation, and only while

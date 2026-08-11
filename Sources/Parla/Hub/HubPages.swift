@@ -13,8 +13,8 @@ struct GeneralPage: View {
             HubSection("Permissions") {
                 permissionRow("Microphone", granted: model.micGranted,
                               pane: "Privacy_Microphone",
-                              detail: "Stays open so dictation starts instantly; "
-                                  + "transcribes only while you hold fn")
+                              detail: "Held open between dictations (not Bluetooth ones) so one "
+                                  + "starts instantly; only what you dictate is transcribed")
                 HubDivider()
                 permissionRow("Accessibility", granted: model.axGranted,
                               pane: "Privacy_Accessibility",

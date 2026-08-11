@@ -51,10 +51,12 @@ On first launch Parla lives in the menu bar (no dock icon) and shows 🎤. macOS
 will prompt for **Microphone** and **Accessibility** permission — grant both in
 System Settings > Privacy & Security. Then hold **fn 🌐 (Globe)** and speak;
 release to transcribe and type the text into the frontmost app instantly, with
-a cleaned-up version swapped in moments later. Taps shorter than 200ms are
-treated as an accidental Globe press and discarded; pressing any other key
-while fn is held cancels the dictation and undoes anything already typed.
-Start/finish/cancel each play a soft system sound.
+a cleaned-up version swapped in moments later. For anything longer, press
+**Space** while still holding fn to latch hands-free: recording continues
+after you let go, until you press fn, Space or Return. Taps shorter than
+200ms are treated as an accidental Globe press and discarded; pressing any
+other key while fn is held cancels the dictation and undoes anything already
+typed. Start/finish/cancel each play a soft system sound.
 
 The menu-bar icon reflects state: 🎤 idle · 🔴 recording · … processing · ⬇️
 N% downloading the model · ⚠️ problem (no model, mic/Accessibility permission
@@ -124,15 +126,28 @@ fields and empty selections refuse before recording even starts.
 
 Parla needs:
 
-- **Microphone** — Parla keeps it open from launch so dictation starts instantly; only what you say while holding the hotkey is transcribed.
+- **Microphone** — Parla holds it open between dictations so one starts instantly; only what you dictate is transcribed. The exceptions, and what reaches disk, are below.
 - **Accessibility** — to listen for the global hotkey and type text into the frontmost app (System Settings > Privacy & Security > Accessibility).
 
-Because the mic stays open — that is what removes 240–700 ms of audio-engine
-start from every press — macOS shows its orange mic indicator for as long as
-Parla is running, not just while you dictate. Idle audio goes into a 1-second
-in-memory buffer that is continuously overwritten and never written to disk;
-only what you say while holding the hotkey is transcribed, plus the 0.45 s
-before the press so your first word isn't clipped, and all of it on this Mac.
+Because Parla holds the mic open between dictations — that is what removes
+240–700 ms of audio-engine start from every press — macOS's orange mic
+indicator is lit while Parla sits idle, not only while you dictate. Bluetooth
+mics are the exception: holding one open drags the headset down to 16 kHz call
+quality and roughly halves its battery, so Parla opens and closes those per
+dictation instead (no idle indicator, and the engine start is back on the
+press). Idle audio goes into a 1-second in-memory ring that is continuously
+overwritten; at each press the newest 0.45 s of it is prepended to the
+dictation so your first word isn't clipped.
+
+That dictation's audio — the prepended 0.45 s included — is written to
+`~/Library/Application Support/Parla/recordings` before whisper runs, so a
+crash mid-transcription can't take what you just said with it, and is deleted
+the moment a transcript comes back. Only dictations that failed are left
+behind, and those go after 7 days; the Hub's **Data & Privacy** page shows the
+folder, its size, and a button to empty it. (Setting
+`PARLA_KEEP_RECORDINGS=1` keeps successful dictations too, to build an eval
+corpus; the Hub shows a banner for as long as it is on.) Transcription itself
+runs on this Mac, and the cleanup model is sent text, never audio.
 
 Password fields (`AXSecureTextField`) are detected via Accessibility and
 refused outright: dictation into one shows "Not supported in password

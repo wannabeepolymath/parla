@@ -17,8 +17,8 @@ public struct KeyChord: Equatable, Sendable {
         public static let opt = Modifiers(rawValue: 1 << 2)
         public static let shift = Modifiers(rawValue: 1 << 3)
         /// macOS also sets this on arrows, Home/End/Page and the F-keys with no
-        /// fn physically held. Harmless: recording and matching read the same
-        /// bit from the same OS, so such a chord still round-trips.
+        /// fn physically held — `KeyChord.normalized` drops it on exactly those
+        /// keys so a hand-written chord can still equal a recorded one.
         public static let fn = Modifiers(rawValue: 1 << 4)
 
         public init(_ flags: NSEvent.ModifierFlags) {
@@ -47,12 +47,28 @@ public struct KeyChord: Equatable, Sendable {
 
     public init(_ keyCode: UInt16, _ modifiers: Modifiers = []) {
         self.keyCode = keyCode
-        self.modifiers = modifiers
+        self.modifiers = Self.normalized(keyCode, modifiers)
     }
 
-    /// Exact modifier equality — see the type doc.
+    /// Exact modifier equality — see the type doc. Both sides must be normalized
+    /// (chords are, at init; `HotkeyMonitor.keyDown` normalizes the event once).
     public func matches(_ keyCode: UInt16, _ modifiers: Modifiers) -> Bool {
         self.keyCode == keyCode && self.modifiers == modifiers
+    }
+
+    /// Keycodes macOS decorates with the fn bit on its own, nothing held.
+    /// Deliberately NOT 63: there fn is the key, not a decoration.
+    static let fnDecorated: Set<UInt16> = [
+        115, 116, 117, 119, 121, 123, 124, 125, 126,             // Home/Page/FwdDel/End/arrows
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111,  // F1–F12
+        105, 107, 113, 106, 64, 79, 80, 90,                      // F13–F20
+    ]
+
+    /// Drops the fn bit macOS adds by itself. Without it a hand-written
+    /// "ctrl+cmd+down" (no fn) and the key event (fn set) never converge, so
+    /// every arrow / Home / End / Page / F-key chord in settings.json is dead.
+    public static func normalized(_ keyCode: UInt16, _ modifiers: Modifiers) -> Modifiers {
+        fnDecorated.contains(keyCode) ? modifiers.subtracting(.fn) : modifiers
     }
 
     /// The modifier a modifier key carries, nil for ordinary keys. Caps lock is
@@ -190,7 +206,10 @@ public struct HotkeyBindings: Codable, Equatable, Sendable {
             }
             if chord.keyCode == 53 { return "\(name) can't be Esc — Esc always cancels" }
         }
-        if !handsFree.modifiers.contains(trigger) {
+        // An fn-decorated key carries fn without spelling it (`KeyChord.normalized`
+        // strips the bit), so it reaches an fn trigger anyway.
+        if !handsFree.modifiers.contains(trigger),
+           !(trigger == .fn && KeyChord.fnDecorated.contains(handsFree.keyCode)) {
             return "hands-free is pressed while holding push to talk, so it must include \(pushToTalk.display)"
         }
         for (name, chord) in named.dropFirst() {  // the two idle chords
@@ -255,6 +274,10 @@ public final class HotkeyMonitor {
 
     private enum Session { case idle, push, handsFree }
     private var session = Session.idle
+    /// The trigger's flag bit as of the last flagsChanged on one of its keys.
+    /// `session` alone can't tell a latch chord that is the tail of the press
+    /// which just stopped a session from the front app's own chord.
+    private var triggerHeld = false
     private var downAt: TimeInterval = 0
     private var tap: CFMachPort?
     private let store: SettingsStore
@@ -270,10 +293,14 @@ public final class HotkeyMonitor {
     /// flag, and the release after latching must not finish early (session ≠ .push).
     public func handle(keyCode: UInt16, modifiers: KeyChord.Modifiers, at time: TimeInterval) {
         // Other modifiers arrive via flagsChanged too (shift is keyCode 56/60),
-        // so this guard drops them — they can never double-fire .down.
-        guard keyCode == bindings.pushToTalk.keyCode,
-              let trigger = KeyChord.modifierKey(keyCode) else { return }
+        // so this guard drops them — they can never double-fire .down. It
+        // compares the modifier, not the keyCode: CGEventFlags has no left/right,
+        // so the TWIN of the bound key sets the very bit `active` reads, and a
+        // keyCode guard would watch for a release whose event never comes.
+        guard let trigger = KeyChord.modifierKey(bindings.pushToTalk.keyCode),
+              KeyChord.modifierKey(keyCode) == trigger else { return }
         let active = modifiers.contains(trigger)
+        triggerHeld = active
         if active, session == .idle {
             session = .push
             downAt = time
@@ -290,33 +317,38 @@ public final class HotkeyMonitor {
     /// keyDown. Returns true when the event must be swallowed (never reach the
     /// front app). `modifiers` are the key event's own flags; every chord matches
     /// them EXACTLY (see `KeyChord`) — hands-free tolerates shift, see below.
-    public func keyDown(keyCode: UInt16, modifiers: KeyChord.Modifiers = [],
+    public func keyDown(keyCode: UInt16, modifiers rawModifiers: KeyChord.Modifiers = [],
                         at time: TimeInterval) -> Bool {
-        // Hands-free is exact too, with ONE tolerance: SHIFT, and only while a
-        // session is live. Command mode is entered by holding shift at
-        // push-to-talk, so the latch key arrives as fn+shift+Space and exact
-        // would make the latch unreachable there; the union runs both ways so a
-        // binding that itself contains shift still matches without it. Anything
-        // wider steals chords that are not ours — fn+⌘+Space (Spotlight) and
-        // fn+⌃+Space (input source) must cancel and PASS THROUGH, not latch.
-        // Idle stays strictly exact: nothing is held there, and macOS decorates
-        // arrows/Home/End/Page with the fn bit on its own, so a synthetic fn
-        // could otherwise match a chord that belongs to the front app.
-        let latch = session == .idle
-            ? modifiers == bindings.handsFree.modifiers
-            : modifiers.union(.shift) == bindings.handsFree.modifiers.union(.shift)
-        if keyCode == bindings.handsFree.keyCode, latch { // latch / stop
+        // Chords are stored normalized (`KeyChord.init`), so the event has to be
+        // too or no arrow / Home / End / Page / F-key chord can ever match.
+        let modifiers = KeyChord.normalized(keyCode, rawModifiers)
+        // Hands-free is exact too, with ONE tolerance: SHIFT. Command mode is
+        // entered by holding shift at push-to-talk, so the latch key arrives as
+        // fn+shift+Space and exact would make the latch unreachable there; the
+        // union runs both ways so a binding that itself contains shift still
+        // matches without it. Anything wider steals chords that are not ours —
+        // fn+⌘+Space (Spotlight) and fn+⌃+Space (input source) must cancel and
+        // PASS THROUGH, not latch.
+        if keyCode == bindings.handsFree.keyCode,
+           modifiers.union(.shift) == bindings.handsFree.modifiers.union(.shift) {
             switch session {
             case .push: // convert the held push-to-talk: recording survives the trigger release
                 session = .handsFree
                 onEdge?(.handsFree)
-            case .handsFree: // trigger held since the latch, so the stop above never fired
+                return true
+            case .handsFree: // trigger held since the latch, so the stop below never fired
                 session = .idle
                 onEdge?(.up(short: time - downAt < shortTapThreshold))
-            case .idle: // the trigger press just stopped the session — swallow, no restart
+                return true
+            case .idle where triggerHeld:
+                return true // the trigger press just stopped the session — swallow, no restart
+            case .idle:
+                // Nothing is recording and the trigger is not down, so this is
+                // the front app's chord: fall through. The flags alone can't say
+                // otherwise — the trigger's twin sets the same bit, and macOS
+                // sets fn on arrows/Home/End/Page by itself.
                 break
             }
-            return true
         }
         if keyCode == 53, session != .idle { // Esc: cancel the dictation
             session = .idle
@@ -328,9 +360,13 @@ public final class HotkeyMonitor {
             onEdge?(.cancel)
             return false
         }
-        // The latch key or Return stop hands-free, bare this time: the trigger
-        // has been released, so no chord can match.
-        if session == .handsFree, keyCode == bindings.handsFree.keyCode || keyCode == 36 {
+        // The latch key or Return also stop hands-free once the trigger is
+        // released — bare or shifted only, the sets that type whitespace, which
+        // is the whole reason to swallow. With ⌘/⌃/⌥ the key is somebody else's
+        // (⌘Space Spotlight, ⌃Space input source, ⌘Return send) and must reach
+        // the front app while we keep recording.
+        if session == .handsFree, keyCode == bindings.handsFree.keyCode || keyCode == 36,
+           modifiers.subtracting(.shift).isEmpty {
             session = .idle
             onEdge?(.up(short: time - downAt < shortTapThreshold))
             return true // swallow — a space/newline must not land in the field before the transcript
