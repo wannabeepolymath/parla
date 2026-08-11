@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox // IsSecureEventInputEnabled
 import ParlaCore
 
 /// Subtle system-sound cues. NSSound(named:) uses the bundled ~/Library sounds —
@@ -79,14 +80,15 @@ extension AppDelegate {
                 await MainActor.run { self.window = nil }
             }
 
-        case let .startStreamLoop(gen, dictionary):
+        case let .startStreamLoop(gen, dictionary, preview):
             // Shadow streaming runs on EVERY dictation so the finalize only ever
             // pays for the unconfirmed tail. Chained onto the previous work:
             // the whisper ctx isn't reentrant.
             guard let transcriber else { return }
             processTask = Task { [prev = processTask] in
                 await prev?.value
-                await self.stream(transcriber: transcriber, gen: gen, dictionary: dictionary)
+                await self.stream(transcriber: transcriber, gen: gen, dictionary: dictionary,
+                                  preview: preview)
             }
 
         // MARK: - Model
@@ -127,12 +129,19 @@ extension AppDelegate {
 
         case let .insertText(text):
             Inserter.insert(text)
+            CorrectionWatcher.shared.arm(inserted: text, dictionary: store.load().dictionary)
 
         case let .eraseTypedIfOurs(expect):
+            // Nothing of ours is left in the field — there is nothing to learn from.
+            CorrectionWatcher.shared.disarm()
             guard Inserter.canEraseTyped(expect) else { return }
             Inserter.typeBackspaces(expect.count)
 
         case let .replaceTailIfOurs(expect, erase, append, verifiedHUD, unverifiedHUD):
+            // Parla's own polish swap changes the field like any other edit:
+            // stop watching before it types and re-arm on its result, or the
+            // cleanup's rewrite gets learned as if the user had made it.
+            CorrectionWatcher.shared.disarm()
             guard Inserter.canEraseTyped(expect) else {
                 // AX can't prove the field still ends with our text — leave it
                 // alone; history retains the result when enabled.
@@ -144,6 +153,8 @@ extension AppDelegate {
             Inserter.typeBackspaces(erase)
             Inserter.typeUnicode(append)
             hud.show(verifiedHUD)
+            CorrectionWatcher.shared.arm(inserted: String(expect.dropLast(erase)) + append,
+                                         dictionary: store.load().dictionary)
 
         // MARK: - UI
 
@@ -167,11 +178,19 @@ extension AppDelegate {
         // MARK: - Records
 
         case let .appendHistory(raw, cleaned, appName):
-            history.append(HistoryEntry(raw: raw, cleaned: cleaned, appName: appName))
+            history.append(HistoryEntry(raw: raw, cleaned: cleaned, appName: appName,
+                                        metrics: Metrics.shared.snapshot()))
         case let .log(line): NSLog("%@", line)
-        case let .trace(stamp): Trace.mark(stamp)
+        case let .trace(s): stamp(s)
         case .flushTrace: Trace.flush()
         }
+    }
+
+    /// Both consumers of a stamp, so neither can be updated without the other:
+    /// the env-gated line on stderr and the metrics that ride the history entry.
+    func stamp(_ s: Trace.Stamp) {
+        Trace.mark(s)
+        Metrics.shared.mark(s)
     }
 
     private func takeCaptured() -> [Float] {
@@ -185,6 +204,11 @@ extension AppDelegate {
     /// and run what it decides. Runs off-main on the processTask chain; every
     /// look at the world happens inside the MainActor hops and travels as a probe.
     func finish(_ s: DictationSession.Session, samples: [Float], ledger: String) async {
+        // Written BEFORE anything can fail, deleted once a transcript exists: a
+        // crash inside the whisper pass otherwise takes the only copy of what
+        // the user just said, which is Handy #1332. Every early return below is
+        // a failure path, and each one deliberately leaves the file behind.
+        let recording = RecordingStore.shared.stash(samples)
         guard let transcriber else {
             NSLog("Parla: no whisper model loaded — run scripts/download-model.sh")
             await MainActor.run { self.send(.legUnavailable(s, message: "No whisper model")) }
@@ -232,7 +256,15 @@ extension AppDelegate {
             raw = nil
         }
 
-        Trace.mark(.finalPassDone)
+        stamp(.finalPassDone)
+        // Whatever whisper actually ran against, which is not necessarily the
+        // catalog default — the metric is worthless if it names the wrong model.
+        Metrics.shared.update {
+            $0.model = URL(fileURLWithPath: settings.whisperModelPath
+                ?? WhisperTranscriber.defaultModelPath())
+                .deletingPathExtension().lastPathComponent
+                .replacingOccurrences(of: "ggml-", with: "")
+        }
 
         // The instant raw finalize, and — when a polish is coming — the values it
         // must hold across the await.
@@ -251,6 +283,13 @@ extension AppDelegate {
                                          && Inserter.canEraseTyped(ledger))
             }
             self.send(.transcribed(s, raw: raw, probe: probe))
+            // Behind the landing keystrokes on purpose — a file delete must not
+            // sit between the transcript and the screen. `secure` is the same
+            // pair of signals the reducer just refused on inside that send, so
+            // audio that drifted into a password field cannot outlive the
+            // transcript that was dropped for it.
+            RecordingStore.shared.resolve(recording, transcript: raw,
+                                          secure: probe.focus == .secure || s.focus == .secure)
             defer { self.pendingPolish = nil }
             return self.pendingPolish
         }
@@ -342,16 +381,17 @@ extension AppDelegate {
     /// additionally gated on liveTyping. Runs on the processTask chain
     /// (serialized with the final pass). Once the tail exceeds ~15s a confirmed
     /// prefix is frozen at a quiet spot (see StreamWindow) so each pass stays
-    /// O(tail), not O(n²). In shadow mode the tail pass itself is skipped until
-    /// the buffer crosses that threshold — nothing reads its output before the
-    /// first cut.
+    /// O(tail), not O(n²). With no consumer — no live typing, no preview — the
+    /// tail pass itself is skipped until the buffer crosses that threshold,
+    /// because nothing reads its output before the first cut.
     ///
     /// Passes abort cooperatively at fn-up (shouldAbort) and return "" — every
     /// transcribe here is followed by a `capturing` recheck that BREAKS before
     /// the result is used, so an aborted "" is never committed as a hypothesis
     /// or a confirmed head. The handoff below still runs after a break: it only
     /// carries state from completed passes.
-    func stream(transcriber: WhisperTranscriber, gen: Int, dictionary dict: [String]) async {
+    func stream(transcriber: WhisperTranscriber, gen: Int, dictionary dict: [String],
+                preview: Bool) async {
         var confirmed = "" // frozen transcript of snap[0..<cut]
         var cut = 0
         var lastCount = 0
@@ -380,13 +420,13 @@ extension AppDelegate {
                 NSLog("Parla stream: cut at %.1fs, confirmed %d chars",
                       Double(cut) / 16_000, confirmed.count)
             }
-            // Below the freeze threshold nothing consumes the tail pass: `confirmed`
-            // only ever grows in the head cut above, and the typing block is gated on
-            // liveTyping. Running it anyway burns GPU the final pass is waiting for,
-            // so short dictations (nearly all of them) skip straight to finish().
-            // Live typing is the one real consumer — if it's ever re-enabled it needs
-            // a hypothesis from the first second, not from 15s in.
-            guard liveTyping || snap.count > StreamWindow.threshold else {
+            // Below the freeze threshold the tail pass needs a consumer: `confirmed`
+            // only ever grows in the head cut above. Running it anyway burns GPU the
+            // final pass is waiting for, so with previews off (the default) short
+            // dictations — nearly all of them — skip straight to finish().
+            // The two consumers: live typing, and the HUD preview. `preview` implies
+            // the pill is on screen; it is visible for the whole of every capture.
+            guard liveTyping || preview || snap.count > StreamWindow.threshold else {
                 await pauseBetweenPasses(gen)
                 continue
             }
@@ -399,12 +439,16 @@ extension AppDelegate {
             guard capturing(gen) else { break }
             let text = StreamWindow.join(confirmed, tailText)
             await MainActor.run {
-                // Shadow mode: window-building only, never touch the field.
                 // The capturing re-check is on THIS side of the hop deliberately:
                 // a cancel can land on main between the check above and this
                 // block, and typing after its erase would leave orphan text in
                 // the field and re-fill the ledger the cancel just cleared.
-                guard self.liveTyping, self.capturing(gen) else { return }
+                guard self.capturing(gen) else { return }
+                // Preview goes to Parla's own pill and stops there — no ledger,
+                // no insertion, no history.
+                if preview { self.send(.streamPreview(gen: gen, text: text)) }
+                // Shadow mode: window-building only, never touch the field.
+                guard self.liveTyping else { return }
                 let typed = self.session.typedLedger
                 let d = LiveTyper.diff(typed: typed, new: text)
                 NSLog("Parla stream: %.1fs audio -> \"%@\" (erase %d, append \"%@\")",
@@ -445,5 +489,152 @@ extension AppDelegate {
             guard capturing(gen) else { return }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
+    }
+}
+
+// MARK: - Dictionary learning
+
+/// The C-side of the AXObserver: notifications carry a refcon, nothing else.
+private let correctionObserverCallback: AXObserverCallback = { _, _, _, refcon in
+    guard let refcon else { return }
+    Unmanaged<CorrectionWatcher>.fromOpaque(refcon).takeUnretainedValue().fieldChanged()
+}
+
+/// Watches the field Parla just typed into and turns a one-word hand-correction
+/// into a dictionary *proposal* — never an entry. The diff and every guard on it
+/// live in `DictionaryLearner`; this class is only the AX plumbing around them.
+///
+/// muesli's constraints are the design: a 600 ms stability window so a half-typed
+/// word is never read as the correction, and a 60 s give-up so Parla never sits
+/// on an observer inside someone else's process. Main thread only, one watch at a
+/// time — a new insertion always replaces the previous watch.
+final class CorrectionWatcher {
+    static let shared = CorrectionWatcher()
+
+    private var observer: AXObserver?
+    private var element: AXUIElement?
+    private var inserted = ""
+    private var baseline = ""
+    private var dictionary: [String] = []
+    private var pendingArm: DispatchWorkItem?
+    private var settle: Timer?
+    private var giveUp: Timer?
+
+    /// Begin watching after the keystrokes Parla just posted have landed.
+    ///
+    /// The delay is not cosmetic: CGEvents are delivered asynchronously, so
+    /// reading the field on this turn of the run loop sees the text *before* our
+    /// own insertion and would take a stale baseline.
+    // ponytail: fixed 250 ms rather than polling for the text to appear — a slow
+    // app just doesn't get learned from. Poll if that turns out to be common.
+    func arm(inserted: String, dictionary: [String]) {
+        disarm()
+        guard !inserted.isEmpty else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.attach(inserted: inserted, dictionary: dictionary)
+        }
+        pendingArm = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func attach(inserted: String, dictionary: [String]) {
+        pendingArm = nil
+        guard let (element, pid) = Self.focusedElement(), let value = Self.value(of: element) else { return }
+        // Two different secure signals, same refusal — the field (a password
+        // field's masked value must never be diffed or logged) and the keyboard
+        // (some other process holds it, so nothing of ours landed anyway).
+        guard !Self.isSecure(element), !IsSecureEventInputEnabled() else { return }
+        // Same proof the erase paths require before they touch a field: the text
+        // immediately before the cursor is exactly what we typed. Anything Parla
+        // cannot verify it wrote, it does not learn from.
+        guard Inserter.canEraseTyped(inserted) else { return }
+
+        var created: AXObserver?
+        guard AXObserverCreate(pid, correctionObserverCallback, &created) == .success,
+              let created else { return }
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard AXObserverAddNotification(created, element,
+                                        kAXValueChangedNotification as CFString, refcon) == .success
+        else { return }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .defaultMode)
+
+        observer = created
+        self.element = element
+        self.inserted = inserted
+        self.dictionary = dictionary
+        baseline = value
+        giveUp = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { [weak self] _ in
+            self?.disarm()
+        }
+    }
+
+    /// Coalesce the burst of notifications a person typing produces into one
+    /// evaluation once they stop.
+    fileprivate func fieldChanged() {
+        settle?.invalidate()
+        settle = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
+            self?.evaluate()
+        }
+    }
+
+    private func evaluate() {
+        settle = nil
+        guard let element, let after = Self.value(of: element) else { return }
+        guard let proposal = DictionaryLearner.propose(inserted: inserted, before: baseline,
+                                                       after: after, dictionary: dictionary) else {
+            return // keep watching: the user may still be mid-correction
+        }
+        if DictionaryLearner.Store.shared.add(proposal) {
+            NSLog("Parla learn: proposed \"%@\" → \"%@\" (Hub → Dictionary to confirm)",
+                  proposal.from, proposal.to)
+        }
+        disarm() // one proposal per insertion, never a chain of them
+    }
+
+    func disarm() {
+        pendingArm?.cancel(); pendingArm = nil
+        settle?.invalidate(); settle = nil
+        giveUp?.invalidate(); giveUp = nil
+        if let observer, let element {
+            AXObserverRemoveNotification(observer, element, kAXValueChangedNotification as CFString)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        }
+        observer = nil
+        element = nil
+        inserted = ""
+        baseline = ""
+    }
+
+    /// The focused element and its owning process. Inserter's equivalent is
+    /// private and this needs the pid too (AXObserverCreate takes one).
+    private static func focusedElement() -> (AXUIElement, pid_t)? {
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(),
+                                            kAXFocusedUIElementAttribute as CFString,
+                                            &focused) == .success,
+              let focused else { return nil }
+        let element = focused as! AXUIElement
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+        return (element, pid)
+    }
+
+    private static func value(of element: AXUIElement) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &ref) == .success
+        else { return nil }
+        return ref as? String
+    }
+
+    /// Same test Inserter's focus classification makes, on the element we would
+    /// actually watch — and without its Electron accessibility wake, which must
+    /// not run on the turn a dictation just landed.
+    private static func isSecure(_ element: AXUIElement) -> Bool {
+        for attribute in [kAXRoleAttribute, kAXSubroleAttribute] {
+            var ref: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success,
+               ref as? String == "AXSecureTextField" { return true }
+        }
+        return false
     }
 }

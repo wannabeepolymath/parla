@@ -69,6 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let m = HubModel(store: store, history: history)
         m.onDownloadModel = { [weak self] model in self?.download(model) }
         m.onOpenSettingsFile = { [weak self] in self?.openSettings() }
+        // nil means "recording" here, so weak-self can't collapse into `??`.
+        m.onTryoutStart = { [weak self] in
+            guard let self else { return "Parla is shutting down" }
+            return self.tryoutStart()
+        }
+        m.onTryoutStop = { [weak self] done in
+            guard let self else { return done("") }
+            self.tryoutStop(done)
+        }
         m.onSaved = { [weak self] in
             guard let self else { return }
             let s = self.store.load()
@@ -105,6 +114,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hud.idleBarSize = HUD.idleSize(launchSettings.hudIdleSize)
         hud.showAlways = launchSettings.showHudAlways
         recorder.inputDeviceUID = launchSettings.inputDeviceUID
+        // Fresh install: open the setup flow instead of leaving a ⚠️ glyph in the
+        // menu bar for the user to find and decode. A broken settings.json is a
+        // different problem with its own banner — don't onboard over it.
+        if !launchSettings.onboardingCompleted, store.lastError == nil {
+            hubController.show()
+        }
 
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.hud.push(level: level) }

@@ -23,6 +23,13 @@ final class HubModel: ObservableObject {
     var onDownloadModel: (ModelCatalog.Model) -> Void = { _ in }
     var onOpenSettingsFile: () -> Void = {}
     var onSaved: () -> Void = {}
+    /// Onboarding's sandboxed tryout, wired straight to the recorder and whisper
+    /// by AppDelegate — never through the dictation machine, so the transcript
+    /// can only ever come back here. Start returns why it refused, nil = live.
+    var onTryoutStart: () -> String? = { "Not available" }
+    // @escaping: the completion outlives the call — transcription finishes well
+    // after tryoutStop returns.
+    var onTryoutStop: (@escaping (String) -> Void) -> Void = { $0("") }
 
     @Published var settings = Settings() { didSet { touch() } }
     @Published var words: [WordRow] = [] { didSet { touch() } }
@@ -38,6 +45,8 @@ final class HubModel: ObservableObject {
     @Published var launchAtLogin = false
     @Published var micGranted = false
     @Published var axGranted = false
+    /// Why the last recorded shortcut was refused, nil when nothing was.
+    @Published var hotkeyError: String?
 
     private var loading = false
     private var saveItem: DispatchWorkItem?
@@ -88,6 +97,18 @@ final class HubModel: ObservableObject {
         axGranted = AXIsProcessTrusted()
     }
 
+    /// The system prompt only ever appears once, so anything past `notDetermined`
+    /// has to fall through to System Settings or the button does nothing.
+    func requestMicrophone() {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined else {
+            openPrivacyPane("Privacy_Microphone")
+            return
+        }
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] ok in
+            DispatchQueue.main.async { self?.micGranted = ok }
+        }
+    }
+
     func toggleLaunchAtLogin() {
         // Same logic as the menu toggle; fails harmlessly outside a bundled app.
         do {
@@ -98,6 +119,20 @@ final class HubModel: ObservableObject {
             }
         } catch { NSLog("%@", "Parla: launch-at-login toggle failed: \(error)") }
         launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    /// Take a recorded chord only if the whole set stays usable. Refusing here
+    /// is the guard against binding Parla into a corner — a push-to-talk that
+    /// can't be held, a chord the tap can never see, two bindings on one key.
+    func setHotkey(_ path: WritableKeyPath<HotkeyBindings, KeyChord>, to chord: KeyChord) {
+        var next = settings.hotkeys
+        next[keyPath: path] = chord
+        if let problem = next.problem() {
+            hotkeyError = "\(chord.display) won't work — \(problem)."
+            return
+        }
+        hotkeyError = nil
+        settings.hotkeys = next
     }
 
     func clearHistory() {

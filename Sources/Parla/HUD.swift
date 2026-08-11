@@ -123,6 +123,7 @@ final class HUD: @unchecked Sendable {
         label.backgroundColor = .clear
         label.isBezeled = false
         label.isEditable = false
+        label.usesSingleLineMode = true // so lineBreakMode truncates instead of wrapping
         pill.addSubview(label)
 
         appIcon.image = NSApp.applicationIconImage
@@ -206,13 +207,29 @@ final class HUD: @unchecked Sendable {
         hideItem = nil
         // .listening moves to the screen the user is dictating into; every other
         // state stays on the panel's current screen.
-        if case .listening = state { expand(to: Self.activeScreen()) } else { expand() }
+        switch state {
+        case .listening: expand(to: Self.activeScreen())
+        // Preview repaints every ~300 ms mid-recording — re-docking the panel on
+        // each one would fight a drag in progress. Already expanded: relabel only.
+        case .preview where !isIdle: break
+        default: expand()
+        }
         switch state {
         case .listening, .handsFree:
             label.frame = NSRect(x: 158, y: 12, width: 92, height: 20)
+        case .preview:
+            // Waveform out, dot stays: the moving text is the liveness cue, but
+            // the pill must still read as recording. Room left for the dot.
+            label.frame = NSRect(x: 30, y: 12, width: 214, height: 20)
         default:
             // No waveform in these states — let longer labels use the full pill.
             label.frame = NSRect(x: 16, y: 12, width: 228, height: 20)
+        }
+        // Preview text grows to the right, so show its tail — the newest words.
+        if case .preview = state {
+            label.lineBreakMode = .byTruncatingHead
+        } else {
+            label.lineBreakMode = .byTruncatingTail
         }
         switch state {
         case .listening(let command):
@@ -226,6 +243,12 @@ final class HUD: @unchecked Sendable {
             dot.isHidden = false
             waveform.isHidden = false
             label.stringValue = "Hands-free…"
+            panel.orderFrontRegardless()
+        case .preview(let text):
+            // Mid-recording, like .handsFree: no waveform clear, no scheduleHide.
+            dot.isHidden = false
+            waveform.isHidden = true
+            label.stringValue = text
             panel.orderFrontRegardless()
         case .transcribing:
             dot.isHidden = true

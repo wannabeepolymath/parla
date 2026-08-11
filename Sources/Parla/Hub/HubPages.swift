@@ -1,3 +1,4 @@
+import AppKit
 import ParlaCore
 import SwiftUI
 
@@ -70,33 +71,39 @@ struct GeneralPage: View {
                 }
             }
 
-            HubSection("Shortcuts", footer: "Shortcuts are fixed in this version.") {
-                HubRow("Push to talk", detail: "Hold to say something short") {
-                    ShortcutPill(text: "fn 🌐")
-                }
+            if let problem = model.hotkeyError {
+                HubBanner(text: problem)
+            }
+            HubSection("Shortcuts", footer: "Press Change, then the keys you want. Esc keeps the current one.") {
+                shortcutRow("Push to talk", "Hold to say something short",
+                            \.pushToTalk, modifierOnly: true)
                 HubDivider()
-                HubRow("Hands-free mode", detail: "Start while holding fn; fn, Space, or Return finishes") {
-                    ShortcutPill(text: "fn 🌐 + Space")
-                }
+                shortcutRow("Hands-free mode",
+                            "Start while holding push to talk; it, Space, or Return finishes",
+                            \.handsFree)
                 HubDivider()
                 HubRow("Command mode", detail: "Transform selected text by voice") {
-                    ShortcutPill(text: "⇧ fn")
+                    ShortcutPill(text: "⇧ " + model.settings.hotkeys.pushToTalk.display)
                 }
                 HubDivider()
-                HubRow("Paste last transcript", detail: "Paste the last thing you dictated") {
-                    ShortcutPill(text: "⌃ ⌘ V")
-                }
+                shortcutRow("Paste last transcript", "Paste the last thing you dictated", \.pasteLast)
                 HubDivider()
-                HubRow("Open Scratchpad", detail: "A safe place to dictate and edit") {
-                    ShortcutPill(text: "⌃ ⌘ S")
-                }
+                shortcutRow("Open Scratchpad", "A safe place to dictate and edit", \.openScratchpad)
                 HubDivider()
                 HubRow("Cancel", detail: "Dismiss dictation and notifications") {
-                    ShortcutPill(text: "esc")
+                    ShortcutPill(text: "Esc")
                 }
             }
         }
         .onReceive(permissionTick) { _ in model.refreshPermissions() }
+    }
+
+    private func shortcutRow(_ label: String, _ detail: String,
+                             _ path: WritableKeyPath<HotkeyBindings, KeyChord>,
+                             modifierOnly: Bool = false) -> some View {
+        HubRow(label, detail: detail) {
+            ShortcutRecorder(model: model, path: path, modifierOnly: modifierOnly)
+        }
     }
 
     /// Live input devices, plus the saved device if it's currently unplugged —
@@ -142,6 +149,72 @@ struct GeneralPage: View {
                     .buttonStyle(HubButtonStyle())
             }
         }
+    }
+}
+
+/// Records the next keypress into one binding. A local monitor is enough — the
+/// Hub window is key while recording — but the global tap has to stand down for
+/// the duration or it swallows the very chords being re-recorded.
+struct ShortcutRecorder: View {
+    @ObservedObject var model: HubModel
+    let path: WritableKeyPath<HotkeyBindings, KeyChord>
+    /// Push to talk is *held*, so it records a bare modifier off flagsChanged;
+    /// every other binding waits for a real key press.
+    var modifierOnly = false
+    @State private var monitor: Any?
+
+    private var chord: KeyChord { model.settings.hotkeys[keyPath: path] }
+    private var original: KeyChord { HotkeyBindings()[keyPath: path] }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ShortcutPill(text: monitor == nil ? chord.display : "Press keys…")
+            Button(monitor == nil ? "Change" : "Cancel") {
+                if monitor == nil { start() } else { stop() }
+            }
+            .buttonStyle(HubButtonStyle())
+            if chord != original {
+                Button("Reset") {
+                    stop()
+                    model.setHotkey(path, to: original)
+                }
+                .buttonStyle(HubButtonStyle())
+            }
+        }
+        .onDisappear(perform: stop)
+    }
+
+    private func start() {
+        model.hotkeyError = nil
+        HotkeyMonitor.suspended = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            let code = UInt16(event.keyCode)
+            let mods = KeyChord.Modifiers(event.modifierFlags)
+            if event.type == .keyDown {
+                if code == 53 {
+                    stop() // Esc: give up, keep the binding that's there
+                } else {
+                    // A plain key in modifier-only mode is recorded as-is and
+                    // refused by validation, which explains why better than
+                    // silently ignoring it would.
+                    commit(KeyChord(code, modifierOnly ? [] : mods))
+                }
+            } else if modifierOnly, let m = KeyChord.modifierKey(code), mods.contains(m) {
+                commit(KeyChord(code)) // press, not release
+            }
+            return nil // swallow: the recorded chord must not also act on the Hub
+        }
+    }
+
+    private func commit(_ chord: KeyChord) {
+        stop()
+        model.setHotkey(path, to: chord)
+    }
+
+    private func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        HotkeyMonitor.suspended = false
     }
 }
 
@@ -229,7 +302,39 @@ struct CleanupPage: View {
                     }
                 }
             }
+
+            // Absent until the first cleanup with usage reported — an empty card
+            // saying nothing is worse than no card.
+            if let est = CleanupCostEstimate.over(model.historyEntries) { costSection(est) }
         }
+    }
+
+    @ViewBuilder
+    private func costSection(_ est: CleanupCostEstimate) -> some View {
+        HubSection("Estimated cost",
+                   footer: "An estimate from published list prices, not a bill. Parla only keeps "
+                       + "the last \(HistoryStore.cap) dictations, so this covers the period shown "
+                       + "and nothing before it; discounts and cached input aren't counted.") {
+            HubRow("Cleanup spend",
+                   detail: "\(est.dictations) dictation\(est.dictations == 1 ? "" : "s") since "
+                       + est.since.formatted(date: .abbreviated, time: .shortened)
+                       + (est.unpriced > 0
+                          ? " · \(est.unpriced) not priced (local or unknown model)" : "")) {
+                Text(Self.money(est.usd)).font(.system(size: 13, design: .monospaced))
+            }
+            if let monthly = est.monthlyUSD {
+                HubDivider()
+                HubRow("At this rate", detail: "Straight-line projection over 30 days") {
+                    Text(Self.money(monthly) + "/mo").font(.system(size: 13, design: .monospaced))
+                }
+            }
+        }
+    }
+
+    /// Per-dictation cleanup is fractions of a cent, so two decimals would read
+    /// "$0.00" for real spend; monthly figures are ordinary money.
+    private static func money(_ usd: Double) -> String {
+        String(format: usd < 1 ? "$%.4f" : "$%.2f", usd)
     }
 }
 
@@ -237,9 +342,33 @@ struct CleanupPage: View {
 
 struct DictionaryPage: View {
     @ObservedObject var model: HubModel
+    /// Read on appear rather than published: proposals are written by the
+    /// dictation path (possibly in an earlier launch), and this page is the only
+    /// thing that ever shows them.
+    @State private var proposals: [DictionaryLearner.Proposal] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if !proposals.isEmpty {
+                HubSection("Suggested",
+                           footer: "Parla noticed you fixing these words right after it typed them. "
+                               + "Nothing is added to the dictionary until you add it.") {
+                    ForEach(proposals, id: \.key) { proposal in
+                        HubRow(proposal.to, detail: "Parla typed “\(proposal.from)”") {
+                            HStack(spacing: 8) {
+                                Button("Add") {
+                                    model.words.append(.init(text: proposal.to))
+                                    resolve(proposal, dismissed: false)
+                                }
+                                .buttonStyle(HubButtonStyle(kind: .primary))
+                                Button("Dismiss") { resolve(proposal, dismissed: true) }
+                                    .buttonStyle(HubButtonStyle())
+                            }
+                        }
+                        if proposal.key != proposals.last?.key { HubDivider() }
+                    }
+                }
+            }
             HubSection("Words",
                        footer: "Names and jargon spelled exactly as they should appear, e.g. “Parla”, “whisper.cpp”.") {
                 if model.words.isEmpty {
@@ -270,6 +399,12 @@ struct DictionaryPage: View {
             }
             .buttonStyle(HubButtonStyle(kind: .primary))
         }
+        .onAppear { proposals = DictionaryLearner.Store.shared.pending }
+    }
+
+    private func resolve(_ proposal: DictionaryLearner.Proposal, dismissed: Bool) {
+        DictionaryLearner.Store.shared.resolve(proposal, dismissed: dismissed)
+        proposals.removeAll { $0.key == proposal.key }
     }
 }
 
@@ -447,6 +582,10 @@ struct HistoryPage: View {
 struct PrivacyPage: View {
     @ObservedObject var model: HubModel
     @State private var confirmClear = false
+    @State private var confirmClearRecordings = false
+    /// Read on appear rather than published: the dictation path writes this
+    /// folder, and this page is the only thing that ever shows it.
+    @State private var recordings = RecordingStore.Summary(count: 0, bytes: 0)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -471,6 +610,44 @@ struct PrivacyPage: View {
                 }
             }
 
+            if RecordingStore.shared.keepAll {
+                HubBanner(text: "PARLA_KEEP_RECORDINGS=1 — every dictation's audio is being kept "
+                    + "for \(RecordingStore.retentionDays) days, not just the failed ones.")
+            }
+            HubSection("Recordings",
+                       footer: "Parla saves each dictation's audio just before transcribing it, so a "
+                           + "crash mid-transcription can't take what you said with it, and deletes it "
+                           + "the moment a transcript comes back. Only dictations that failed are left "
+                           + "behind. Audio from a password field is never kept.") {
+                HubRow("Deleted after \(RecordingStore.retentionDays) days",
+                       detail: recordings.count == 0 ? "Nothing stored"
+                           : "\(recordings.count) recording\(recordings.count == 1 ? "" : "s") · "
+                               + ByteCountFormatter.string(fromByteCount: Int64(recordings.bytes),
+                                                           countStyle: .file)) {
+                    Button("Show in Finder") {
+                        // The folder may not exist yet — nothing has ever failed.
+                        try? FileManager.default.createDirectory(
+                            at: RecordingStore.shared.directory, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(RecordingStore.shared.directory)
+                    }
+                    .buttonStyle(HubButtonStyle())
+                }
+                HubDivider()
+                HubRow("Delete recordings",
+                       detail: "16 kHz mono WAV — the format eval/cases uses") {
+                    Button("Delete…") { confirmClearRecordings = true }
+                        .buttonStyle(HubButtonStyle(kind: .danger))
+                        .disabled(recordings.count == 0)
+                        .confirmationDialog("Delete all \(recordings.count) recordings?",
+                                            isPresented: $confirmClearRecordings) {
+                            Button("Delete All", role: .destructive) {
+                                RecordingStore.shared.clear()
+                                recordings = RecordingStore.shared.summary()
+                            }
+                        }
+                }
+            }
+
             HubSection("How Parla handles your data") {
                 HubRow("Transcription is on-device",
                        detail: "Audio never leaves this Mac — whisper.cpp runs locally") { EmptyView() }
@@ -485,5 +662,6 @@ struct PrivacyPage: View {
                        detail: "The transcript, the selected text for voice commands, your dictionary, snippets, and the frontmost app's name — never audio") { EmptyView() }
             }
         }
+        .onAppear { recordings = RecordingStore.shared.summary() }
     }
 }

@@ -104,9 +104,18 @@ public struct OpenAICompatClient: CleanupProviding {
                 let message: Message
                 let finish_reason: String?
             }
+            struct Usage: Decodable { let prompt_tokens: Int?; let completion_tokens: Int? }
             let choices: [Choice]
+            let usage: Usage?
         }
         let decoded = try JSONDecoder().decode(Response.self, from: data)
+        // `modelID`, not `model`: when the model field is empty this is the id
+        // the server actually picked, which is the one that got billed.
+        Metrics.shared.update {
+            $0.cleanupModel = modelID
+            $0.promptTokens = decoded.usage?.prompt_tokens
+            $0.completionTokens = decoded.usage?.completion_tokens
+        }
         switch decoded.choices.first?.finish_reason {
         case let reason? where reason == "length" || reason == "content_filter":
             throw CleanupError(description: "cleanup response stopped (finish_reason=\(reason))")

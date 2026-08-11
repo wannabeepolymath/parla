@@ -101,7 +101,7 @@ final class DictationSessionTests: XCTestCase {
                        [.menuBar(.recording), .hud(.listening(command: false)), .playSound(.start),
                         .sampleFocus(gen: 1)])
         XCTAssertEqual(m.handle(.focusSampled(gen: 1, focus: .editable)),
-                       [.ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [])])
+                       [.ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: false)])
         XCTAssertTrue(m.isCapturing)
     }
 
@@ -141,7 +141,7 @@ final class DictationSessionTests: XCTestCase {
             .trace(.fnDown), .warmCleanupEndpoint, .applyPreferencesAndStartCapture(settings()),
             .menuBar(.recording), .hud(.listening(command: false)), .playSound(.start),
             .sampleFocus(gen: 1),                                 // AX probe behind the chime
-            .ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: []),
+            .ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: false),
         ])
         XCTAssertEqual(m.state, .recording(session))
     }
@@ -306,6 +306,40 @@ final class DictationSessionTests: XCTestCase {
         XCTAssertEqual(m.state, .idle)
     }
 
+    // MARK: - HUD streaming preview (Tier 2 #1)
+
+    /// The preview is UI and nothing else: it shows in the pill, and it leaves no
+    /// mark on the ledger, on history, or on the transcript that lands.
+    func testStreamPreviewOnlyDrawsTheHUD() {
+        let s = startDictation()
+        XCTAssertEqual(m.handle(.streamPreview(gen: 1, text: "hello wor")), [.hud(.preview("hello wor"))])
+        XCTAssertEqual(m.typedLedger, "")
+        _ = m.handle(.stopRequested)
+        // Preview text is not a transcript: an empty raw still finalizes as empty.
+        XCTAssertEqual(quiet(m.handle(.transcribed(s, raw: nil, probe: probe()))),
+                       [.hideHUD, .flushTrace, .menuBar(.idle), .releaseModelIfPolicyImmediate])
+    }
+
+    func testStreamPreviewIsDroppedWhenStaleEmptyOrNotRecording() {
+        startDictation()
+        XCTAssertEqual(m.handle(.streamPreview(gen: 0, text: "old")), [])   // previous dictation
+        XCTAssertEqual(m.handle(.streamPreview(gen: 1, text: "")), [])      // would blank the pill
+        _ = m.handle(.stopRequested)                                        // no longer recording
+        XCTAssertEqual(m.handle(.streamPreview(gen: 1, text: "late")), [])
+    }
+
+    /// The gate the shadow-stream fix depends on: the loop only learns to run its
+    /// tail pass early when the user opted into previews.
+    func testStreamLoopIsToldWhetherPreviewsAreOn() {
+        XCTAssertFalse(Settings().streamPreviewEnabled)   // costs GPU every dictation: opt-in
+        var set = settings()
+        set.streamPreviewEnabled = true
+        _ = m.handle(.startDictation(settings: set, cleanupConfigured: true, live: false))
+        _ = m.handle(.recorderStarted(gen: 1))
+        XCTAssertEqual(m.handle(.focusSampled(gen: 1, focus: .editable)),
+                       [.ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: true)])
+    }
+
     // MARK: - Cancel
 
     func testCancelMidRecordingStopsErasesAndClears() {
@@ -393,8 +427,8 @@ final class DictationSessionTests: XCTestCase {
                     fx += machine.handle(.focusSampled(gen: machine.gen, focus: .editable))
                 }
             }
-            monitor.handle(keyCode: 63, fnActive: true, at: 0)          // fn down
-            _ = monitor.keyDown(keyCode: 49, fnActive: true, at: 0.5)   // fn+Space: latch
+            monitor.handle(keyCode: 63, modifiers: [.fn], at: 0)          // fn down
+            _ = monitor.keyDown(keyCode: 49, modifiers: [.fn], at: 0.5)   // fn+Space: latch
             XCTAssertTrue(fx.contains(.hud(.handsFree)), label)
             exit(monitor)
             if label == "esc" {
@@ -409,7 +443,7 @@ final class DictationSessionTests: XCTestCase {
     }
 
     var exits: [(String, (HotkeyMonitor) -> Void)] {
-        [("fn", { $0.handle(keyCode: 63, fnActive: true, at: 2) }),
+        [("fn", { $0.handle(keyCode: 63, modifiers: [.fn], at: 2) }),
          ("space", { _ = $0.keyDown(keyCode: 49, at: 2) }),
          ("return", { _ = $0.keyDown(keyCode: 36, at: 2) }),
          ("esc", { _ = $0.keyDown(keyCode: 53, at: 2) })]

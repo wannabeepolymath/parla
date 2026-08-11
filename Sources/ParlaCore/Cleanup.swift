@@ -181,6 +181,71 @@ public protocol CleanupProviding {
     func clean(transcript: String, context: CleanupContext) async throws -> String
 }
 
+/// USD list price per million tokens. ponytail: hardcoded and deliberately
+/// short — re-check it against the provider pricing pages each release, because
+/// a stale number here becomes a wrong number in the Hub, which is worse than
+/// no number. Rates from docs/research/08-cost.md §1.
+///
+/// A model that isn't in the table is *unpriced*, never free: a local Ollama
+/// really does cost $0, but so does an unknown hosted model right up until the
+/// bill arrives, and the Hub must not conflate the two.
+public enum CleanupPricing {
+    /// Keyed by model-id prefix so date-suffixed ids ("claude-haiku-4-5-2025…")
+    /// still match. Longest prefix wins — otherwise flash-lite bills at flash.
+    static let perMTok: [String: (input: Double, output: Double)] = [
+        "claude-opus-4-5": (15, 75),
+        "claude-sonnet-5": (3, 15),
+        "claude-haiku-4-5": (1, 5),
+        "gemini-2.5-flash": (0.30, 2.50),
+        "gemini-2.5-flash-lite": (0.10, 0.40),
+        "gpt-5-nano": (0.05, 0.40),
+    ]
+
+    public static func usd(model: String, promptTokens: Int, completionTokens: Int) -> Double? {
+        guard let key = perMTok.keys.filter({ model.hasPrefix($0) }).max(by: { $0.count < $1.count }),
+              let rate = perMTok[key] else { return nil }
+        return (Double(promptTokens) * rate.input + Double(completionTokens) * rate.output) / 1_000_000
+    }
+}
+
+/// Running cleanup spend over the dictations history still holds. History is a
+/// `HistoryStore.cap`-entry ring, so this is a *sample* of usage, never a bill —
+/// which is why `dictations`, `since` and `unpriced` are part of the answer
+/// rather than decoration the UI may drop.
+public struct CleanupCostEstimate: Equatable, Sendable {
+    public let usd: Double
+    public let dictations: Int
+    /// Counted, not costed: local or unknown models.
+    public let unpriced: Int
+    public let since: Date
+    /// `usd` extrapolated straight-line to 30 days. nil under an hour of span —
+    /// projecting a single burst to a month produces a scary meaningless number.
+    public let monthlyUSD: Double?
+
+    public static func over(_ entries: [HistoryEntry], now: Date = Date()) -> CleanupCostEstimate? {
+        var usd = 0.0, priced = 0, unpriced = 0
+        var since = now
+        for entry in entries {
+            guard let m = entry.metrics,
+                  let prompt = m.promptTokens, let completion = m.completionTokens else { continue }
+            since = min(since, entry.date)
+            if let model = m.cleanupModel,
+               let cost = CleanupPricing.usd(model: model, promptTokens: prompt,
+                                             completionTokens: completion) {
+                usd += cost
+                priced += 1
+            } else {
+                unpriced += 1
+            }
+        }
+        guard priced + unpriced > 0 else { return nil }
+        let span = now.timeIntervalSince(since)
+        return CleanupCostEstimate(usd: usd, dictations: priced + unpriced, unpriced: unpriced,
+                                   since: since,
+                                   monthlyUSD: span >= 3600 ? usd / span * 2_592_000 : nil)
+    }
+}
+
 public enum CleanupSanitizer {
     // Strip ONE wrapping quote pair only when the first and last chars are a matching
     // pair. ponytail: no preamble stripping ("Sure, here's..." etc.) — too risky to
@@ -243,10 +308,19 @@ public struct CleanupClient: CleanupProviding {
 
         struct Response: Decodable {
             struct Block: Decodable { let type: String; let text: String? }
+            struct Usage: Decodable { let input_tokens: Int?; let output_tokens: Int? }
             let content: [Block]
             let stop_reason: String?
+            let usage: Usage?
         }
         let decoded = try JSONDecoder().decode(Response.self, from: data)
+        // Recorded before the stop_reason/empty throws below: a truncated or
+        // refused response still cost tokens, and the bill counts them.
+        Metrics.shared.update {
+            $0.cleanupModel = model
+            $0.promptTokens = decoded.usage?.input_tokens
+            $0.completionTokens = decoded.usage?.output_tokens
+        }
         switch decoded.stop_reason {
         case let reason? where reason == "max_tokens" ||
             reason == "model_context_window_exceeded" ||

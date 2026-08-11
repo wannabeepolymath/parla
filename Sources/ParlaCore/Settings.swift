@@ -43,9 +43,21 @@ public struct Settings: Codable, Equatable, Sendable {
     // Mid-stream live retyping while fn is held. Off ⇒ instant raw finalize on
     // fn-up still happens; only the word-by-word revision stream is skipped.
     public var liveStreamingEnabled: Bool = true
+    // Show the shadow stream's text in Parla's own pill while dictating. Off by
+    // default: it costs a whisper pass every ~300 ms on every dictation, which
+    // the gated shadow stream otherwise skips entirely. Preview only — the text
+    // is never inserted and never stored.
+    public var streamPreviewEnabled: Bool = false
     // Core Audio UID of the input device to record from. nil ⇒ system default.
     // A UID that no longer resolves (device unplugged) also falls back to default.
     public var inputDeviceUID: String? = nil
+    // Rebindable shortcuts, stored as "ctrl+cmd+v". Defaults are what shipped
+    // hard-coded, so an existing settings.json keeps behaving identically.
+    public var hotkeys: HotkeyBindings = HotkeyBindings()
+    // First-run flow. False here is the fresh-install value (no settings.json at
+    // all); the decoder below reads a *missing* key as completed, so nobody who
+    // already has a settings.json is ever sent through onboarding.
+    public var onboardingCompleted: Bool = false
     public init() {}
 
     // Tolerant decode: missing keys fall back to defaults so adding fields
@@ -63,7 +75,12 @@ public struct Settings: Codable, Equatable, Sendable {
         showHudAlways = try c.decodeIfPresent(Bool.self, forKey: .showHudAlways) ?? showHudAlways
         hudIdleSize = try c.decodeIfPresent(String.self, forKey: .hudIdleSize) ?? hudIdleSize
         liveStreamingEnabled = try c.decodeIfPresent(Bool.self, forKey: .liveStreamingEnabled) ?? liveStreamingEnabled
+        streamPreviewEnabled = try c.decodeIfPresent(Bool.self, forKey: .streamPreviewEnabled) ?? streamPreviewEnabled
         inputDeviceUID = try c.decodeIfPresent(String.self, forKey: .inputDeviceUID) ?? inputDeviceUID
+        hotkeys = try c.decodeIfPresent(HotkeyBindings.self, forKey: .hotkeys) ?? hotkeys
+        // Not `?? onboardingCompleted`: we only get here because a settings.json
+        // exists, and an existing user must not be interrupted by a first-run flow.
+        onboardingCompleted = try c.decodeIfPresent(Bool.self, forKey: .onboardingCompleted) ?? true
     }
 }
 

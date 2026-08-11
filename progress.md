@@ -17,10 +17,10 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 |---|---|---|---|---|---|
 | 0 | 8 | 8 | 0 | 0 | 0 |
 | 1 | 14 | 14 | 0 | 0 | 0 |
-| 2 | 7 | 0 | 0 | 6 | 1 |
-| **all** | **29** | **22** | **0** | **6** | **1** |
+| 2 | 7 | 6 | 0 | 0 | 1 |
+| **all** | **29** | **28** | **0** | **0** | **1** |
 
-Suite: **284 tests, 0 failures.** Build clean.
+Suite: **356 tests, 0 failures.** Build clean.
 
 ---
 
@@ -200,13 +200,40 @@ nested dispatch off the *first* effect.
 
 | # | Item | Files | Effort | Risk | Status | Commit |
 |---|---|---|---|---|---|---|
-| 1 | Streaming preview in Parla's own HUD | `Parla/main.swift`, `HUD.swift` | M | low | todo | |
-| 2 | Per-dictation `PipelineMetrics` on `HistoryEntry` | `ParlaCore/History.swift`, `Cleanup.swift`, `OpenAICompatClient.swift` | M | low | todo | |
-| 3 | Rebindable hotkeys | `ParlaCore/Hotkey.swift`, Hub | M | med | todo | |
-| 4 | Recording persistence + recovery | `ParlaCore/AudioRecorder.swift`, `History.swift` | M | low | todo | |
-| 5 | Automatic dictionary learning | `ParlaCore/Inserter.swift`, new tracker | L | med | todo | |
-| 6 | Onboarding flow | `Parla/Hub/` | L | low | todo | |
+| 1 | Streaming preview in Parla's own HUD | `HUD.swift`, `Dictation.swift`, `DictationSession.swift` | M | low | **done** | wave 5 |
+| 2 | Per-dictation `PipelineMetrics` on `HistoryEntry` | `ParlaCore/History.swift`, `Cleanup.swift`, `OpenAICompatClient.swift`, Hub | M | low | **done** | wave 5 |
+| 3 | Rebindable hotkeys | `ParlaCore/Hotkey.swift`, `Settings.swift`, Hub | M | med | **done** | wave 5 |
+| 4 | Recording persistence + recovery | `ParlaCore/RecordingStore.swift` (new), `Dictation.swift`, Hub | M | low | **done** | wave 5 |
+| 5 | Automatic dictionary learning | `ParlaCore/DictionaryLearner.swift` (new), `Dictation.swift`, Hub | L | med | **done** | wave 5 |
+| 6 | Onboarding flow | `Parla/Hub/Onboarding.swift` (new), `HubWindow.swift`, `main.swift` | L | low | **done** | wave 5 |
 | 7 | Prompt caching | — | M | low | **skipped** | |
+
+### Wave 5 notes
+
+- **#1** extends the Tier 0 gate rather than replacing it:
+  `liveTyping || preview || snap.count > threshold`. `streamPreviewEnabled`
+  defaults **off**, so with previews disabled the stream loop is byte-identical
+  to before and the ~33% GPU duty cycle Tier 0 #1 removed stays removed.
+  Preview text emits only `.hud(.preview)` — it never reaches insertion,
+  history, or the transcript.
+- **#2** mirrors `Trace`'s stamp vocabulary instead of adding a second timing
+  path, so the persisted metrics and the env-gated trace cannot drift. Unknown
+  models are recorded as **unpriced, never $0** — a local Ollama really is free,
+  but so is an unknown hosted model right up until the bill arrives.
+- **#4** writes the WAV before transcription. Secure dictations are refused at
+  `.focusSampled` so no file is ever written; `resolve(secure:)` covers only the
+  case of focus *moving* into a password field mid-dictation, which cannot be
+  known in advance. Corpus mode writes `.hyp.txt`, deliberately **not** the
+  `.raw.txt` the eval reads as its ASR reference — scoring whisper against its
+  own hypothesis would report 0% WER forever. A human still has to correct the
+  draft into a real reference, so this feeds the ASR corpus, it does not fill it.
+- **#5** proposes, never applies. Nothing in `DictionaryLearner` writes
+  `Settings.dictionary`; the user confirms in the Hub. This is the right bias —
+  a wrong entry is injected into both the whisper `initial_prompt` and the
+  cleanup prompt, so it would corrupt every future dictation.
+- One build break to fix afterwards: `HubModel.onTryoutStop`'s inner closure
+  parameter was non-escaping by default, but the tryout completion outlives the
+  call because transcription is async.
 
 **Why #7 is skipped, not deferred:** the backlog's own finding is that Parla's
 system prompt is ~334 tokens, below the 1,024-token cache minimum, so a
@@ -230,3 +257,4 @@ nothing. Revisit after #2 has real numbers.
 | 2026-08-11 | Wave 2: Tier 1 #1, #2, #3, #6, #9, #12 landed. 190/190 pass. |
 | 2026-08-11 | Wave 3: Tier 1 #4, #5, #7, #10, #11, #13, #14 landed. 240/240 pass. Model catalog hashes + sizes verified against Hugging Face. |
 | 2026-08-11 | Wave 4: Tier 1 #8 `DictationSession` extracted. main.swift 1364 → 458 lines. Two adversarial reviews found 5 defects; all fixed. 284/284 pass. **Tier 1 complete.** |
+| 2026-08-11 | Wave 5: Tier 2 #1–#6 landed. 356/356 pass. **All 28 implementable items done; #7 skipped by the audit's own reasoning.** |

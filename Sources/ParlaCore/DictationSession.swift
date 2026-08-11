@@ -10,6 +10,9 @@ public enum Landing: Equatable, Sendable { case field, history }
 public enum HUDState: Equatable, Sendable {
     case listening(command: Bool)  // command: transform-selection mode ("Command…")
     case handsFree      // fn+Space latched: still recording, fn can be released
+    /// Mid-recording preview of the shadow stream's text. Transient UI in Parla's
+    /// own pill: never inserted, never stored, never the transcript.
+    case preview(String)
     case transcribing   // fn-up → raw text landing (fast, on-device)
     case polishing      // raw landed; LLM cleanup in flight — resolves to done/savedToHistory/cleanedInHistory
     case done
@@ -145,6 +148,9 @@ public final class DictationSession {
         // streaming: the loop's live-typed ledger. Machine-level, not
         // session-level — a queued finalize must erase *its own* dictation's text.
         case streamTyped(gen: Int, text: String)
+        // streaming preview: the same text, headed for Parla's own pill instead
+        // of the user's field. Carries no ledger — nothing here can be inserted.
+        case streamPreview(gen: Int, text: String)
 
         // ASR / LLM completions. Each carries the session it belongs to, and the
         // probe sampled on main in the same turn it was dispatched.
@@ -174,7 +180,9 @@ public final class DictationSession {
         case sampleFocus(gen: Int)
         case stopCapture(discard: Bool)
         case discardStreamWindow    // queued behind the in-flight pass, which writes it on exit
-        case startStreamLoop(gen: Int, dictionary: [String])
+        /// `preview` is the loop's second consumer: with it off *and* live typing
+        /// off, the tail pass is skipped below the freeze threshold (see stream()).
+        case startStreamLoop(gen: Int, dictionary: [String], preview: Bool)
         // model
         case ensureModelLoaded              // activeTranscriber(): reload if the idle watcher freed it
         case releaseModelIfPolicyImmediate  // unloadAfterTranscription()
@@ -308,7 +316,9 @@ public final class DictationSession {
             state = .recording(s)
             // Shadow streaming runs on every dictation so the finalize only ever
             // pays for the unconfirmed tail; typing inside the loop is gated on live.
-            return [.ensureModelLoaded, .startStreamLoop(gen: g, dictionary: s.settings.dictionary)]
+            return [.ensureModelLoaded,
+                    .startStreamLoop(gen: g, dictionary: s.settings.dictionary,
+                                     preview: s.settings.streamPreviewEnabled)]
 
         case let .recorderFailed(g, message):
             guard case .starting(let s) = state, s.gen == g else { return [] }
@@ -366,6 +376,12 @@ public final class DictationSession {
             guard g == gen else { return [] }   // a newer session owns the field
             typedLedger = text
             return []
+
+        case let .streamPreview(g, text):
+            // Pill only: no ledger, no history, no landing. Empty text keeps the
+            // current label ("Listening…") rather than blanking the pill.
+            guard g == gen, case .recording = state, !text.isEmpty else { return [] }
+            return [.hud(.preview(text))]
 
         // MARK: completions
 

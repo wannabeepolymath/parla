@@ -45,8 +45,11 @@ final class HubWindowController: NSObject, NSWindowDelegate {
     }
 
     func show() {
-        if window == nil { window = makeWindow() }
+        // Before the window exists, not after: the root view branches on
+        // onboardingCompleted, and building it against unloaded settings would
+        // render the first-run flow for a moment to an existing user.
         model.refresh()
+        if window == nil { window = makeWindow() }
         NSApp.activate(ignoringOtherApps: true) // LSUIElement app: needs explicit focus
         window?.makeKeyAndOrderFront(nil)
     }
@@ -76,9 +79,17 @@ struct HubRootView: View {
     @State private var page: HubPage = .general
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
-            content
+        Group {
+            // First run owns the whole window: there is nothing useful to
+            // configure until the permissions and the model are in place.
+            if model.settings.onboardingCompleted {
+                HStack(spacing: 0) {
+                    sidebar
+                    content
+                }
+            } else {
+                OnboardingView(model: model)
+            }
         }
         .frame(minWidth: 760, minHeight: 480)
         .ignoresSafeArea() // paint under the transparent titlebar
