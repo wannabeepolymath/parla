@@ -209,3 +209,9 @@ windowing, the grapheme-diff typer, the text rules, the AX-verified inserter —
 with no AppKit dependency and nothing product-specific in it, so it carries no
 obligation for anyone who wants those primitives. The vendored whisper.cpp
 xcframework is MIT and imposes nothing upward.
+
+`LICENSE-COMMERCIAL.md` reserves the option of a separate commercial license.
+It is a stub, not an offer — there is no paid build, and the AGPL grant above
+is unconditional. It exists now because dual-licensing needs sole copyright,
+so the option has to be reserved before the first external contribution, not
+after.

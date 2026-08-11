@@ -95,9 +95,9 @@ two constants.
 
 ### Not yet done from Wave 1's items
 
-- `LICENSE-COMMERCIAL.md` stub (reserves the paid-binary right) — called for by
-  `08-cost.md` #1, was outside the agent's file scope. Do before the first
-  external PR.
+- ~~`LICENSE-COMMERCIAL.md` stub~~ — done in the closing pass. `08-cost.md:182,212`
+  called for it in TypeWhisper's shape; it reserves the dual-license option while
+  Parla still has sole copyright, which is the only moment it is cheap.
 - No regression test for #1's gate: `stream()` lives in the app target and isn't
   importable from `ParlaCoreTests`. Needs a seam in ParlaCore to be testable —
   revisit during Tier 1 #8 (`DictationSession` extraction), which creates one.
