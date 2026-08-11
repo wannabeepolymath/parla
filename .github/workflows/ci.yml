@@ -29,3 +29,11 @@ jobs:
       # No whisper model is committed (models/ is gitignored); TranscriberTests skips
       # the one test that needs one. Nothing here downloads 148 MB per run.
       - run: swift test
+
+      # Re-scores the committed eval/results.json with today's normalizer and
+      # scorer — no model, no API key, no network. It gates on DRIFT, not on the
+      # absolute threshold: the baseline legitimately contains cases that fail
+      # today (base.en mangles "Kubernetes"), and re-judging those every run
+      # would peg this red forever and teach everyone to ignore it. Same bytes
+      # in, different score out, is always a bug.
+      - run: swift run parla-eval verify

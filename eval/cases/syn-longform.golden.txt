@@ -1,0 +1,2 @@
+# category: longform
+I have been thinking about how we should structure the next quarter of work, and my view is that we start with the reliability problems because they are the ones our users actually notice, then move on to the new features once the foundation is genuinely solid, and only after that do we revisit the pricing question that keeps coming up in every planning meeting.

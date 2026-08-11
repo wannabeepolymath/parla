@@ -62,6 +62,87 @@ final class EvalNormalizeTests: XCTestCase {
         XCTAssertEqual(Eval.wer(reference: "at 6", hypothesis: "at six").rate, 0)
     }
 
+    // The regression this fold exists for: whisper heard syn-numbers perfectly,
+    // wrote it in numerals, and the harness called it a 57.1% FAILURE. An eval
+    // that cries wolf on correct output is worse than no eval.
+    func testWERNormalizerFoldsNumeralTranscriptionOfSpokenNumbers() {
+        let spoken = "Transfer four hundred and twenty dollars on the fifteenth of March at nine thirty."
+        let numerals = "Transfer $420 on the 15th of March at 9.30"
+        XCTAssertEqual(Eval.wer(reference: spoken, hypothesis: numerals).rate, 0)
+        XCTAssertEqual(Eval.wer(reference: numerals, hypothesis: spoken).rate, 0)
+    }
+
+    // The hypothesis exactly as the ASR run produced it. whisper really did drop
+    // "the" and "of", so this stays an honest near-miss — but it must be nowhere
+    // near the harness's 20% fail threshold.
+    func testWERReportedNumbersCaseNoLongerFails() {
+        let w = Eval.wer(
+            reference: "Transfer four hundred and twenty dollars on the fifteenth of March at nine thirty.",
+            hypothesis: "Transfer $420 on 15 March at 9.30")
+        XCTAssertEqual(w.edits, 2, "only the dropped \"the\" and \"of\" should be left")
+        XCTAssertLessThan(w.rate, 0.20)
+    }
+
+    func testWERNormalizerFoldsNumeralForms() {
+        for (spoken, numerals) in [("four hundred and twenty", "420"),
+                                   ("four hundred twenty", "420"),
+                                   ("twenty one", "21"),
+                                   ("twenty-one", "21"),
+                                   ("nineteen hundred", "1900"),
+                                   ("one thousand and one", "1001"),
+                                   ("one thousand two hundred and fifty", "1,250"),
+                                   ("two million five hundred thousand", "2,500,000"),
+                                   ("ninety nine thousand", "99000"),
+                                   ("the fifteenth of March", "the 15th of March"),
+                                   ("the twenty first", "the 21st"),
+                                   ("the second option", "the 2nd option"),
+                                   ("one dollar", "$1"),
+                                   ("four hundred and twenty dollars", "$420"),
+                                   ("nine thirty", "9:30"),
+                                   ("nine thirty", "9.30")] {
+            XCTAssertEqual(Eval.normalizeForWER(spoken), Eval.normalizeForWER(numerals),
+                           "\(spoken) vs \(numerals)")
+        }
+    }
+
+    // The half that matters more: the fold must never make a WRONG hearing score
+    // as right. Every pair here is two different dictations and must stay two.
+    func testWERNormalizerNeverInventsANumber() {
+        for (a, b) in [("four hundred", "four thousand"),      // 400 is not 4000
+                       ("four hundred", "420"),
+                       ("one hundred", "one hundred and one"),
+                       ("twenty one", "twenty"),
+                       ("four and twenty", "24"),              // "and" binds only after a scale
+                       ("twenty twenty", "forty"),             // must not sum to 40
+                       ("nineteen eighty four", "1984"),       // no year guessing
+                       ("nine thirty", "930"),                 // a time is not one number
+                       ("one two three", "123"),
+                       ("fifteen", "fifty"),
+                       ("$420", "420 euros"),                  // currency survives the fold
+                       ("north", "9")] {                       // "th" strip needs digits
+            XCTAssertNotEqual(Eval.normalizeForWER(a), Eval.normalizeForWER(b), "\(a) vs \(b)")
+        }
+    }
+
+    // Folding twice must equal folding once. This caught a real bug: a number
+    // run that hit a bad scale used to abandon the WHOLE run, so "nine thousand
+    // nine billion" dropped its good prefix back to the word "nine". Exhaustive
+    // over a small vocabulary rather than random, so it cannot flake — 33 of
+    // these 2401 combinations failed before the fix.
+    func testWERNormalizerFoldIsStable() {
+        let vocab = ["nine", "twenty", "hundred", "thousand", "billion", "fifteenth", "and"]
+        for a in vocab {
+            for b in vocab {
+                for c in vocab {
+                    for d in vocab {
+                        let once = Eval.normalizeForWER("\(a) \(b) \(c) \(d)")
+                        XCTAssertEqual(Eval.normalizeForWER(once), once, "\(a) \(b) \(c) \(d)")
+                    }
+                }
+            }
+        }
+    }
+
     func testWERNormalizerIsAppliedToBothSides() {
         // The classic lie: one side normalized, the other not. Same function,
         // same result, whichever way round the arguments go.

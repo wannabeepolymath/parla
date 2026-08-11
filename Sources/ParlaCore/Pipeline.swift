@@ -22,6 +22,13 @@ public struct Pipeline {
     /// Whisper pass only: trimmed transcript, nil when empty. Split from clean()
     /// so the caller can finalize raw text instantly and polish behind it.
     public func transcript(samples: [Float]) -> String? {
+        // The min-audio floor lives HERE, on the shared path, not on each caller:
+        // whisper invents content on near-silence, and while the app happened to
+        // check first, parla-eval — driving this same Pipeline — did not, so it
+        // decoded 1.6s of room tone (rms 8.3e-5) as "Testosterone.swift," and
+        // scored it. One guard, so the eval measures what ships.
+        guard TextRules.audioWorthTranscribing(sampleCount: samples.count,
+                                               rms: AudioRecorder.rms(samples)) else { return nil }
         let s = settings()
         let prompt = s.dictionary.isEmpty ? nil : s.dictionary.joined(separator: ", ")
         let t = transcribe(samples, prompt).trimmingCharacters(in: .whitespacesAndNewlines)

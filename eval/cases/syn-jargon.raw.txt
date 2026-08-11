@@ -1,0 +1,1 @@
+Deploy the Kubernetes cluster to the staging environment and check the Postgres replica lag.

@@ -1,0 +1,2 @@
+# category: code
+Rename the function to parse user input and update the call site in the audio recorder.

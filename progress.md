@@ -20,7 +20,7 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 6 | 0 | 0 | 1 |
 | **all** | **29** | **28** | **0** | **0** | **1** |
 
-Suite: **382 tests, 0 failures.** Build clean.
+Suite: **388 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
 
 ---
 
@@ -77,6 +77,59 @@ are never parallelised.
   `OpenAICompatTests` asserted the pre-fence wire shape (now asserts against
   `PromptBuilder.user`), and the new resampler test asserted an exact output
   length on a priming buffer.
+
+### Eval: the ASR leg is now scored, and running it found four defects
+
+`scripts/make-asr-corpus.sh` generates 7 synthetic cases with `say(1)` — 16 kHz
+mono, the same format `AudioRecorder` produces, with the input text as an
+exactly-correct reference. **This is not a substitute for recorded human speech**
+(no disfluency, no room tone, one speaker, perfect prosody), so the absolute WER
+is far better than reality and must never be quoted as Parla's accuracy. Its job
+is regression detection, and it did that immediately — the first run exposed:
+
+1. **`parla-eval` exited 134 (SIGABRT).** ggml frees its Metal device from a C++
+   static destructor at `exit()`; a live whisper context leaves the residency set
+   non-empty and it aborts *after* the report prints. CI would have been
+   permanently red the moment the eval was wired in, and 134 is none of the four
+   documented exit codes. Fixed by releasing the context before exit.
+2. **The silence guard was on the caller, not the shared path.** `syn-quiet.wav`
+   (rms 8.3e-5) transcribed as *"Testosterone.swift,"*. The app never shows this
+   — `Dictation.swift` calls `TextRules.audioWorthTranscribing` (minRMS 1e-4) —
+   but `Pipeline.transcript`, which the eval drives and which is supposed to *be*
+   the shipping path, never called it. Moved into `Pipeline`, so the app and the
+   eval get one answer from one place, and the guard finally has a test.
+3. **The eval reported a 57.1% failure on a correct transcription.** whisper
+   heard "four hundred and twenty dollars… at nine thirty" and wrote
+   `$420 … 9.30`. The normalizer folded single-word numbers but not compound
+   ones. An eval that cries wolf is worse than no eval.
+4. **jargon 21.4%** — "Kubernetes" → "Cubanets", "Postgres replica" →
+   "post-Gasraplica". Genuine base.en weakness, and exactly what the personal
+   dictionary, `initial_prompt` and the model catalog exist to fix. Left as a
+   true finding in the baseline.
+
+After the fixes: ASR **WER 9.8% → 4.3%**, failures **3/7 → 1/7**.
+
+### Baseline numbers — first ever measured
+
+| leg | n | zero-edit | corpus WER | p50 | p90 | fail >20% |
+|---|---|---|---|---|---|---|
+| asr (base.en, synthetic) | 7 | 2/7 | 4.3% | 0.0% | 21.4% | 1 |
+| cleanup (gpt-oss-120b via Groq) | 32 | 12/32 | 9.5% | 0.0% | 37.5% | 8 |
+
+`injection`, `lists` and `snippets` all score **0.0%** — the Tier 0 #5 prompt
+fencing, the list formatting and the deterministic snippet path are working
+against real inputs, not just unit tests. **Zero-edit is 37.5% against
+`product.md`'s 90% north star**, which is the honest gap and the first time it
+has ever been measured.
+
+`verify` now gates on **drift**, not on the absolute threshold: it re-derives
+each committed fixture's score and fails only if the scorers move under fixed
+inputs. A baseline containing known failures would otherwise peg CI red forever
+and train everyone to ignore it. Full runs still exit 1 on a real quality
+regression. Wired into `.github/workflows/ci.yml`.
+
+Cleanup numbers move run-to-run (LLM non-determinism) — which is precisely why
+`verify` re-scores committed hypotheses instead of re-calling the model.
 
 ### ⚠ Outstanding manual verification — Tier 0 #8
 

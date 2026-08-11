@@ -2,6 +2,11 @@ import XCTest
 @testable import ParlaCore
 
 final class PipelineTests: XCTestCase {
+    /// Audio that clears transcript()'s min-audio floor (≥6400 samples, rms ≥1e-4).
+    /// Anything shorter or quieter now returns nil before whisper, so tests about
+    /// the text path have to hand it real-shaped audio.
+    let speech = [Float](repeating: 0.1, count: 6_400)
+
     func makePipeline(transcript: String,
                       snippets: [String: String] = [:],
                       bundleID: String? = nil,
@@ -25,7 +30,7 @@ final class PipelineTests: XCTestCase {
             XCTAssertEqual(t, "um hello")
             return "Hello."
         }
-        let out = await p.process(samples: [0.1])
+        let out = await p.process(samples: speech)
         XCTAssertEqual(out, "Hello.")
     }
 
@@ -47,7 +52,7 @@ final class PipelineTests: XCTestCase {
 
     func testCleanupResultIsSanitized() async {
         let p = makePipeline(transcript: "um hello") { _, _ in "\"Cleaned.\"" }
-        let out = await p.process(samples: [0.1])
+        let out = await p.process(samples: speech)
         XCTAssertEqual(out, "Cleaned.")
     }
 
@@ -55,7 +60,7 @@ final class PipelineTests: XCTestCase {
         let p = makePipeline(transcript: "raw words") { _, _ in
             throw CleanupError(description: "boom")
         }
-        let out = await p.process(samples: [0.1])
+        let out = await p.process(samples: speech)
         XCTAssertEqual(out, "raw words")
     }
 
@@ -77,8 +82,29 @@ final class PipelineTests: XCTestCase {
 
     func testEmptyTranscriptReturnsNil() async {
         let p = makePipeline(transcript: "  ") { t, _ in t }
-        let out = await p.process(samples: [0.1])
+        let out = await p.process(samples: speech)
         XCTAssertNil(out)
+    }
+
+    // The min-audio floor, asserted where it now lives — no model, no whisper.
+    // It used to sit on the app's call site only, so parla-eval drove this same
+    // Pipeline straight into whisper and got a content hallucination out of
+    // eval/cases/syn-quiet.wav. Both halves of the floor are pinned: loud enough
+    // but too short, and long enough but too quiet.
+    func testNearSilenceIsNotTranscribed() async {
+        let p = Pipeline(
+            transcribe: { _, _ in
+                XCTFail("near-silence must never reach whisper")
+                return "Testosterone.swift,"
+            },
+            cleanup: { t, _ in t },
+            settings: { Settings() },
+            frontBundleID: { nil })
+        XCTAssertNil(p.transcript(samples: [Float](repeating: 0.1, count: 6_399)))
+        // syn-quiet.wav: 1.6s @16kHz at rms 8.3e-5.
+        XCTAssertNil(p.transcript(samples: [Float](repeating: 8.3e-5, count: 25_600)))
+        let out = await p.process(samples: [Float](repeating: 8.3e-5, count: 25_600))
+        XCTAssertNil(out) // and nothing reaches cleanup either
     }
 
     // Repetition-loop class output (see the ponytail ceiling in Pipeline.clean)
