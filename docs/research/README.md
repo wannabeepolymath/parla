@@ -74,6 +74,11 @@ What each of Parla's four macOS foundations costs on sway/Hyprland, evidenced by
 
 ---
 
+
+### 11-review-findings.md
+
+Every finding from the four adversarial review rounds over the implementation branch — 63 raised, 49 confirmed, 14 refuted — with file:line, failure scenario and the verifier's reasoning. Read it for *how* things shipped broken: three items that built, passed their tests and never ran; a chord matcher wrong in three consecutive rounds; and a fix batch that reintroduced the bug its own guard was written to prevent. The refutations are kept on purpose.
+
 ## Sources
 
 All 24 repos audited, ordered by stars. `—` = not recorded during the audit.

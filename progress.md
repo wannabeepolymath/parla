@@ -355,6 +355,12 @@ nothing. Revisit after #2 has real numbers.
 
 ## Final review — what shipped broken
 
+> Full structured set — all 63 findings with file:line, failure scenarios and
+> verifier reasoning, confirmed and refuted — is in
+> [`docs/research/11-review-findings.md`](docs/research/11-review-findings.md).
+> The sections below are the narrative; that file is the record.
+
+
 An adversarial review of the whole branch (six dimensions, every finding then
 independently verified by a second agent told to refute it) raised 32 findings.
 25 survived verification. **Three shipped items did not actually work**, which
