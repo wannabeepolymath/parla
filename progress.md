@@ -334,8 +334,9 @@ Original deferral reasoning, which the measurement confirms:
 Re-checked against the shipped code rather than the audit's estimate. The
 dictation system prompt literal is **560 chars ≈ 140 tokens** (~350 loaded with
 dictionary, snippets and a category tone hint). Anthropic's minimum cacheable
-prefix is 1024 tokens — and **2048 for Haiku**, which Tier 1 #14 made the
-default. So the gap is *wider* than when the audit was written, not narrower:
+prefix is 1024 tokens — and **4096 for Haiku**, which Tier 1 #14 made the
+default. (An earlier revision of this note said 2048; the verified table in
+`Cleanup.swift` is 4096, and that is what shipped.) So the gap is *wider* than when the audit was written, not narrower:
 a `cache_control` block today would be silently inert, and crossing the
 threshold means padding the prompt with ~1700 tokens of few-shot examples paid
 on every single request to save on repeats within a 5-minute window. Measured
@@ -516,7 +517,7 @@ swallowed by design because it produces whitespace.
 | 2026-08-11 | Tier 0 #8 landed alone (chunk 20→200). 174/174 pass. Manual smoke test still outstanding. |
 | 2026-08-11 | Wave 2: Tier 1 #1, #2, #3, #6, #9, #12 landed. 190/190 pass. |
 | 2026-08-11 | Wave 3: Tier 1 #4, #5, #7, #10, #11, #13, #14 landed. 240/240 pass. Model catalog hashes + sizes verified against Hugging Face. |
-| 2026-08-11 | Wave 4: Tier 1 #8 `DictationSession` extracted. main.swift 1364 → 458 lines. Two adversarial reviews found 5 defects; all fixed. 284/284 pass. **Tier 1 complete.** |
+| 2026-08-11 | Wave 4: Tier 1 #8 `DictationSession` extracted. main.swift 1364 → 458 lines at the refactor (499 today; the audit measured 1,170). Two adversarial reviews found 5 defects; all fixed. 284/284 pass. **Tier 1 complete.** |
 | 2026-08-11 | Wave 5: Tier 2 #1–#6 landed. 356/356 pass. **All 28 implementable items done; #7 skipped by the audit's own reasoning.** |
 | 2026-08-11 | Closing pass: `LICENSE-COMMERCIAL.md` added. |
 | 2026-08-11 | Review round 1 (whole branch): 32 raised, **25 confirmed / 7 refuted**. All fixed. 367/367 pass. |

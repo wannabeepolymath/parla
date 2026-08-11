@@ -1,5 +1,9 @@
 # Features to add — ranked backlog
 
+> **Status:** all 29 items below are implemented on `feat/audit-implementation`. The execution record — wave plan, per-item notes, deviations — is `progress.md` at the repo root; the four adversarial review rounds that followed it are in `11-review-findings.md`. That is the status tracker, not this file, which is kept as the audit's output: what was asked for and why.
+>
+> The file:line references and measured figures in each item are **as-of-audit** and have moved. Most notably `main.swift` is 499 lines today against the 1,170 cited in Tier 1 #8, the dictation flow having been extracted into `Sources/ParlaCore/DictationSession.swift` and `Sources/Parla/Dictation.swift`. Re-grep before trusting a line number here.
+
 Derived from the 24-repo competitive audit in this directory (`01-landscape.md` … `10-linux-wayland.md`) and the four-area inventory of Parla as it stands today. Every item cites the repo and file that proves it. Nothing already implemented in Parla is listed. Ordering inside each tier is strictly value ÷ effort, not theme.
 
 Effort: **S** ≤ half a day · **M** ≤ two days · **L** ≥ a week.
@@ -78,7 +82,7 @@ Parla leads the entire corpus on insertion: it is the only project of 24 that ty
 
 **6. Onboarding flow** — three steps (permissions with ghost-pepper's drag-the-app-icon tile, model download, a sandboxed tryout whose output goes to the HUD and not the focused app), gated on a `Settings.onboardingCompleted` flag. Today a fresh user gets a ⚠️ glyph and has to find the menu. macparakeet's `UI/Onboarding/OnboardingFlowView.swift`. · **Effort: L** · **Risk: low.** Value is real but it is entirely first-run, and Parla currently has one user.
 
-**7. Prompt caching** — deliberately deferred. Parla's system prompt is ~334 tokens (`Cleanup.swift:41-76`), below Sonnet's 1,024-token cache minimum, so a `cache_control` block today is silently inert. The counter-intuitive move is to *grow* the prompt with few-shot examples to cross the threshold — break-even at ~4 dictations per 5-minute window. Do not do this until item 2 shows the usage is sustained rather than bursty; it costs latency and tokens if it is bursty. · **Effort: M** · **Risk: low.**
+**7. Prompt caching** — shipped as a *gated* mechanism rather than an eager one (`PromptCache`, `Sources/ParlaCore/Cleanup.swift`). The audit's caution is why it is gated and it stands unchanged: crossing a cache minimum by *padding* the prompt with few-shot examples pays latency and tokens on every request and only breaks even under sustained use, so nothing was added to reach a threshold and the prompt text is left byte-identical. What ships instead: `CleanupClient` marks the system block with `cache_control` **only** when the built prompt clears the configured model's own minimum, and sends no block at all below it — the API accepts an inert block and silently ignores it, which misleads the next person to read the request. Minimums are per-model and not monotonic across generations (opus-5 512 · sonnet-5 1,024 · opus-4-5 4,096 · **haiku-4-5 4,096**), an unrecognised model never caches, and the char→token estimate undercounts on purpose (5 chars/token) so the gate opens late rather than early. Measured: the fully loaded prompt is 2,128 chars ≈ 425 est. tokens against the 4,096 of the `claude-haiku-4-5` default (Tier 1 #14) — a documented no-op today that turns itself on if the dictionary or snippets grow, or a lower-threshold model is configured. · **Effort: M** · **Risk: low.**
 
 ---
 
@@ -120,7 +124,7 @@ Ordered by expected saving. Nothing below is measured on Parla's own hardware ye
 - [ ] **Per-buffer allocation on the realtime thread** — the `AVAudioConverter` hoist (Tier 0 #3). Small as latency, large as WER.
 - [ ] **Per-step allocations in `quietestCut`** — allocates inside the scan loop; trivial, and only worth doing once the trace says the head-cut pass is visible at all.
 - [ ] **Menu-open stall** — `availableInputs()` plus `store.load()` run synchronously when the status menu opens. Not on the dictation path, but it is the one place the app visibly hitches.
-- [ ] **Prompt caching** — deferred, and currently inert below 1,024 tokens. Tier 2 #7.
+- [ ] **Prompt caching** — no saving at today's prompt size: ~425 est. tokens against the Haiku 4.5 default's 4,096-token minimum. Tier 2 #7.
 
 ---
 

@@ -221,6 +221,74 @@ swift build
 swift test
 ```
 
+## Developer tooling
+
+### `swift run parla-eval` — regression harness
+
+Scores the corpus in `eval/cases` on two legs: ASR (whisper against the
+verbatim `NAME.raw.txt`) and cleanup (model output against `NAME.golden.txt`).
+
+| Mode | What it does |
+|---|---|
+| `parla-eval [dir]` | full pipeline: wav → whisper → cleanup; writes `eval/results.json` |
+| `--asr-only` | whisper leg only — no API key needed |
+| `--cleanup-only` | cleanup leg only — no whisper model needed |
+| `--model <id>` | cleanup model for THIS run; `settings.json` is never written |
+| `--out <path>` | read/write fixtures elsewhere, so two runs can sit side by side |
+| `compare a b` | diff two results files: aggregates per leg and category, then the cases they disagree on most |
+| `verify [dir]` | re-score the committed `eval/results.json` offline — no model, no key, no network |
+| `--self-check` | assert the `compare` arithmetic offline, without a corpus |
+
+Exit codes: **0** clean · **1** quality regression (a case scored WER > 20 %) ·
+**2** misconfiguration (model or key missing, unusable `compare` arguments) ·
+**3** infrastructure error — a network flake must never read as a quality
+regression, which is why 3 exists. `compare` always exits 0: one model scoring
+worse than another is the answer that mode produces, not a failure of it.
+
+`verify` is the CI gate (`.github/workflows/ci.yml`), and it gates on **scorer
+drift**, not on the 20 % threshold: it re-derives each committed hypothesis's
+score and fails only when the same bytes produce a different number than the one
+recorded in the fixture. The committed baseline legitimately contains failing
+cases (base.en mangles "Kubernetes"), and re-judging those on every run would
+peg CI red forever and teach everyone to ignore it.
+
+### `scripts/make-asr-corpus.sh`
+
+Regenerates the seven synthetic ASR cases (`eval/cases/syn-*`) with `say(1)`,
+16 kHz mono — the same format `AudioRecorder` produces, so each case's reference
+is the input text rather than a guess about what was said. The WAVs are
+committed, so CI never needs `say`. Synthetic audio is for **regression
+detection only**: TTS has no disfluency, room tone, accent or clipping, so its
+absolute WER is far better than reality and must never be quoted as Parla's
+accuracy. The human corpus `eval/README.md` asks for is still wanted.
+
+### `swift run parla-insert-check [bundleID]`
+
+Types five known strings into a live app (default `com.apple.TextEdit`) and
+reads them back over Accessibility — the automated half of the insertion smoke
+test. The cases are the real hazards: a 600-char single line, embedded newlines,
+an emoji astride the 200-unit chunk boundary, combining marks + RTL, and 201
+units.
+
+`swift run` builds an unsigned binary under `.build`, and macOS grants
+Accessibility per binary, so that path has to be added under System Settings >
+Privacy & Security > Accessibility (a rebuild can require re-granting). A field
+it can type into but not read back is **SKIP, never PASS**; if every case skips
+it exits 3, so a run that verified nothing cannot look like success. A 90s
+watchdog exits 4 rather than hanging. Otherwise: 0 ok, 1 a case failed, 2
+permission or target problem.
+
+### Environment switches
+
+- `PARLA_TRACE=1` — one greppable `parla-trace …` line per dictation on stderr:
+  the input device's transport (`builtin`/`usb`/`bluetooth`/…) and each stamp as
+  a delta from the previous one — `fn_down`, `recorder_start_returned`,
+  `first_pcm_callback`, `fn_up`, `final_pass_done`, `landed`,
+  `cleaned_swapped`, then `total`. Off by default and cheap when off (one cached
+  bool test), because one stamp is taken on the realtime audio thread.
+- `PARLA_KEEP_RECORDINGS=1` — keeps successful dictations' audio for building an
+  eval corpus; see [Permissions](#permissions).
+
 ## License
 
 The app — everything outside `Sources/ParlaCore/` — is **AGPL-3.0-or-later**

@@ -70,6 +70,19 @@ the same flagsChanged detection push-to-talk uses; the stop-chord's Space is
 swallowed so it can't leak or restart a session. Tray menu and Hub now state
 the exit ("fn 🌐 stops").
 
+## 2026-08-11 changes
+- All 29 items of the open-source audit backlog (`docs/research/FEATURES-TO-ADD.md`)
+  are implemented on `feat/audit-implementation`, followed by four adversarial
+  review rounds — 63 findings, 49 confirmed and fixed, 14 refuted. Per-item detail
+  lives in `progress.md`; the findings and their verdicts in
+  `docs/research/11-review-findings.md`. Not repeated here.
+- What touches this log directly: hotkeys are now rebindable (retires next step 5
+  below); secure event input is detected before typing and refuses the dictation
+  instead of typing into a void; the typing chunk went 20 → 200 UTF-16 units with
+  a 1ms inter-chunk sleep (erase still 5ms — issue 6 is the erase path).
+- Two things still need a human, both recorded below: a GUI session for
+  `parla-insert-check`, and an Anthropic key for the Haiku-vs-Sonnet cleanup A/B.
+
 ## 2026-07-10 changes
 - Clipboard removed entirely (supersedes the clipboard-fallback mentions in
   issues 5–7 and the improvements below): Inserter types via CGEvent Unicode
@@ -101,8 +114,8 @@ the exit ("fn 🌐 stops").
 - Command mode: hold ⇧+fn with text selected, speak an edit instruction, release — the selection is transformed and pasted over itself, with a hard failure (nothing pasted) on any error and a clipboard fallback if the selection changed underneath it.
 
 ## Next steps
-1. Real-world testing of the instant-finalize + swap flow across more apps (Electron chat apps, terminals, browser text areas) — confirm the raw-then-cleaned handoff feels instant and the swap lands correctly, not just in logs.
-2. Exercise command mode (⇧+fn) in daily use: verify transform quality, the selection-changed history fallback, and that failures never leak the spoken instruction.
-3. Verify the failure-visibility paths for real: a genuinely corrupt settings.json, a revoked permission, and a from-scratch model download.
-4. Route no-focus dictations into the Scratchpad instead of history-only — completes the clipboard-removal story.
-5. Configurable shortcuts (recorder UI + persistence); everything is hard-coded today and the Hub says so.
+1. Real-world testing of the instant-finalize + swap flow across more apps (Electron chat apps, terminals, browser text areas) — confirm the raw-then-cleaned handoff feels instant and the swap lands correctly, not just in logs. Half of this is now automated: `swift run parla-insert-check [bundleID]` types five known payloads into a real app and reads each one back over AX. It has never produced a verdict — run from a background shell the focused element stays the terminal, so every case correctly SKIPs. It needs one GUI session (TextEdit, Ghostty, Slack) with someone at the machine.
+2. Exercise command mode (⇧+fn) in daily use: verify transform quality, that a selection changed underneath is caught (`selectionStillMatches` is probed before anything is written) rather than overwritten, and that failures never leak the spoken instruction.
+3. Verify the failure-visibility paths for real: a genuinely corrupt settings.json, a revoked permission, and a from-scratch model download. More open than it was, not less — the download path was rewritten since (staged temp file, size + SHA-256 verification, restore on failure) and first run now goes through the onboarding flow instead of the menu.
+4. Route no-focus dictations into the Scratchpad instead of history-only — completes the clipboard-removal story. Still unbuilt: `Inserter.FocusTarget.none` is history-only, and nothing on the dictation path opens the Scratchpad.
+5. Run the cleanup eval against both Haiku 4.5 and Sonnet before trusting the new default. `cleanupModel` now defaults to `claude-haiku-4-5` on cost and latency grounds with no eval behind it, and blank-model installs move to Haiku with it. Needs an Anthropic key; revert is one string.
