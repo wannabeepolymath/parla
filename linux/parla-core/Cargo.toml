@@ -1,0 +1,17 @@
+[package]
+name = "parla-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+# net + io-util drive the one-shot loopback server that covers `clean`'s
+# post-response tail. Listed explicitly rather than leaned on via the
+# workspace's feature set, which is the daemon's to change.
+tokio = { workspace = true, features = ["rt", "macros", "net", "io-util"] }

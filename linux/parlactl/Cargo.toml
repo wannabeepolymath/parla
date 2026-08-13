@@ -1,0 +1,10 @@
+[package]
+name = "parlactl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Deliberately empty. The compositor spawns this binary on every key press and
+# every key release, so its startup cost is on the critical path: no async
+# runtime, no parla-core, no crates.io at all — just blocking std sockets.
+[dependencies]
