@@ -30,7 +30,13 @@ public final class WhisperTranscriber {
 
     deinit { whisper_free(ctx) }
 
-    public func transcribe(_ samples: [Float], initialPrompt: String?, shouldAbort: (() -> Bool)? = nil) -> String {
+    /// Returns nil when the pass did NOT complete — a whisper error, or a
+    /// cooperative abort via `shouldAbort`. That is distinct from "", which is a
+    /// completed pass that found no speech. The difference matters: the
+    /// streaming loop freezes a confirmed prefix and advances its sample cut
+    /// from a pass's result, so committing a failure as if it were silence
+    /// permanently deletes that span of audio from the transcript.
+    public func transcribe(_ samples: [Float], initialPrompt: String?, shouldAbort: (() -> Bool)? = nil) -> String? {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         params.print_progress = false
         params.print_realtime = false
@@ -87,7 +93,7 @@ public final class WhisperTranscriber {
                 }
             }
         }
-        guard result == 0 else { return "" }  // non-zero on error or cooperative abort.
+        guard result == 0 else { return nil }  // non-zero on error or cooperative abort: the pass did NOT complete.
 
         var text = ""
         for i in 0..<whisper_full_n_segments(ctx) {
@@ -100,11 +106,24 @@ public final class WhisperTranscriber {
 
     /// Whisper emits bracketed markers on non-speech audio — "[BLANK_AUDIO]",
     /// "[MUSIC]", "(silence)", "*sigh*" — which must never be typed or pasted.
-    /// Dropped token by token, not all-or-nothing: whisper mixes a marker into a
-    /// real sentence ("Hello there. [BLANK_AUDIO]") and the all-or-nothing form
-    /// typed the brackets straight into the user's document. A transcript that is
-    /// nothing but markers still becomes "".
+    /// Two layers, each covering the other's blind spot:
+    /// 1. Emptiness is decided on marker SPANS, so multi-word forms like
+    ///    "(upbeat music)" count — per-token matching tokenized that to
+    ///    ["(upbeat", "music)"], neither a marker, and typed the whole thing.
+    ///    A transcript that is nothing but such spans becomes "".
+    /// 2. Mixed content drops single-token markers only ("Hello. [BLANK_AUDIO]"
+    ///    → "Hello."): a multi-word span beside real speech could be a spoken
+    ///    parenthetical, and we cannot tell a hallucination from dictated
+    ///    punctuation, so those survive verbatim.
     public static func stripNonSpeech(_ text: String) -> String {
+        // Layer 1: nothing-but-markers → "". Spans, not tokens, so multi-word
+        // markers count; only used for the emptiness decision.
+        let markerSpan = #"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*"#
+        let remainder = text
+            .replacingOccurrences(of: markerSpan, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if remainder.isEmpty { return "" }
+        // Layer 2: real speech present — drop single-token markers.
         let wrapped = ["[": "]", "(": ")", "*": "*"]
         let isMarker = { (word: Substring) -> Bool in
             guard let first = word.first, let close = wrapped[String(first)] else { return false }

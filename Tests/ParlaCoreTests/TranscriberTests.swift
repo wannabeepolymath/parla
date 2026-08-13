@@ -64,6 +64,17 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[MUSIC]\n[BLANK_AUDIO]"), "")
     }
 
+    // The per-word test this replaced tokenized "(upbeat music)" into
+    // ["(upbeat", "music)"] — neither a marker — so the whole hallucination was
+    // typed into the user's field.
+    func testMultiWordMarkersStripped() {
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("(upbeat music)"), "")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[typing sounds]"), "")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("*clears throat*"), "")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[MUSIC] (upbeat music)"), "")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("  (soft piano music)  "), "")
+    }
+
     func testRealSpeechUntouched() {
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Hello world."), "Hello world.")
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Array [0] is empty"), "Array [0] is empty")
@@ -77,5 +88,21 @@ final class TranscriberTests: XCTestCase {
         // Marker on its own line: never seen as a token when splitting on " " alone.
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("Hello there.\n[BLANK_AUDIO]"), "Hello there.")
         XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[BLANK_AUDIO]\n\nHello\tthere."), "Hello there.")
+    }
+
+    // A transcript that is nothing but markers becomes "" even when the markers
+    // are multi-word: per-token matching saw "(upbeat music)" as two non-marker
+    // tokens and typed the hallucination into the user's field.
+    func testMultiWordMarkersAloneBecomeEmpty() {
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("(upbeat music)"), "")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("[typing sounds] (upbeat music)"), "")
+    }
+
+    // Real words alongside a multi-word marker survive verbatim — including the
+    // marker, since we cannot tell a hallucination from spoken punctuation here.
+    func testSpeechWithMultiWordMarkerReturnedUnchanged() {
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("(upbeat music) ship it friday"),
+                       "(upbeat music) ship it friday")
+        XCTAssertEqual(WhisperTranscriber.stripNonSpeech("call fn(x) twice"), "call fn(x) twice")
     }
 }

@@ -39,7 +39,7 @@ export GROQ_API_KEY=gsk_…            # instead of ANTHROPIC_API_KEY
 ```
 
 Skipping the first step is fine — the menu bar offers a one-click
-**Download model (base.en)** on launch. After code changes, quit Parla (menu >
+**Download model (base.en, ~148 MB)** on launch. After code changes, quit Parla (menu >
 Quit), re-run `scripts/make-app.sh`, and `open Parla.app` again; permission
 grants survive rebuilds (the bundle is signed with a stable identifier).
 
@@ -47,7 +47,8 @@ Transcription runs on a vendored whisper.cpp v1.9.1 xcframework with Metal GPU
 active by default; `make-app.sh` bundles `whisper.framework` into
 `Parla.app/Contents/Frameworks` (macOS 13.3+ required to match it).
 
-On first launch Parla lives in the menu bar (no dock icon) and shows 🎤. macOS
+On first launch Parla lives in the menu bar (no dock icon) and shows ⚠️ until
+the model and both permissions are in place. macOS
 will prompt for **Microphone** and **Accessibility** permission — grant both in
 System Settings > Privacy & Security. Then hold **fn 🌐 (Globe)** and speak;
 release to transcribe and type the text into the frontmost app instantly, with
@@ -58,9 +59,12 @@ after you let go, until you press fn, Space or Return. Taps shorter than
 other key while fn is held cancels the dictation and undoes anything already
 typed. Start/finish/cancel each play a soft system sound.
 
-The menu-bar icon reflects state: 🎤 idle · 🔴 recording · … processing · ⬇️
-N% downloading the model · ⚠️ problem (no model, mic/Accessibility permission
-missing, or a broken `settings.json`).
+The menu-bar icon is the Parla logo glyph both when idle and while recording —
+the pill is what shows the live recording state. It switches to text for the
+rest: … processing · ⬇️ N% downloading the model · ⚠️ problem (no model,
+mic/Accessibility permission missing, or a broken `settings.json`). Run
+unbundled via `swift run` and there's no logo resource, so those two states
+show 🎤 and 🔴 instead.
 
 By default the dictation pill stays visible as a small idle capsule floating on
 screen, morphing into the full pill while you dictate. Turn off **Show pill at
@@ -78,13 +82,37 @@ error and disables editing rather than overwriting it.
 
 The menu also shows live Microphone/Accessibility permission status
 (click an unfulfilled one to jump to System Settings), a one-click
-**Download model (base.en)** item when no model is loaded, a
+**Download model (base.en, ~148 MB)** item when no model is loaded, a
 **⚠️ settings.json invalid** item when the config fails to parse, a
-**Launch at Login** toggle, a **Set API Key…** box (paste your Anthropic key
-without touching the terminal or the settings file), and **Paste Last
+**Launch at Login** toggle, a **Microphone** picker, and **Paste Last
 Dictation** / a **Recent**
 submenu (last 8 dictations, backed by a local 50-entry history) with
 **Clear History** — see `historyEnabled` below.
+
+**Open Scratchpad** (second menu item, or **⌃⌘S**) opens the Scratchpad — one
+persistent plain-text window that gives a dictation somewhere to go when no
+other app is focused: focus it, hold fn, and the transcript types in like any
+other field. It saves to
+`~/Library/Application Support/Parla/scratchpad.txt` (debounced while you
+type, flushed when the window closes and on quit). Closing the window hides
+it; Parla stays menu-bar-only.
+
+## Shortcuts
+
+All of these are global and fixed in this version (the Hub lists them
+read-only):
+
+- **fn 🌐 (Globe), held** — dictate; release to transcribe and type.
+- **⇧+fn, held** — command mode: transform the selected text (see below). The mode is latched at fn-down, so shift can be released while you speak.
+- **fn+Space** — latch hands-free: recording survives releasing fn. The Space is swallowed, so nothing lands in the field.
+- **Space, Return, or fn again (while hands-free)** — stop recording and transcribe. Also swallowed, so no space or newline precedes the transcript.
+- **Esc (while dictating)** — cancel; anything already typed is undone. Swallowed, so the Esc never reaches the app.
+- **any other key (while fn is held)** — also cancels, but the key still reaches the app.
+- **Esc (while idle)** — dismiss a visible HUD toast, then pass through to the app. In-progress states ("Transcribing…", "✓ · polishing…") are not dismissible.
+- **⌃⌘V** — type the last transcript into the focused field. Waits for you to release the physical modifiers first (up to ~1s, then "⚠️ Release keys, then retry").
+- **⌃⌘S** — open the Scratchpad.
+
+⌃⌘V and ⌃⌘S match exactly those modifiers, so ⌃⌥⌘V and ⌃⇧⌘V are left alone.
 
 ## Shadow streaming
 
@@ -106,11 +134,15 @@ synthetic keystrokes (HUD: "Transcribing…", then "✓ · polishing…"); with 
 focused field nothing is typed — the transcript is only saved to history.
 The clipboard is never touched: text lives in the field and in local history,
 and reaches the clipboard only via the Hub's explicit Copy button. The
-LLM-cleaned version swaps in behind the raw text moments later via a diff
-(only the changed tail is backspaced and retyped), landing on one of:
+LLM-cleaned version swaps in behind the raw text moments later — one atomic
+Accessibility write over the text Parla typed, falling back to backspaces and
+retyping when the app won't accept the write — landing on one of:
 "✓ Pasted", "✓ Saved to history", "✓ cleaned in history" (swap couldn't be
 verified — the cleaned text is in history instead), or "✓ raw (cleanup
-failed)". Cancelling (a keypress while fn is held) shows "✕ Cancelled".
+failed)". Cancelling — Esc, or any other keypress while fn is held — shows
+"✕ Cancelled". If the mic goes away mid-dictation (AirPods disconnecting, a
+hub unplugged) the pill says "⚠️ Mic disconnected"; audio captured before the
+break still finalizes normally on release.
 
 ## Command mode
 
@@ -151,24 +183,26 @@ corpus; the Hub shows a banner for as long as it is on.) Transcription itself
 runs on this Mac, and the cleanup model is sent text, never audio.
 
 Password fields (`AXSecureTextField`) are detected via Accessibility and
-refused outright: dictation into one shows "Not supported in password
+refused outright: dictation into one shows "⚠️ Not supported in password
 fields" — nothing is typed, stored in history, or sent to the cleanup model.
 
 ## Configuration
 
 Settings live at `~/Library/Application Support/Parla/settings.json` — use the
-menu-bar **Open Settings File** item to create and edit it. A file that fails
+Hub's **General → Settings file → Open File** button to create and edit it. A file that fails
 to parse is never silently overwritten; the menu shows the decode error until
 you fix it. Fields:
 
 - `dictionary` — array of exact spellings (names, jargon) to bias transcription and cleanup, e.g. `["Parla", "whisper.cpp"]`.
 - `snippets` — object mapping a spoken trigger phrase to its expansion, e.g. `{"my address": "123 Main St"}`.
-- `cleanupModel` — Anthropic model id for cleanup (default `claude-haiku-4-5`).
-- `anthropicApiKey` — API key for cleanup; the menu-bar **Set API Key…** item writes this field for you. The `ANTHROPIC_API_KEY` environment variable takes precedence; if neither is set, Parla inserts the raw transcript.
+- `cleanupModel` — Anthropic model id for cleanup (default `claude-sonnet-5`).
+- `anthropicApiKey` — API key for cleanup; the Hub's **AI Cleanup** page writes this field for you. The `ANTHROPIC_API_KEY` environment variable takes precedence; if neither is set, Parla inserts the raw transcript.
 - `whisperModelPath` — absolute path to a ggml whisper model. Defaults to the model downloaded by `scripts/download-model.sh`.
 - `showHudAlways` — keep the dictation pill floating on screen as a small idle capsule at all times, expanding into the full pill during dictation. Default `true`; set `false` for a transient pill shown only while dictating.
+- `hudIdleSize` — size of that idle capsule: `"small"` (default), `"medium"`, or `"large"`. Unknown values fall back to small.
+- `inputDeviceUID` — Core Audio UID of the input device to record from, as picked in the menu's **Microphone** submenu. Default `null` (system default); a UID that no longer resolves — device unplugged — also falls back to the system default.
 - `historyEnabled` — keep a local log of the last 50 dictations (raw + cleaned + app name) at `~/Library/Application Support/Parla/history.json`, for the menu's Paste Last Dictation / Recent. Default `true`. Secure-field and cancelled dictations are never recorded regardless of this setting.
-- `liveStreamingEnabled` — currently ignored: mid-speech typing is hard-disabled (held-fn keystrokes merge with the modifier). Transcription still runs while you speak; the text lands as one insert on release.
+- `liveStreamingEnabled` — dead field: it is still parsed and written back, but nothing reads it, so setting it either way changes nothing. Default `true`. Mid-speech typing is hard-disabled in code (held-fn keystrokes merge with the modifier); transcription still runs while you speak, and the text lands as one insert on release.
 
 ## Cleanup providers
 

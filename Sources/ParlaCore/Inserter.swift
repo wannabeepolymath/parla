@@ -169,9 +169,17 @@ public enum Inserter {
            settable.boolValue {
             return .editable
         }
+        // The range must actually BE a range. Copy-success alone is not proof of
+        // editability — read-only elements answer this attribute too — and
+        // focusedFieldState() performs this identical read WITH validation, so
+        // without the check classifyFocus was strictly more permissive than the
+        // verifier it feeds: it could promise "editable" for a field the swap
+        // could then never verify.
         var sel: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &sel) == .success {
-            return .editable
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &sel) == .success,
+           let sel, CFGetTypeID(sel) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(sel as! AXValue, .cfRange, &range) { return .editable }
         }
         return .unknown
     }
@@ -347,6 +355,13 @@ public enum Inserter {
     /// anchor, not a caret — see `canErase`.
     static func focusedFieldState() -> (text: NSString, cursor: Int, selLength: Int)? {
         guard let element = focusedElement() else { return nil }
+        return fieldState(of: element)
+    }
+
+    /// Same read against an element the caller already resolved — so a sequence
+    /// of reads and a write all act on ONE element rather than re-querying focus
+    /// between them and possibly landing on a different one.
+    static func fieldState(of element: AXUIElement) -> (text: NSString, cursor: Int, selLength: Int)? {
         var valueRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
               let text = valueRef as? String else { return nil }
@@ -398,6 +413,55 @@ public enum Inserter {
         guard selLength == 0 else { return false }
         guard cursor >= len, cursor <= text.length else { return false }
         return text.substring(with: NSRange(location: cursor - len, length: len)) == typed
+    }
+
+    /// Swap the tail of the focused field in ONE atomic AX write: verify the
+    /// field still ends with `current`, set the whole value to
+    /// prefix + `replacement` + whatever followed the cursor, and put the caret
+    /// back after the replacement.
+    ///
+    /// This exists to replace "post N backspaces, then type the new text", which
+    /// was both slow and unsound. Slow: the raw→cleaned diff is prefix-only, so
+    /// any change to the first word — a dropped leading filler, a capitalisation
+    /// — makes N the entire transcript, and a 600-character dictation was erased
+    /// one character at a time over ~3 seconds before being retyped. Unsound:
+    /// canEraseTyped is a single point-in-time check, so a character the user
+    /// physically typed during that burst was eaten by the remaining
+    /// backspaces, breaking the "Parla cannot delete text it didn't write"
+    /// guarantee. One atomic write has no window to race and nothing to watch.
+    ///
+    /// Returns false when AX cannot see the field, cannot prove our text is
+    /// still at the cursor, cannot set the value, or when the write did not
+    /// actually take — so the caller can fall back rather than report a success
+    /// that never happened.
+    public static func replaceTypedTail(_ current: String, with replacement: String) -> Bool {
+        guard let element = focusedElement(),
+              let (text, cursor, _) = fieldState(of: element) else { return false }
+        let len = (current as NSString).length
+        guard len > 0, cursor >= len, cursor <= text.length,
+              text.substring(with: NSRange(location: cursor - len, length: len)) == current
+        else { return false }
+
+        var settable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
+              settable.boolValue else { return false }
+
+        let head = text.substring(to: cursor - len)
+        let rest = text.substring(from: cursor)
+        let updated = head + replacement + rest
+        guard AXUIElementSetAttributeValue(
+            element, kAXValueAttribute as CFString, updated as CFString) == .success else { return false }
+
+        // Read back. An app may accept the write and ignore it — controlled
+        // inputs in web and Electron views do exactly that — and reporting
+        // success then would leave the raw text sitting under a "✓ Pasted".
+        guard let after = fieldState(of: element), after.text.isEqual(to: updated) else { return false }
+
+        var caret = CFRange(location: (head as NSString).length + (replacement as NSString).length, length: 0)
+        if let pos = AXValueCreate(.cfRange, &caret) {
+            AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, pos)
+        }
+        return true
     }
 
     /// True when final replacement can be verified via AX. Fields that merely

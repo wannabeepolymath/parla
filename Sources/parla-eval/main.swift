@@ -592,7 +592,8 @@ struct NoEngine: Error {}
 /// tone hint is keyed on, and the same value the flatten below uses.
 var currentBundle: String?
 let pipeline = Pipeline(
-    transcribe: { samples, prompt in transcriber?.transcribe(samples, initialPrompt: prompt) ?? "" },
+    // flatMap, not ?? "": a failed pass must score as a failure, not as silence.
+    transcribe: { samples, prompt in transcriber.flatMap { $0.transcribe(samples, initialPrompt: prompt) } },
     cleanup: { text, ctx in
         guard let client else { throw NoEngine() }
         // Back off and retry on 429 — here, NOT in CleanupClient. The app is

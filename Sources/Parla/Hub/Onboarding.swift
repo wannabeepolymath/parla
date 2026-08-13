@@ -297,9 +297,11 @@ extension AppDelegate {
             await prev?.value
             // Same floor the real pipeline uses — below it whisper hallucinates a
             // sentence out of silence, which is the worst possible first impression.
+            // ?? "": a failed pass reads as "nothing recognized" here — the
+            // tryout has no error surface, and retrying is one button away.
             let text = TextRules.audioWorthTranscribing(sampleCount: samples.count,
                                                         rms: AudioRecorder.rms(samples))
-                ? transcriber.transcribe(samples, initialPrompt: nil) : ""
+                ? (transcriber.transcribe(samples, initialPrompt: nil) ?? "") : ""
             await MainActor.run {
                 // Back to idle on every exit. `.preview` is a mid-recording state
                 // in the real pipeline — a terminal state always follows it and

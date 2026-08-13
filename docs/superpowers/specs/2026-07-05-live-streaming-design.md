@@ -1,5 +1,20 @@
 # Live Streaming Dictation — Design
 
+> **SUPERSEDED — kept as a record.** Two load-bearing parts of this spec do not
+> ship. (1) Typing into the field while fn is held is hard-disabled:
+> `liveTyping` is assigned `false` on both dictation entry paths
+> (`Sources/Parla/main.swift:157`, `:213`) because keystrokes posted while the
+> user physically holds fn merge with the modifier — fn+A opens the Dock, ⇧←
+> becomes select-to-Home. The transcript lands as one insert at fn-up, after
+> the modifier is released. (2) "Clipboard always ends up holding the final
+> text" is false — the clipboard was removed from the insertion path entirely;
+> `Inserter.insert` posts Unicode keystrokes and the pasteboard is never read
+> or written during dictation. What survives is shadow streaming: the pass loop
+> still runs during speech to build a confirmed prefix so fn-up only pays for
+> the tail, but the field is never touched mid-utterance. Current behavior is
+> documented in README, "Shadow streaming". The body below is the original
+> design, unedited.
+
 Approved by user 2026-07-05 ("text should real time stream into the textbox").
 
 ## Goal

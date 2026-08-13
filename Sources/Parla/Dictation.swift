@@ -254,7 +254,11 @@ extension AppDelegate {
                     tail,
                     initialPrompt: StreamWindow.tailPrompt(dictionary: settings.dictionary,
                                                            confirmed: win.confirmedText))
-                let joined = StreamWindow.join(win.confirmedText, tailText)
+                // nil = the tail pass failed. That must not discard the confirmed
+                // prefix the stream already earned — fall back to it, exactly as a
+                // below-floor tail does.
+                if tailText == nil { NSLog("Parla finish: tail pass failed, using confirmed prefix") }
+                let joined = StreamWindow.join(win.confirmedText, tailText ?? "")
                 raw = joined.isEmpty ? nil : joined
             } else {
                 raw = win.confirmedText.isEmpty ? nil : win.confirmedText
@@ -355,7 +359,13 @@ extension AppDelegate {
                                                      rms: AudioRecorder.rms(samples))
         if !heard { NSLog("Parla transform: audio below min-audio floor") }
         let prompt = settings.dictionary.isEmpty ? nil : settings.dictionary.joined(separator: ", ")
-        let spoken = heard ? transcriber.transcribe(samples, initialPrompt: prompt) : ""
+        guard let spoken = heard ? transcriber.transcribe(samples, initialPrompt: prompt) : "" else {
+            // nil = the pass errored, distinct from "nothing heard": say so
+            // instead of blaming the user's diction.
+            NSLog("Parla transform: transcription failed")
+            await MainActor.run { self.send(.legUnavailable(s, message: "Transcription failed")) }
+            return
+        }
         let instruction: String? = await MainActor.run {
             self.send(.commandHeard(s, instruction: spoken))
             defer { self.pendingInstruction = nil }
@@ -431,9 +441,16 @@ extension AppDelegate {
                     Array(tail[..<rel]),
                     initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
                     shouldAbort: { !self.capturing(gen) })
-                // Aborted head pass returns "": committing the cut would silently
-                // drop the head's text from confirmed. Only commit a completed pass.
+                // Aborted or errored head pass returns nil: committing the cut
+                // would silently drop the head's audio from the transcript
+                // forever. Only commit a completed pass; an errored one leaves
+                // the window alone and finish()'s full pass still owns the audio.
                 guard capturing(gen) else { break }
+                guard let head else {
+                    NSLog("Parla stream: head pass failed, not committing the cut")
+                    await pauseBetweenPasses(gen)
+                    continue
+                }
                 confirmed = StreamWindow.join(confirmed, head)
                 cut += rel
                 tail = Array(tail[rel...])
@@ -454,9 +471,14 @@ extension AppDelegate {
                 tail,
                 initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
                 shouldAbort: { !self.capturing(gen) })
-            // Aborted pass returns "": never treat it as a new hypothesis —
-            // live typing would erase everything the user sees. finish() takes over.
+            // Aborted or errored pass returns nil: never treat it as a new
+            // hypothesis — live typing would erase everything the user sees.
+            // On abort finish() takes over; on error just try the next pass.
             guard capturing(gen) else { break }
+            guard let tailText else {
+                await pauseBetweenPasses(gen)
+                continue
+            }
             let text = StreamWindow.join(confirmed, tailText)
             await MainActor.run {
                 // The capturing re-check is on THIS side of the hop deliberately:

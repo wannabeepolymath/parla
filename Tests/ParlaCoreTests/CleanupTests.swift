@@ -96,6 +96,8 @@ final class CleanupTests: XCTestCase {
     func testUserMessageNormalModeFencesTranscript() {
         XCTAssertEqual(PromptBuilder.user(transcript: "um hi", context: ctx),
                        "<transcript>\num hi")
+        // The system prompt names the delimiter, so the model knows where data starts.
+        XCTAssertTrue(PromptBuilder.system(context: ctx).contains("<transcript>"))
     }
 
     // A dictated instruction must arrive as fenced data, and the system prompt

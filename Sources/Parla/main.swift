@@ -219,6 +219,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
+    /// Open the TLS connection to the cleanup provider while the user is still
+    /// speaking, so the polish call doesn't pay handshake latency.
+    private func warmCleanupConnection(settings: Settings) {
+        guard let url = cleanupWarmURL(
+            settings: settings, env: ProcessInfo.processInfo.environment) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
     /// ⌃⌘V is still physically held when the pasteLast edge fires; typing while
     /// real modifiers are down risks the app reading them alongside our events.
     /// Wait for release (max ~1s), then insert; give up with a toast — the text
@@ -239,6 +250,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// then flatten newlines where Return would fire: terminals run commands,
     /// chat apps (Slack, Discord, etc.) send the message.
     func insertStoredText(_ text: String) {
+        // The ONE insertion path with no secure-field check otherwise: ⌃⌘V and
+        // the history menu would type a stored transcript straight into a
+        // password field — the single invariant the rest of the app never
+        // breaks. The text stays in history for a retry somewhere sane.
+        guard Inserter.focusTarget() != .secure else {
+            NSLog("Parla paste-last: focus is a secure field, refused")
+            hud.show(.error("Not supported in password fields"))
+            return
+        }
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Inserter.insert(TextRules.flattensNewlines(bundleID: bundleID) ? TextRules.flattenForTerminal(text) : text)
     }

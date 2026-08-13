@@ -1,7 +1,8 @@
 import Foundation
 
 public struct Pipeline {
-    public var transcribe: ([Float], String?) -> String
+    /// nil ⇒ the whisper pass failed or was aborted (not "no speech" — that is "").
+    public var transcribe: ([Float], String?) -> String?
     public var cleanup: (String, CleanupContext) async throws -> String
     public var settings: () -> Settings
     /// The destination app's bundle ID, not its name: the only thing the prompt
@@ -9,7 +10,7 @@ public struct Pipeline {
     /// is keyed on the bundle ID (`CleanupContext.appName` reaches nothing).
     public var frontBundleID: () -> String?
 
-    public init(transcribe: @escaping ([Float], String?) -> String,
+    public init(transcribe: @escaping ([Float], String?) -> String?,
                 cleanup: @escaping (String, CleanupContext) async throws -> String,
                 settings: @escaping () -> Settings,
                 frontBundleID: @escaping () -> String?) {
@@ -19,8 +20,9 @@ public struct Pipeline {
         self.frontBundleID = frontBundleID
     }
 
-    /// Whisper pass only: trimmed transcript, nil when empty. Split from clean()
-    /// so the caller can finalize raw text instantly and polish behind it.
+    /// Whisper pass only: trimmed transcript, nil when empty OR when the pass
+    /// failed. Split from clean() so the caller can finalize raw text instantly
+    /// and polish behind it.
     public func transcript(samples: [Float]) -> String? {
         // The min-audio floor lives HERE, on the shared path, not on each caller:
         // whisper invents content on near-silence, and while the app happened to
@@ -31,8 +33,9 @@ public struct Pipeline {
                                                rms: AudioRecorder.rms(samples)) else { return nil }
         let s = settings()
         let prompt = s.dictionary.isEmpty ? nil : s.dictionary.joined(separator: ", ")
-        let t = transcribe(samples, prompt).trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : t
+        guard let t = transcribe(samples, prompt)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+        return t
     }
 
     /// Whole-transcript snippet match — TypeWhisper's `literal_locked`. When the
@@ -93,6 +96,20 @@ public struct Pipeline {
             if cleaned.count > allowance {
                 NSLog("Parla cleanup output degenerate (\(cleaned.count) chars for \(transcript.count)-char transcript), keeping raw transcript")
                 return (transcript, "cleanup returned invalid text")
+            }
+            // Floor. The ceiling above only catches runaway EXPANSION; a model
+            // that answers the transcript, summarises it, or refuses in one line
+            // comes back far SHORTER, and that was typed straight over the
+            // user's words with nothing to stop it. Cleanup legitimately shrinks
+            // filler-heavy speech ("um, so, like, the thing is…"), so the floor
+            // is deliberately generous and only applies once the transcript is
+            // long enough for a ratio to mean anything.
+            // ponytail: a length ratio, not a relatedness check — proving the
+            // output still says what the user said needs a second model call.
+            // Upgrade only if drift is observed above this floor.
+            if transcript.count >= 80, cleaned.count < transcript.count / 5 {
+                NSLog("Parla cleanup output truncated (\(cleaned.count) chars for \(transcript.count)-char transcript), keeping raw transcript")
+                return (transcript, "cleanup returned truncated text")
             }
             return (cleaned, nil)
         } catch let error as CleanupError {
