@@ -219,16 +219,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
 
-    /// Open the TLS connection to the cleanup provider while the user is still
-    /// speaking, so the polish call doesn't pay handshake latency.
-    private func warmCleanupConnection(settings: Settings) {
-        guard let url = cleanupWarmURL(
-            settings: settings, env: ProcessInfo.processInfo.environment) else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 5
-        URLSession.shared.dataTask(with: request).resume()
-    }
 
     /// ⌃⌘V is still physically held when the pasteLast edge fires; typing while
     /// real modifiers are down risks the app reading them alongside our events.

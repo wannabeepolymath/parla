@@ -301,6 +301,25 @@ final class DictationSessionTests: XCTestCase {
             .contains(.insertText("hello world")))
     }
 
+    /// The landing branches on the focus resolved AT LANDING, not the fn-down
+    /// latch: a click never cancels a dictation and hands-free exists so the
+    /// user can move around while speaking.
+    func testLandingUsesFocusResolvedAtLandingNotTheLatch() {
+        // Latched editable, but focus moved to a web page/file list by landing:
+        // typing there fires the transcript into single-letter shortcuts.
+        var s = startDictation(cleanup: false, focus: .editable)
+        _ = m.handle(.stopRequested)
+        var fx = quiet(m.handle(.transcribed(s, raw: "hello world", probe: probe(.none))))
+        XCTAssertEqual(fx.filter { if case .insertText = $0 { return true }; return false }, [])
+        XCTAssertEqual(fx.first, .hud(.savedToHistory))
+        // Latched none, but the user clicked into a field while speaking: the
+        // transcript belongs in the field they are looking at, not history.
+        s = startDictation(cleanup: false, focus: .none)
+        _ = m.handle(.stopRequested)
+        fx = quiet(m.handle(.transcribed(s, raw: "hello world", probe: probe(.editable))))
+        XCTAssertTrue(fx.contains(.insertText("hello world")))
+    }
+
     func testEmptyTranscriptUndoesTheStreamedTextAndHidesTheHUD() {
         let s = startDictation(live: true)
         _ = m.handle(.streamTyped(gen: 1, text: "hel"))
@@ -652,11 +671,13 @@ final class DictationSessionTests: XCTestCase {
                         .hud(.transcribing), .transcribeCommand(s)])
         XCTAssertEqual(m.handle(.commandHeard(s, instruction: " fix the typo ")),
                        [.transform(s, instruction: "fix the typo")])
-        // The sanitizer's quote-stripping is policy, so it runs here, not in the shell.
-        let fx = quiet(m.handle(.transformReady(s, text: "\"the cat\"",
+        // Trim-only, never the sanitizer: "put this in quotes" returns a quoted
+        // string, and stripping the pair would retype the selection unchanged
+        // under a "✓ Pasted".
+        let fx = quiet(m.handle(.transformReady(s, text: " \"the cat\" ",
                                                 probe: TransformProbe(focus: .editable,
                                                                       selectionStillMatches: true))))
-        XCTAssertEqual(fx, [.insertText("the cat"), .playSound(.finish), .hud(.done),
+        XCTAssertEqual(fx, [.insertText("\"the cat\""), .playSound(.finish), .hud(.done),
                             .menuBar(.idle), .releaseModelIfPolicyImmediate])
         XCTAssertFalse(fx.contains(.flushTrace))   // transforms aren't in the latency trace
         XCTAssertEqual(m.state, .idle)
@@ -672,7 +693,7 @@ final class DictationSessionTests: XCTestCase {
 
     /// A transform never falls back to typing the spoken instruction.
     func testTransformFailuresTypeNothing() {
-        for text in ["", "\"\"", String(repeating: "x", count: 2001)] {
+        for text in ["", "  \n ", String(repeating: "x", count: 2001)] {
             let s = command(selection: "teh cat")
             let fx = m.handle(.transformReady(s, text: text,
                                               probe: TransformProbe(focus: .editable,

@@ -3,9 +3,10 @@
 > **EXECUTED — kept as a record.** This plan shipped — tolerant `Settings`
 > decoding, `CleanupSettings`, `CleanupProviding`, `OpenAICompatClient`,
 > `CleanupSanitizer`, `makeCleanupClient` — but the checkboxes below were never
-> ticked. Three details were superseded: the default `cleanupModel` is
-> `claude-sonnet-5`, not the `claude-haiku-4-5` the Task 1 test snippet asserts
-> (`Sources/ParlaCore/Settings.swift:28`); an unknown `cleanup.provider` throws
+> ticked. Details superseded since: the default `cleanupModel` is
+> `claude-haiku-4-5` (as the Task 1 test snippet asserts — it briefly shipped
+> as `claude-sonnet-5` before the 2026-08-11 cost decision reverted that);
+> an unknown `cleanup.provider` throws
 > "unknown cleanup.provider" rather than being treated as anthropic
 > (`Sources/ParlaCore/CleanupFactory.swift:91-93`); and for openai-compatible
 > only `baseURL` is required — a missing `cleanup.model` makes the client ask

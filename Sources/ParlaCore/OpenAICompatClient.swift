@@ -60,8 +60,10 @@ public struct OpenAICompatClient: CleanupProviding {
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         if let apiKey { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         // See CleanupClient: idle timeout on a non-streaming completion, so it
-        // bounds total generation time. 15s cut off long dictations.
-        req.timeoutInterval = 60
+        // bounds total generation time — and, because finish() awaits on the
+        // processTask chain, also how long a hung provider can stall the next
+        // dictation. Keep in lockstep with CleanupClient's 15s.
+        req.timeoutInterval = 15
         let body: [String: Any] = [
             "model": modelID,
             // Modern OpenAI cap; max_tokens stays absent for o-series/gpt-5-class.

@@ -340,9 +340,11 @@ public struct CleanupClient: CleanupProviding {
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         // Idle timeout on a NON-streaming POST: no bytes arrive until the whole
         // completion exists, so this is really "how long may the model take".
-        // 15s failed cleanup outright on multi-minute dictations with slower
-        // providers — exactly the long-form case the streaming window exists for.
-        req.timeoutInterval = 60
+        // ponytail: 15s can fail the polish on multi-minute dictations with slow
+        // providers, but finish() awaits this call on the processTask chain, so
+        // a longer timeout holds the NEXT dictation's landing hostage to a hung
+        // provider. Raise it only after the polish leg is detached from the chain.
+        req.timeoutInterval = 15
         let maxTokens = context.selection == nil ? 4096 : 8192
         let system = PromptBuilder.system(context: context)
         var body: [String: Any] = [

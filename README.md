@@ -99,8 +99,9 @@ it; Parla stays menu-bar-only.
 
 ## Shortcuts
 
-All of these are global and fixed in this version (the Hub lists them
-read-only):
+All of these are global. The keys listed are the defaults — hold-to-talk,
+hands-free, paste-last and the scratchpad chord are rebindable in the Hub
+(Esc and the ⇧ command-mode modifier are fixed):
 
 - **fn 🌐 (Globe), held** — dictate; release to transcribe and type.
 - **⇧+fn, held** — command mode: transform the selected text (see below). The mode is latched at fn-down, so shift can be released while you speak.
@@ -141,8 +142,8 @@ retyping when the app won't accept the write — landing on one of:
 verified — the cleaned text is in history instead), or "✓ raw (cleanup
 failed)". Cancelling — Esc, or any other keypress while fn is held — shows
 "✕ Cancelled". If the mic goes away mid-dictation (AirPods disconnecting, a
-hub unplugged) the pill says "⚠️ Mic disconnected"; audio captured before the
-break still finalizes normally on release.
+hub unplugged) the capture ends by itself and everything heard up to the break
+finalizes exactly as if fn had been released.
 
 ## Command mode
 
@@ -195,7 +196,7 @@ you fix it. Fields:
 
 - `dictionary` — array of exact spellings (names, jargon) to bias transcription and cleanup, e.g. `["Parla", "whisper.cpp"]`.
 - `snippets` — object mapping a spoken trigger phrase to its expansion, e.g. `{"my address": "123 Main St"}`.
-- `cleanupModel` — Anthropic model id for cleanup (default `claude-sonnet-5`).
+- `cleanupModel` — Anthropic model id for cleanup (default `claude-haiku-4-5`).
 - `anthropicApiKey` — API key for cleanup; the Hub's **AI Cleanup** page writes this field for you. The `ANTHROPIC_API_KEY` environment variable takes precedence; if neither is set, Parla inserts the raw transcript.
 - `whisperModelPath` — absolute path to a ggml whisper model. Defaults to the model downloaded by `scripts/download-model.sh`.
 - `showHudAlways` — keep the dictation pill floating on screen as a small idle capsule at all times, expanding into the full pill during dictation. Default `true`; set `false` for a transient pill shown only while dictating.

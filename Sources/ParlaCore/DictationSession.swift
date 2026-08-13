@@ -496,7 +496,14 @@ public final class DictationSession {
                 landing = .history
             }
         } else {
-            switch s.focus {   // the focus latched at fn-down, as today
+            // The focus resolved AT LANDING, not the fn-down latch: a click never
+            // cancels a dictation (the tap sees no mouse events) and hands-free
+            // exists precisely so the user can move around while speaking.
+            // Branching on the stale latch could fire a whole transcript as
+            // keystrokes into a web page or file list (single letters are
+            // shortcuts there), or withhold it from the field the user is
+            // looking at. The latch remains the mid-capture prediction only.
+            switch probe.focus {
             case .unknown, .editable:
                 fx += [.log("Parla finish path: focused insert"), .insertText(insertText), .hud(fieldHUD)]
                 landing = .field
@@ -582,7 +589,10 @@ public final class DictationSession {
         // Safety policy, all of it here so all of it is testable. A transform has
         // no raw fallback: a failure must never type the spoken instruction over
         // the user's selection.
-        let transformed = CleanupSanitizer.sanitize(text)
+        // Trim only, never CleanupSanitizer: "put this in quotes" returns a
+        // quoted string, and the sanitizer's quote-strip would hand the
+        // selection back unchanged under a "✓ Pasted".
+        let transformed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !transformed.isEmpty else {
             return [.log("Parla transform: empty result"), .hud(.error("Transform failed"))]
                 + transformTail(s)

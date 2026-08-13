@@ -149,9 +149,17 @@ extension AppDelegate {
                 hud.show(unverifiedHUD)
                 return
             }
-            NSLog("Parla replace: ax-verified tail swap (erase %d)", erase)
-            Inserter.typeBackspaces(erase)
-            Inserter.typeUnicode(append)
+            // One atomic AX value write over the tail, read-back verified inside
+            // — no visible char-by-char erase and no keystroke window for the
+            // user's own typing to fall into. Fields that refuse the write (or
+            // an erase of 0, which the helper declines) fall back to keystrokes.
+            if Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append) {
+                NSLog("Parla replace: atomic ax swap (erase %d)", erase)
+            } else {
+                NSLog("Parla replace: ax-verified tail swap (erase %d)", erase)
+                Inserter.typeBackspaces(erase)
+                Inserter.typeUnicode(append)
+            }
             hud.show(verifiedHUD)
             CorrectionWatcher.shared.arm(inserted: String(expect.dropLast(erase)) + append,
                                          dictionary: store.load().dictionary)
