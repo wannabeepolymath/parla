@@ -227,18 +227,24 @@ fields and empty selections refuse before recording even starts.
 
 Parla needs:
 
-- **Microphone** — Parla holds it open between dictations so one starts instantly; only what you dictate is transcribed. The exceptions, and what reaches disk, are below.
+- **Microphone** — Parla opens it while you dictate; only what you dictate is transcribed. What reaches disk is below.
 - **Accessibility** — to listen for the global hotkey and type text into the frontmost app (System Settings > Privacy & Security > Accessibility).
 
-Because Parla holds the mic open between dictations — that is what removes
-240–700 ms of audio-engine start from every press — macOS's orange mic
-indicator is lit while Parla sits idle, not only while you dictate. Bluetooth
-mics are the exception: holding one open drags the headset down to 16 kHz call
-quality and roughly halves its battery, so Parla opens and closes those per
-dictation instead (no idle indicator, and the engine start is back on the
-press). Idle audio goes into a 1-second in-memory ring that is continuously
-overwritten; at each press the newest 0.45 s of it is prepended to the
-dictation so your first word isn't clipped.
+By default the mic is opened per dictation and handed back at the end, so
+macOS's orange mic indicator is lit only while you are dictating. The cost is
+that each press pays the audio-engine start — 240–700 ms depending on the
+device, and whatever you said in that window is not captured.
+
+**General > Start dictation instantly** trades that back: Parla holds the mic
+open between dictations, which removes the engine start from every press and
+lets it prepend the 0.45 s you spoke before the key went down, so your first
+word isn't clipped. Idle audio goes into a 1-second in-memory ring that is
+continuously overwritten, and only that newest 0.45 s is ever prepended to a
+dictation — but macOS's orange indicator stays lit for as long as Parla is
+running, not just while you dictate. It is off until you turn it on. Bluetooth
+mics are excluded either way: holding one open drags the headset down to
+16 kHz call quality and roughly halves its battery, so Parla always opens and
+closes those per dictation.
 
 That dictation's audio — the prepended 0.45 s included — is written to
 `~/Library/Application Support/Parla/recordings` before whisper runs, so a

@@ -5,7 +5,7 @@ derived from the architecture audit of 24 open-source dictation apps.
 
 **Branch:** `feat/audit-implementation` (pending)
 **Started:** 2026-08-11
-**Last updated:** 2026-08-11
+**Last updated:** 2026-08-14
 
 Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 
@@ -20,7 +20,7 @@ Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 | 2 | 7 | 7 | 0 | 0 | 0 |
 | **all** | **29** | **29** | **0** | **0** | **0** |
 
-Suite: **398 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
+Suite: **407 tests, 0 failures.** Build clean. Eval baseline committed; `verify` green in CI.
 Tier 0 #8 **verified against 4 live apps**; Tier 1 #14 **measured — Haiku stays**.
 Both were the outstanding manual items; neither is outstanding now.
 
@@ -636,6 +636,43 @@ One refutation worth recording: a reviewer claimed this tracker misdescribed
 all 32 modifier sets were swallowed, ⇧Return included), and ⇧Return stays
 swallowed by design because it produces whitespace.
 
+## The warm mic became a setting, off by default
+
+Round 2 concluded "the warm mic is the point of the feature, so the copy was
+fixed, not the behaviour". That was the wrong half to fix. The audit that
+specified the feature had already said otherwise — `01-landscape.md:248`, item
+9: *"Ship the persistent hold **off by default** — openwhispr's note is that a
+warm mic keeps the OS indicator lit, which users hate."* It shipped inverted,
+with no setting, and no document records deciding to reverse it. A user noticed
+the lit indicator within days of running it.
+
+The evidence for the hold is weaker than the code comments imply. Every number
+defending it is FluidVoice's, not Parla's — `03-latency.md:17` marks Parla's own
+press→first-PCM as *"not measured, not instrumented"*, and the same
+240–270 / 650–700 ms figure is credited to FluidVoice, macparakeet and hyprwhspr
+in three different docs, so at most one attribution is right. The idle cost was
+never measured either. `PARLA_TRACE=1` shipped in wave 2 and its output appears
+nowhere in this repo.
+
+So: `Settings.warmMic`, default false, and `prepare()` became `setWarm(_:)`.
+The gate lives in the recorder rather than at the three call sites, which also
+retires the one-way latch — `warm = true` was its only assignment, and both
+`stop()` and `scheduleRebuild()` call `warmUp()` unconditionally, so a toggle
+that did not clear it would relight the mic seconds after being switched off.
+Off during a latched hands-free capture defers to `stop()` rather than pulling
+the tap out mid-sentence. Four copy sites that asserted the mic is always held
+open — Hub permission row, onboarding subtitle, `NSMicrophoneUsageDescription`,
+README — now describe the cold default and the opt-in; the Hub toggle is
+labelled by consequence ("the orange indicator stays lit"), not mechanism.
+
+**Known cost, not yet paid down:** cold-by-default means every press now runs a
+240–700 ms CoreAudio open synchronously inside the head-insert `CGEvent` tap
+callback, where previously only Bluetooth did. `Hotkey.swift:491` already
+recovers from `.tapDisabledByTimeout`, and Bluetooth has shipped on that path
+without complaint, but it has never been measured. The fix is VoiceInk's
+off-main hardware start (`03-latency.md:69`), which needs a new "starting" state
+in the recorder. Measure with `PARLA_TRACE=1` before building it.
+
 ## Log
 
 | When | What |
@@ -658,3 +695,4 @@ swallowed by design because it produces whitespace.
 | 2026-08-11 | **Tier 1 #14 settled: `claude-haiku-4-5` stays.** No Anthropic key, so `parla-eval` gained `--cleanup-cmd` and ran Parla's real prompts through `claude -p`. 3 runs: the same-model noise floor (9/30 cases, 13.3pp) exceeds the Haiku-vs-Sonnet signal, whose net sign flips between runs. The failing tail is identical across both models. |
 | 2026-08-13 | **Merged `fix/dictation-bugs` (2026-08-06/07) into the audit line.** 12 conflicted files; the audit rewrite already covered most of the bugfixes in its own design, so the resolution takes the state-machine architecture and ports the four fixes it lacked: the secure-field guard on paste-last/history inserts, swallowing autorepeats of swallowed keys, the tap-liveness watchdog + App Nap opt-out, and multi-word marker spans in the stripNonSpeech emptiness check. Also implemented the fallible transcribe for real — the branch had changed the signature and docs but left `return ""` at the one line that detects failure, so an errored stream pass could still commit a cut and silently delete that audio span; `transcribe` now returns nil on error/abort and every caller distinguishes failure from silence. 404/404 pass. |
 | 2026-08-13 | **Merge-resolution review: 6 raised, 5 fixed, 1 documented.** The atomic AX swap had survived only as an uncalled helper — now wired into `.replaceTailIfOurs` with the keystroke path as fallback; the non-live landing branched on fn-down-latched focus instead of the landing probe; transforms regained the sanitizer's quote-strip ("put this in quotes" undone) — trim-only again; the 60s cleanup timeout (safe only in the old detached-polish design) held the next dictation hostage on audit's serialized chain — back to 15s with the ceiling named; dead `warmCleanupConnection` deleted and four stale doc claims corrected. Documented, not fixed: a refused fn-down can leave the hotkey monitor holding a ghost session that eats one keystroke (ISSUES #5). 405/405 pass. |
+| 2026-08-14 | **Warm mic is now `Settings.warmMic`, off by default** — the audit specified that default (`01-landscape.md:248`) and it shipped inverted. `prepare()` → `setWarm(_:)` puts the gate in the recorder and retires the one-way `warm` latch, so switching it off actually puts the indicator out. Four copy sites corrected. Open cost: the cold path's 240–700 ms device open now runs on every press inside the event-tap callback — measure with `PARLA_TRACE=1` before deciding on an off-main start. 407/407 pass. |

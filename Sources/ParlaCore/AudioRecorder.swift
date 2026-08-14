@@ -269,23 +269,33 @@ public final class AudioRecorder {
 
     // MARK: - Warm engine
 
-    /// Build the engine, bind the device, install the tap and start capturing
-    /// into the pre-roll ring — everything `start()` used to do inside the
-    /// fn-down handler (240–270 ms on built-in mics, 650–700 ms on USB;
-    /// docs/research/03-latency.md §1). Call at launch and on device change.
+    /// Turn the warm engine on or off, and act on it now. On: build the engine,
+    /// bind the device, install the tap and start filling the pre-roll ring —
+    /// everything `start()` would otherwise do inside the fn-down handler
+    /// (240–270 ms built-in, 650–700 ms USB; docs/research/03-latency.md §1).
+    /// Off: hand the mic back, so macOS's orange indicator goes out.
     ///
-    /// Also latches warmth on: without it the recorder behaves exactly as it did
-    /// before, cold-opening per press and tearing down at stop. Warm means the
-    /// mic indicator stays lit while Parla is idle, so it is the app's call.
+    /// Warmth is the user's call (`Settings.warmMic`), because its price is that
+    /// indicator staying lit for as long as Parla runs. Call at launch, on device
+    /// change, and whenever the setting is saved — it is idempotent both ways.
     ///
     /// Deliberately does NOT rebind a warm engine already running on another mic
     /// — warmUp()'s `!engine.isRunning` guard makes that a no-op, which is also
     /// what keeps a mid-dictation call (mic switched while hands-free is latched)
     /// from pulling the tap out from under the capture. start() self-heals on the
     /// next press, so a mic switch costs one cold open, never a wrong recording.
-    public func prepare() {
-        warm = true
-        warmUp()
+    ///
+    /// Switching off mid-dictation is likewise deferred rather than obeyed on the
+    /// spot: tearing the tap out from under a latched hands-free capture would
+    /// lose what is being spoken. `warm` is false from here on, so stop()'s
+    /// shouldTeardown finalizes normally and its trailing warmUp() is a no-op.
+    public func setWarm(_ on: Bool) {
+        warm = on
+        guard !on else { return warmUp() }
+        lock.lock()
+        let live = capturing
+        lock.unlock()
+        if !live { teardown() }
     }
 
     /// Idempotent build of the warm engine, subject to the permission and

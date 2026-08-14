@@ -19,13 +19,12 @@ struct OnboardingView: View {
 
     private static let titles = ["Give Parla permission", "Pick a speech model", "Try it out"]
     private static let subtitles = [
-        // Says the mic is held open, not "listens only while you hold": since
-        // AudioRecorder.prepare() the input unit runs between dictations, so the
-        // old copy promised a closed mic the app does not have. "What you
-        // dictate" rather than "while you hold" because fn+Space latches
-        // hands-free and keeps recording past the release. The Bluetooth
-        // exception to holding it open is on the permission row below.
-        "Parla holds the mic open between dictations so one starts instantly, transcribes only what you dictate, and types the result into whatever you're using.",
+        // Safe in both states: the mic is opened per dictation by default, and
+        // holding it open is opt-in (Settings.warmMic, off), so onboarding can
+        // promise the closed mic again. "What you dictate" rather than "while you
+        // hold" because fn+Space latches hands-free and keeps recording past the
+        // release — the mic outlives the keypress even on the cold path.
+        "Parla opens the mic while you dictate, transcribes what you dictate, and types the result into whatever you're using.",
         // Scoped to audio on purpose: with a cleanup provider configured — which
         // the README and the menu's Set API Key… item both steer users toward —
         // the transcript text does leave the Mac. Says the same thing the

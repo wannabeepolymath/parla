@@ -8,13 +8,22 @@ struct GeneralPage: View {
     @ObservedObject var model: HubModel
     private let permissionTick = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
+    /// Tracks the warm-mic toggle below, so the permissions row never promises a
+    /// closed mic the app is actually holding open (or vice versa). Hoisted out of
+    /// the body: a ternary over concatenated literals inside a ViewBuilder is the
+    /// kind of expression SwiftUI's type-checker gives up on.
+    private var micDetail: String {
+        model.settings.warmMic
+            ? "Held open between dictations (not Bluetooth ones) so one starts instantly; "
+                + "only what you dictate is transcribed"
+            : "Opened only while you dictate; only what you dictate is transcribed"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             HubSection("Permissions") {
                 permissionRow("Microphone", granted: model.micGranted,
-                              pane: "Privacy_Microphone",
-                              detail: "Held open between dictations (not Bluetooth ones) so one "
-                                  + "starts instantly; only what you dictate is transcribed")
+                              pane: "Privacy_Microphone", detail: micDetail)
                 HubDivider()
                 permissionRow("Accessibility", granted: model.axGranted,
                               pane: "Privacy_Accessibility",
@@ -55,6 +64,17 @@ struct GeneralPage: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(width: 210)
+                }
+                HubDivider()
+                // Labelled by consequence, not mechanism: "holds the mic open"
+                // means nothing to a user, while the orange dot is the thing they
+                // will actually notice and have to explain to themselves.
+                HubRow("Start dictation instantly",
+                       detail: "Holds the mic open so no speech is clipped. "
+                           + "macOS's orange microphone indicator stays lit the whole time Parla runs") {
+                    Toggle("", isOn: $model.settings.warmMic)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
                 }
                 HubDivider()
                 HubRow("Microphone", detail: "Input device to record from") {

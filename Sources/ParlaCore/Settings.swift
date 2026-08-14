@@ -40,6 +40,14 @@ public struct Settings: Codable, Equatable, Sendable {
     // Idle bar size preset: "small" | "medium" | "large". Unknown values fall
     // back to small at the HUD layer.
     public var hudIdleSize: String = "small"
+    // Hold the mic open between dictations so one starts instantly and can
+    // prepend the 0.45 s spoken before the key went down. Off by default because
+    // the cost is macOS's orange mic indicator lit the whole time Parla runs —
+    // docs/research/01-landscape.md:248 specified this default and it shipped
+    // inverted. The benefit is real but has never been measured on Parla itself
+    // (03-latency.md:17 marks the segment "not measured, not instrumented"), so
+    // the user gets to price the indicator against a latency win we can't quote.
+    public var warmMic: Bool = false
     // Show the shadow stream's text in Parla's own pill while dictating. Off by
     // default: it costs a whisper pass every ~300 ms on every dictation, which
     // the gated shadow stream otherwise skips entirely. Preview only — the text
@@ -71,6 +79,7 @@ public struct Settings: Codable, Equatable, Sendable {
         historyEnabled = try c.decodeIfPresent(Bool.self, forKey: .historyEnabled) ?? historyEnabled
         showHudAlways = try c.decodeIfPresent(Bool.self, forKey: .showHudAlways) ?? showHudAlways
         hudIdleSize = try c.decodeIfPresent(String.self, forKey: .hudIdleSize) ?? hudIdleSize
+        warmMic = try c.decodeIfPresent(Bool.self, forKey: .warmMic) ?? warmMic
         streamPreviewEnabled = try c.decodeIfPresent(Bool.self, forKey: .streamPreviewEnabled) ?? streamPreviewEnabled
         inputDeviceUID = try c.decodeIfPresent(String.self, forKey: .inputDeviceUID) ?? inputDeviceUID
         hotkeys = try c.decodeIfPresent(HotkeyBindings.self, forKey: .hotkeys) ?? hotkeys

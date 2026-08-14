@@ -104,6 +104,24 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(store.load().inputDeviceUID, s.inputDeviceUID)
     }
 
+    /// The whole point of the setting: nobody gets a lit mic indicator they did
+    /// not ask for. A fresh install and every existing settings.json (which has no
+    /// `warmMic` key) must both come back cold.
+    func testWarmMicDefaultsOffAndTolerantDecodeStaysOff() throws {
+        XCTAssertFalse(Settings().warmMic)
+        let existing = try JSONDecoder().decode(
+            Settings.self, from: Data(#"{"showHudAlways":true,"hudIdleSize":"large"}"#.utf8))
+        XCTAssertFalse(existing.warmMic)
+    }
+
+    func testWarmMicRoundTrips() throws {
+        let store = tempStore()
+        var s = Settings()
+        s.warmMic = true
+        try store.save(s)
+        XCTAssertTrue(store.load().warmMic)
+    }
+
     func testCleanupBlockRoundTrip() throws {
         let store = tempStore()
         var s = Settings()
