@@ -430,38 +430,63 @@ public enum Inserter {
     /// backspaces, breaking the "Parla cannot delete text it didn't write"
     /// guarantee. One atomic write has no window to race and nothing to watch.
     ///
-    /// Returns false when AX cannot see the field, cannot prove our text is
-    /// still at the cursor, cannot set the value, or when the write did not
-    /// actually take — so the caller can fall back rather than report a success
-    /// that never happened.
-    public static func replaceTypedTail(_ current: String, with replacement: String) -> Bool {
+    /// Outcome of `replaceTypedTail`. Three cases because the caller's safe
+    /// follow-up differs: done; hands off the field; or fall back to keystrokes.
+    public enum TailSwap: Sendable {
+        case replaced     // write confirmed by read-back; caret restored
+        /// The write was ISSUED and the app never confirmed it. It may still
+        /// land (Chromium applies AX sets in the renderer, after returning
+        /// success), so posting keystrokes on top applies the edit TWICE —
+        /// the "text came twice after cleanup" report. Leave the field alone.
+        case unverified
+        case unavailable  // nothing written (opaque, tail mismatch, not settable): fallback is safe
+    }
+
+    /// Returns `.unavailable` when AX cannot see the field, cannot prove our
+    /// text is still at the cursor, cannot set the value, or refuses the write —
+    /// no edit was issued, so the caller may fall back to keystrokes.
+    /// `.unverified` means an edit WAS issued with no confirmed outcome: the
+    /// caller must not touch the field again.
+    public static func replaceTypedTail(_ current: String, with replacement: String) -> TailSwap {
         guard let element = focusedElement(),
-              let (text, cursor, _) = fieldState(of: element) else { return false }
+              let (text, cursor, _) = fieldState(of: element) else { return .unavailable }
         let len = (current as NSString).length
         guard len > 0, cursor >= len, cursor <= text.length,
               text.substring(with: NSRange(location: cursor - len, length: len)) == current
-        else { return false }
+        else { return .unavailable }
 
         var settable = DarwinBoolean(false)
         guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
-              settable.boolValue else { return false }
+              settable.boolValue else { return .unavailable }
 
         let head = text.substring(to: cursor - len)
         let rest = text.substring(from: cursor)
         let updated = head + replacement + rest
         guard AXUIElementSetAttributeValue(
-            element, kAXValueAttribute as CFString, updated as CFString) == .success else { return false }
+            element, kAXValueAttribute as CFString, updated as CFString) == .success else { return .unavailable }
 
-        // Read back. An app may accept the write and ignore it — controlled
-        // inputs in web and Electron views do exactly that — and reporting
-        // success then would leave the raw text sitting under a "✓ Pasted".
-        guard let after = fieldState(of: element), after.text.isEqual(to: updated) else { return false }
-
-        var caret = CFRange(location: (head as NSString).length + (replacement as NSString).length, length: 0)
-        if let pos = AXValueCreate(.cfRange, &caret) {
-            AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, pos)
+        // Read back, polling. An app may accept the write and ignore it —
+        // controlled inputs in web and Electron views do exactly that — and
+        // reporting success then would leave the raw text sitting under a
+        // "✓ Pasted". But one immediate read is not the answer either: Chromium
+        // hands the set to the renderer and returns before it applies (the same
+        // async behaviour the AXFocused poll in focusFirstTextInput measured
+        // against Cursor), so the first read sees the STALE value and a
+        // keystroke fallback then collides with the write when it lands.
+        // AppKit apps confirm on the first pass and never sleep.
+        for attempt in 0..<10 {
+            if attempt > 0 { usleep(50_000) }
+            guard let after = fieldState(of: element) else { continue }
+            if after.text.isEqual(to: updated) {
+                var caret = CFRange(location: (head as NSString).length
+                                        + (replacement as NSString).length, length: 0)
+                if let pos = AXValueCreate(.cfRange, &caret) {
+                    AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, pos)
+                }
+                return .replaced
+            }
         }
-        return true
+        return .unverified
     }
 
     /// True when final replacement can be verified via AX. Fields that merely

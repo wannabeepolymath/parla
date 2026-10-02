@@ -153,9 +153,16 @@ extension AppDelegate {
             // — no visible char-by-char erase and no keystroke window for the
             // user's own typing to fall into. Fields that refuse the write (or
             // an erase of 0, which the helper declines) fall back to keystrokes.
-            if Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append) {
+            // An ISSUED write that never confirmed gets no fallback: Electron
+            // applies AX sets async, and typing over one lands the edit twice.
+            switch Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append) {
+            case .replaced:
                 NSLog("Parla replace: atomic ax swap (erase %d)", erase)
-            } else {
+            case .unverified:
+                NSLog("Parla replace: ax write unconfirmed, field left alone (erase %d)", erase)
+                hud.show(unverifiedHUD)
+                return
+            case .unavailable:
                 NSLog("Parla replace: ax-verified tail swap (erase %d)", erase)
                 Inserter.typeBackspaces(erase)
                 Inserter.typeUnicode(append)
