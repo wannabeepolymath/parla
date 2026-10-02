@@ -17,25 +17,37 @@ final class TranscriberTests: XCTestCase {
 
     /// The decode used to be pinned to English, and a multilingual model told
     /// "this is English" translates: Hindi speech came out as an English
-    /// sentence. Local only — it needs the multilingual model and macOS's
-    /// Hindi voice, and CI has neither.
-    func testMultilingualModelKeepsTheSpokenLanguage() throws {
+    /// sentence. Now each pass is decoded in the last pass's language and
+    /// redone only when the speaker switched — which has to give exactly what
+    /// whisper's own detect-then-decode gives, at half its cost when nothing
+    /// switched. Local only: it needs the multilingual model and macOS's Hindi
+    /// voice, and CI has neither.
+    func testMultilingualModelFollowsTheSpeakerLikeWhisperAutoDetect() throws {
         let model = ModelCatalog.path(for: ModelCatalog.all.first { $0.id.hasPrefix("large") }!)
         try XCTSkipUnless(FileManager.default.fileExists(atPath: model), "no multilingual model installed")
-        let wav = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).wav")
-        defer { try? FileManager.default.removeItem(at: wav) }
-        let say = Process()
-        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        say.arguments = ["-v", "Lekha", "-o", wav.path, "--data-format=LEI16@16000", "--channels=1",
-                         "कल सुबह दस बजे मेरी टीम के साथ बैठक है।"]
-        try say.run()
-        say.waitUntilExit()
-        try XCTSkipUnless(say.terminationStatus == 0, "no Hindi system voice")
+        func speak(_ voice: String, _ text: String) throws -> [Float] {
+            let wav = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).wav")
+            defer { try? FileManager.default.removeItem(at: wav) }
+            let say = Process()
+            say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+            say.arguments = ["-v", voice, "-o", wav.path, "--data-format=LEI16@16000", "--channels=1", text]
+            try say.run()
+            say.waitUntilExit()
+            try XCTSkipUnless(say.terminationStatus == 0, "no \(voice) system voice")
+            return try Eval.loadSamples(url: wav)
+        }
+        let hindi = try speak("Lekha", "कल सुबह दस बजे मेरी टीम के साथ बैठक है।")
+        let english = try speak("Samantha", "Tomorrow at ten I have a meeting with the team.")
 
-        let out = try WhisperTranscriber(modelPath: model)
-            .transcribe(try Eval.loadSamples(url: wav), initialPrompt: nil)
-        let devanagari = out?.unicodeScalars.contains { (0x0900...0x097F).contains($0.value) }
-        XCTAssertEqual(devanagari, true, "got: \(out ?? "nil")")
+        let t = try WhisperTranscriber(modelPath: model)
+        // A switch each way: the first guess is English, the second is Hindi.
+        let heard = [hindi, english].map { clip -> String? in
+            let text = t.transcribe(clip, initialPrompt: nil)
+            XCTAssertEqual(text, t.decode(clip, initialPrompt: nil, language: "auto"))
+            return text
+        }
+        let devanagari = heard[0]?.unicodeScalars.contains { (0x0900...0x097F).contains($0.value) }
+        XCTAssertEqual(devanagari, true, "got: \(heard[0] ?? "nil")")
     }
 
     func testMissingModelThrows() {

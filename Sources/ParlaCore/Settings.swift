@@ -30,9 +30,9 @@ public struct Settings: Codable, Equatable, Sendable {
     public var cleanupModel: String = "claude-haiku-4-5"
     public var anthropicApiKey: String? = nil
     public var whisperModelPath: String? = nil
-    // Spoken language for a multilingual whisper model: nil ⇒ detect it on
-    // every dictation, a code ("en", "hi") ⇒ skip detection and its second
-    // encoder pass. English-only models ignore it. Read when the model loads.
+    // Spoken language for a multilingual whisper model: nil ⇒ follow whatever
+    // is spoken, a code ("en", "hi") ⇒ always that language. English-only
+    // models ignore it.
     public var language: String? = nil
     public var cleanup: CleanupSettings = CleanupSettings()
     // Local-only dictation history (menu paste-last / Recent). Never leaves the
