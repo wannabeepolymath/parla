@@ -53,6 +53,8 @@ extension AppDelegate {
             hud.idleBarSize = HUD.idleSize(settings.hudIdleSize)
             hud.showAlways = settings.showHudAlways
             recorder.inputDeviceUID = settings.inputDeviceUID
+            // A failed paste the last session never surfaced must not leak into this one.
+            insertionFailure = nil
             let gen = session.gen
             do { try recorder.start() } catch {
                 send(.recorderFailed(gen: gen, message: "\(error)"))
