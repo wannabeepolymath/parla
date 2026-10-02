@@ -294,6 +294,18 @@ final class DictationSessionTests: XCTestCase {
         XCTAssertEqual(fx.filter { if case .insertText = $0 { return true }; return false }, [])
     }
 
+    /// Logs now land in a plain file (~/Library/Logs/Parla.log), which outlives
+    /// "history off". What was said must not ride along.
+    func testTheTranscriptNeverReachesTheLog() {
+        let s = startDictation(cleanup: false)
+        _ = m.handle(.stopRequested)
+        let fx = m.handle(.transcribed(s, raw: "my secret plan", probe: probe()))
+        XCTAssertTrue(fx.contains(.insertText("my secret plan")))
+        for case .log(let line) in fx {
+            XCTAssertFalse(line.contains("secret"), line)
+        }
+    }
+
     func testOpaqueFieldStillGetsASingleInsert() {
         let s = startDictation(cleanup: false, focus: .unknown)
         _ = m.handle(.stopRequested)

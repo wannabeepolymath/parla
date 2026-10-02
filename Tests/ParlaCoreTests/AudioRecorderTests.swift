@@ -114,6 +114,25 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertEqual(ring.take(now: 100 + PreRollRing.maxAge, mediaPlaying: false), [1, 2, 3])
     }
 
+    /// The same signal, read without consuming the ring: start() uses it to
+    /// rebuild a warm engine that claims to be running but has stopped feeding.
+    func testRingThatStoppedBeingFedIsStale() {
+        var ring = PreRollRing()
+        ring.write([1, 2, 3], now: 100)
+        XCTAssertFalse(ring.isStale(now: 100 + PreRollRing.maxAge))
+        XCTAssertTrue(ring.isStale(now: 100 + PreRollRing.maxAge + 0.01))
+    }
+
+    /// Just built or just reset — the first buffer is ~85 ms away. Calling that
+    /// stale would cold-rebuild a healthy engine on every quick re-press.
+    func testRingNotYetWrittenIsNotStale() {
+        var ring = PreRollRing()
+        XCTAssertFalse(ring.isStale(now: 1_000))
+        ring.write([1], now: 100)
+        ring.reset()
+        XCTAssertFalse(ring.isStale(now: 1_000))
+    }
+
     /// Media playing at press time means the ring holds the user's speakers, not
     /// the user — and it is dropped, not trimmed.
     func testPreRollDiscardedWhenMediaWasPlaying() {
@@ -148,19 +167,67 @@ final class AudioRecorderTests: XCTestCase {
     /// dictation reused it until relaunch.
     func testEngineBuiltBeforeTheMicGrantIsTornDownEvenWhenWarm() {
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: false,
-                                                   bluetooth: false))
+                                                   bluetooth: false, capturedNothing: false))
     }
 
     /// The whole point of warmth: a legitimately warm engine is kept.
     func testAuthorizedWarmEngineIsKept() {
         XCTAssertFalse(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
-                                                    bluetooth: false))
+                                                    bluetooth: false, capturedNothing: false))
+    }
+
+    /// A warm engine that delivered not one sample — pre-roll included — has
+    /// stopped feeding its tap. Kept, it would make every later dictation silent
+    /// too: the stale-ring check in start() cannot see it once stop() has reset
+    /// the ring. Costs one rebuild after a tap too short to span a buffer.
+    func testWarmEngineThatCapturedNothingIsTornDown() {
+        XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
+                                                   bluetooth: false, capturedNothing: true))
+    }
+
+    // MARK: - Route change
+
+    /// AVAudioEngine stops itself on a configuration change and nothing restarts
+    /// it, so a dictation in flight went on "recording" silence to the end.
+    func testRouteChangeMidCaptureResumesOnAStoppedEngine() {
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: false, resumes: 0), .resumeCapture)
+    }
+
+    /// The press itself built a fresh engine after the change (start() does
+    /// when the old one stopped): rebuilding again would only cut a hole in it.
+    func testRouteChangeMidCaptureLeavesARunningEngineAlone() {
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: true, resumes: 0), .none)
+    }
+
+    /// `isRunning` alone is not proof: an engine can report running and deliver
+    /// nothing. Under a capture the tap's own heartbeat is the second opinion.
+    func testEngineCountsAsFedOnlyWhileBuffersKeepArriving() {
+        XCTAssertTrue(AudioRecorder.recentlyFed(lastFeed: 10, now: 10.1))
+        XCTAssertFalse(AudioRecorder.recentlyFed(lastFeed: 10, now: 10 + AudioRecorder.feedGap + 0.01))
+        // Just built: its first buffer is still on the way. Not evidence of a stall.
+        XCTAssertTrue(AudioRecorder.recentlyFed(lastFeed: nil, now: 10))
+    }
+
+    /// A rebuild can provoke the next route change. Idle, that loop only costs
+    /// rebuilds; under a capture each lap is a hole in the dictation, so after a
+    /// few the capture ends and what was said is finalized.
+    func testRouteThatWillNotSettleEndsTheCapture() {
+        let limit = AudioRecorder.maxResumes
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: false, resumes: limit - 1),
+                       .resumeCapture)
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: false, resumes: limit),
+                       .endCapture)
+    }
+
+    func testRouteChangeWhileIdleRewarms() {
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: false, engineRunning: false, resumes: 0), .rewarm)
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: false, engineRunning: true, resumes: 0), .rewarm)
     }
 
     func testColdOrBluetoothStillTearsDown() {
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: false, builtAuthorized: true,
-                                                   bluetooth: false))
+                                                   bluetooth: false, capturedNothing: false))
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
-                                                   bluetooth: true))
+                                                   bluetooth: true, capturedNothing: false))
     }
 }

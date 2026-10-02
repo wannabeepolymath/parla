@@ -5,7 +5,7 @@ derived from the architecture audit of 24 open-source dictation apps.
 
 **Branch:** `feat/audit-implementation` (pending)
 **Started:** 2026-08-11
-**Last updated:** 2026-08-14
+**Last updated:** 2026-10-02
 
 Status: `todo` · `wip` · `done` · `blocked` · `skipped`
 
@@ -673,6 +673,87 @@ without complaint, but it has never been measured. The fix is VoiceInk's
 off-main hardware start (`03-latency.md:69`), which needs a new "starting" state
 in the recorder. Measure with `PARLA_TRACE=1` before building it.
 
+## Mic and hotkey reliability (2026-10-02)
+
+**Branch:** `fix/mic-hotkey-reliability` (off `main` at 4be2021, not yet landed)
+
+Two reports: the mic indicator is "sometimes always on", and the app "stops
+working if left open a long time". The first was not a code defect — two builds
+were installed under one bundle ID (`/Applications` held 0.1.0, which predates
+`Settings.warmMic` and holds the mic for the process lifetime; the repo copy was
+0.2.0). The second left no evidence: NSLog is stored as `<private>` in the
+unified log, so no past failure could be read back. What follows is every
+defect the investigation could demonstrate from the code, plus the log file that
+makes the next report diagnosable.
+
+| # | Item | Files | Status | Check |
+|---|---|---|---|---|
+| 1 | Replay a trigger release the tap never saw (`reconcile`), on tap revive and every watchdog tick | `ParlaCore/Hotkey.swift` | **done** | 4 tests |
+| 2 | Unlatch the monitor when a capture ends by itself (`endSession`) — it swallowed the next Space/Return/Esc | `ParlaCore/Hotkey.swift`, `Parla/main.swift` | **done** | 2 tests |
+| 3 | Rebuild a warm engine that reports running but stopped feeding: stale pre-roll ring at `start()`, or a capture with zero samples at `stop()` | `ParlaCore/AudioRecorder.swift` | **done** | 3 tests; OS trigger unverified |
+| 4 | A failed model reload was permanent (`activeTranscriber` gated on `modelReady`); now retried for a model that has loaded before (`lastGoodModelPath`) | `Parla/main.swift` | **done** | build only — app target has no tests |
+| 5 | Shortcut recorder left the global tap suspended after an app switch or window close | `Parla/Hub/HubPages.swift` | **done** | build only |
+| 6 | Onboarding tryout kept the mic open and the tap suspended behind a minimised/background Hub | `Parla/Hub/Onboarding.swift` | **done** | build only |
+| 7 | NSLog → `~/Library/Logs/Parla.log` (one `dup2` onto stderr); dictated text removed from the three log lines that carried it | `Parla/main.swift`, `ParlaCore/DictationSession.swift`, `Parla/Dictation.swift` | **done** | 1 test + mechanism verified standalone |
+| 8 | The event tap runs on its own thread; edges hop to main (`emit`) | `ParlaCore/Hotkey.swift` | **done** | 3 tests; the thread itself needs a keyboard |
+| 9 | A route change mid-dictation rebuilds the engine under the capture instead of recording silence to the end (`rebuildAction`) | `ParlaCore/AudioRecorder.swift` | **done** | 5 tests; needs a real device switch |
+| 10 | One shortcut recorder armed at a time | `Parla/Hub/HubPages.swift` | **done** | build only |
+
+**#1 trusts the HID modifier flags only for a press whose trigger-down they
+agreed with** (`hidTracksTrigger`, sampled per press at callback entry). A
+trigger that never appears in `CGEventSource.flagsState(.hidSystemState)` — a
+firmware fn, Screen Sharing, a remapper — would otherwise have its dictation cut
+at the next 5 s watchdog tick; with the gate it keeps the old behaviour. A
+replayed release is never "short", so its audio is transcribed, not discarded.
+**Needs one check on real hardware:** hold fn for 15 s and confirm the dictation
+is not cut short.
+
+**Review of the first commit (f6b4fad): 7 raised, 5 fixed, 2 answered.** The
+trust was sampled *after* the capture start it was meant to protect, so a
+release during that stall — the motivating case — left it unearned; it also
+latched for the process. A wedge that landed mid-capture reset the ring and hid
+from `isStale` forever (hence the zero-sample check). A failed `freopen` closes
+fd 2 before failing. The dictionary-learning line still logged the corrected
+words. The reload retry ran on every press for a model that had never loaded.
+Answered, not changed: the clock question is moot now that a replayed release
+carries no timestamp, and the tests cover the pure halves only — the HID read
+and the tap wiring need a keyboard.
+
+**#8 was first skipped, then done a different way.** The named fix was an
+off-main hardware start, which needs a "starting" state in the recorder and the
+reducer. The cheaper cut is the other side of the same seam: leave the capture
+start on main and take the *tap* off it. The callback now runs the pure state
+machine under a lock and returns in microseconds; `emit` queues each edge to
+main in decision order. That removes the tap timeout as a failure at all —
+main can stall for as long as it likes — and stops every keystroke in every app
+from waiting behind Parla's device open. Main still blocks ~150–500 ms per
+press; only Parla's own HUD can feel that. `endSession` is skipped while an edge
+is still queued, so a cap firing on main cannot unlatch a press main has not
+seen yet.
+
+**#9.** `AVAudioEngine` stops itself on a configuration change and nothing
+restarted it mid-capture: the dictation went on "recording" nothing until
+release. The debounced rebuild now covers a live capture too — same samples,
+new engine, `capturing` never drops. Roughly the 0.5 s debounce plus the device
+open is lost from the audio. A selected mic that vanishes falls back to the
+system default; no input at all still ends the capture as `.deviceLost`. Bounded
+at `maxResumes` laps in case a route never settles.
+
+**Review of that commit (9190fb6): no definite defect; 3 hedges taken, 1 test
+tightened.** A dead port's tap thread would have stayed parked in `mach_msg` —
+removing a run loop's only source does not wake it — so `ensureAlive` now stops
+it. The tap callback drains its own autorelease pool. And `isRunning` alone is
+no longer what decides a mid-capture resume: the tap's own heartbeat
+(`recentlyFed`) is the second opinion, because an engine can report running and
+deliver nothing. Left as it was: `build()` registers the configuration observer
+after `engine.start()`, so a change that opening the engine itself provokes can
+be missed — moving it earlier risks ending AirPods dictations at the resume
+limit, and that path has shipped without complaint.
+
+**Still open:** main blocks for the device open on every press (see #8). And
+everything marked "needs a keyboard / a real device switch" above is unverified
+on hardware.
+
 ## Log
 
 | When | What |
@@ -696,3 +777,7 @@ in the recorder. Measure with `PARLA_TRACE=1` before building it.
 | 2026-08-13 | **Merged `fix/dictation-bugs` (2026-08-06/07) into the audit line.** 12 conflicted files; the audit rewrite already covered most of the bugfixes in its own design, so the resolution takes the state-machine architecture and ports the four fixes it lacked: the secure-field guard on paste-last/history inserts, swallowing autorepeats of swallowed keys, the tap-liveness watchdog + App Nap opt-out, and multi-word marker spans in the stripNonSpeech emptiness check. Also implemented the fallible transcribe for real — the branch had changed the signature and docs but left `return ""` at the one line that detects failure, so an errored stream pass could still commit a cut and silently delete that audio span; `transcribe` now returns nil on error/abort and every caller distinguishes failure from silence. 404/404 pass. |
 | 2026-08-13 | **Merge-resolution review: 6 raised, 5 fixed, 1 documented.** The atomic AX swap had survived only as an uncalled helper — now wired into `.replaceTailIfOurs` with the keystroke path as fallback; the non-live landing branched on fn-down-latched focus instead of the landing probe; transforms regained the sanitizer's quote-strip ("put this in quotes" undone) — trim-only again; the 60s cleanup timeout (safe only in the old detached-polish design) held the next dictation hostage on audit's serialized chain — back to 15s with the ceiling named; dead `warmCleanupConnection` deleted and four stale doc claims corrected. Documented, not fixed: a refused fn-down can leave the hotkey monitor holding a ghost session that eats one keystroke (ISSUES #5). 405/405 pass. |
 | 2026-08-14 | **Warm mic is now `Settings.warmMic`, off by default** — the audit specified that default (`01-landscape.md:248`) and it shipped inverted. `prepare()` → `setWarm(_:)` puts the gate in the recorder and retires the one-way `warm` latch, so switching it off actually puts the indicator out. Four copy sites corrected. Open cost: the cold path's 240–700 ms device open now runs on every press inside the event-tap callback — measure with `PARLA_TRACE=1` before deciding on an off-main start. 407/407 pass. |
+| 2026-10-02 | **Mic/hotkey reliability, 7 fixes on `fix/mic-hotkey-reliability`.** Missed trigger release replayed from the HID flags; self-ended capture unlatches the monitor; wedged warm engine rebuilt at start(); failed model reload retried; armed shortcut recorder and backgrounded tryout no longer leave the tap suspended; NSLog lands in `~/Library/Logs/Parla.log` with transcripts kept out of it. Root cause of "mic always on" was a stale 0.1.0 build in `/Applications`, not code. 417/417 pass. |
+| 2026-10-02 | **The three items left open, closed.** Event tap moved to its own thread with edges delivered on main in order; a route change mid-dictation resumes the capture on a rebuilt engine; one shortcut recorder armed at a time. Reviewed: no defect, three hedges taken. 425/425 pass. |
+| 2026-10-02 | **Cleaned swap doubled the text in Electron** (user report, reproduced in T3 Code: raw landed, then the cleaned text appeared on top of it). `replaceTypedTail` read back ONCE immediately after `AXUIElementSetAttributeValue`, but Chromium applies AX sets in the renderer after returning success (the async behaviour the `AXFocused` poll already documents), so the stale read made it report failure and the keystroke fallback typed the cleaned text a second time while the write landed anyway. The read-back now polls (≤10×50 ms; AppKit confirms on the first pass), and an issued-but-unconfirmed write returns `.unverified` — the field is left alone and history keeps the cleaned text, because two write mechanisms must never run for one edit. Keystroke fallback remains only when no write was issued (`.unavailable`). 427/427 pass. |
+| 2026-10-02 | **Reconcile's re-press gap closed** (user report: "what is said in one dictation carries over to another" — a missed fn release merged two dictations into one capture, and a re-press inside the watchdog's 5 s window re-armed `triggerHeld` so the tick ended nothing). The bound key reporting DOWN again while its own push session is live is itself proof the release was missed: `handle()` now splits there — finalizes the old session, starts the new one. Twins stay safe via `downKeyCode` + per-key `CGEventSource.keyState`. 427/427 pass. |

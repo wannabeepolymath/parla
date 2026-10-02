@@ -153,9 +153,16 @@ extension AppDelegate {
             // — no visible char-by-char erase and no keystroke window for the
             // user's own typing to fall into. Fields that refuse the write (or
             // an erase of 0, which the helper declines) fall back to keystrokes.
-            if Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append) {
+            // An ISSUED write that never confirmed gets no fallback: Electron
+            // applies AX sets async, and typing over one lands the edit twice.
+            switch Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append) {
+            case .replaced:
                 NSLog("Parla replace: atomic ax swap (erase %d)", erase)
-            } else {
+            case .unverified:
+                NSLog("Parla replace: ax write unconfirmed, field left alone (erase %d)", erase)
+                hud.show(unverifiedHUD)
+                return
+            case .unavailable:
                 NSLog("Parla replace: ax-verified tail swap (erase %d)", erase)
                 Inserter.typeBackspaces(erase)
                 Inserter.typeUnicode(append)
@@ -501,8 +508,8 @@ extension AppDelegate {
                 guard self.liveTyping else { return }
                 let typed = self.session.typedLedger
                 let d = LiveTyper.diff(typed: typed, new: text)
-                NSLog("Parla stream: %.1fs audio -> \"%@\" (erase %d, append \"%@\")",
-                      Double(snap.count) / 16_000, text, d.erase, d.append)
+                NSLog("Parla stream: %.1fs audio -> %d chars (erase %d, append %d)",
+                      Double(snap.count) / 16_000, text.count, d.erase, d.append.count)
                 if d.erase == 0 {
                     Inserter.typeUnicode(d.append) // pure append: can't harm foreign text
                 } else if Inserter.canEraseTyped(typed) {
@@ -641,8 +648,8 @@ final class CorrectionWatcher {
             return // keep watching: the user may still be mid-correction
         }
         if DictionaryLearner.Store.shared.add(proposal) {
-            NSLog("Parla learn: proposed \"%@\" → \"%@\" (Hub → Dictionary to confirm)",
-                  proposal.from, proposal.to)
+            // The words themselves stay out of the log file; the Hub shows them.
+            NSLog("Parla learn: proposed a dictionary correction (Hub → Dictionary to confirm)")
         }
         disarm() // one proposal per insertion, never a chain of them
     }

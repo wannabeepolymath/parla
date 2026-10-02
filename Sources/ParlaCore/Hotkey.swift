@@ -260,6 +260,7 @@ public final class HotkeyMonitor {
         /// Esc while idle: dismiss the HUD toast.
         case dismiss
     }
+    /// Called on the main thread once `start()` has run (see `emit`).
     public var onEdge: ((Edge) -> Void)?
     /// Sessions shorter than this are treated as accidental (see Edge.up).
     public var shortTapThreshold: TimeInterval = 0.2
@@ -269,17 +270,48 @@ public final class HotkeyMonitor {
     public var bindings = HotkeyBindings()
     /// Raised by the Hub while it records a new binding — without it the tap
     /// swallows the very chords being re-recorded (⌃⌘V, fn+Space) and they
-    /// never reach the Hub window. Main thread only, like the tap callback.
-    public static var suspended = false
+    /// never reach the Hub window. Written on main, read on the tap thread.
+    public static var suspended: Bool {
+        get { suspendedLock.lock(); defer { suspendedLock.unlock() }; return suspendedFlag }
+        set { suspendedLock.lock(); suspendedFlag = newValue; suspendedLock.unlock() }
+    }
+    private static let suspendedLock = NSLock()
+    private static var suspendedFlag = false
+
+    /// Guards everything below. The machine runs on the tap thread; the
+    /// watchdog and `endSession` reach it from main. Recursive because
+    /// `ensureAlive` re-enters through `start()`. Never held across `onEdge`.
+    private let lock = NSRecursiveLock()
+    /// Edges decided on the tap thread that main has not run yet.
+    private var undelivered = 0
+    /// Set by `start()`. Off, edges fire synchronously — which is what lets the
+    /// tests drive the machine without a run loop.
+    var deliversOnMain = false
 
     private enum Session { case idle, push, handsFree }
     private var session = Session.idle
+    /// The keyCode whose press started the current session. The flag bit alone
+    /// can't say which physical key moved (twins share it); this is what lets a
+    /// later down of the SAME key read as proof its release was missed.
+    private var downKeyCode: UInt16 = 0
+    /// Key-level HID state (`CGEventSource.keyState`) — per physical key, unlike
+    /// the shared flag bit. Injectable so the tests can play both twins.
+    var keyIsPhysicallyDown: (UInt16) -> Bool = {
+        CGEventSource.keyState(.hidSystemState, key: CGKeyCode($0))
+    }
     /// The trigger's flag bit as of the last flagsChanged on one of its keys.
     /// `session` alone can't tell a latch chord that is the tail of the press
     /// which just stopped a session from the front app's own chord.
     private var triggerHeld = false
+    /// Whether the HID flags agreed with the trigger-down that began the current
+    /// press. Only then are they trusted to report its release — re-sampled per
+    /// press, because a trigger can also arrive from a source the HID state
+    /// never sees (Screen Sharing, a remapper).
+    private var hidTracksTrigger = false
     private var downAt: TimeInterval = 0
     private var tap: CFMachPort?
+    /// The tap thread's run loop, so a dead port's thread can be told to exit.
+    private var tapRunLoop: CFRunLoop?
     private let store: SettingsStore
     private var loadedBindings: HotkeyBindings?
     /// keyCode of the last keyDown we swallowed, so its autorepeats can be
@@ -311,16 +343,71 @@ public final class HotkeyMonitor {
               KeyChord.modifierKey(keyCode) == trigger else { return }
         let active = modifiers.contains(trigger)
         triggerHeld = active
+        // The bound key DOWN again while its own session is live: the release
+        // never reached us (tap disabled or deaf when it happened), and this
+        // press is a new dictation — without a split the two finalize as one
+        // transcript. This is reconcile's gap: its watchdog ticks every ~5 s,
+        // and a re-press inside that window re-arms `triggerHeld`, so the tick
+        // sees a held key and ends nothing. Twins can't land here — a twin's
+        // press carries its own keyCode, and the bound key's release under a
+        // twin-held bit reports physically up.
+        if active, session == .push, keyCode == downKeyCode, keyIsPhysicallyDown(keyCode) {
+            NSLog("Parla: trigger pressed again with no release seen, splitting the capture")
+            session = .idle
+            emit(.up(short: time - downAt < shortTapThreshold))
+        }
         if active, session == .idle {
             session = .push
             downAt = time
-            onEdge?(.down(command: modifiers.contains(.shift)))
+            downKeyCode = keyCode
+            emit(.down(command: modifiers.contains(.shift)))
         } else if active, session == .handsFree {
             session = .idle
-            onEdge?(.up(short: time - downAt < shortTapThreshold))
+            emit(.up(short: time - downAt < shortTapThreshold))
         } else if !active, session == .push {
             session = .idle
-            onEdge?(.up(short: time - downAt < shortTapThreshold))
+            emit(.up(short: time - downAt < shortTapThreshold))
+        }
+    }
+
+    /// A release the tap never saw. The tap can be off at the moment the trigger
+    /// comes up — disabled by macOS for a slow callback, deaf under secure input
+    /// — and a push-to-talk session then has nothing left to end it: the mic
+    /// stays open and the room is recorded until the next keystroke or the
+    /// 10-minute cap. Called with the trigger's *physical* state whenever the
+    /// tap is revived and on every watchdog tick; a held trigger is left alone.
+    /// The missed release is replayed through `handle`, so hands-free — which is
+    /// meant to outlive the release — only has its stale `triggerHeld` cleared.
+    func reconcile(triggerDown: Bool, at time: TimeInterval) {
+        guard triggerHeld, !triggerDown else { return }
+        if session == .push { NSLog("Parla: missed the trigger release, ending the capture") }
+        handle(keyCode: bindings.pushToTalk.keyCode, modifiers: [], at: time)
+    }
+
+    /// The capture ended without us: the 10-minute cap or a lost mic finalized
+    /// it. Left latched, the monitor swallows the user's next Space, Return or
+    /// Esc as the "stop" of a session that no longer exists, and the next
+    /// trigger press is a no-op. `triggerHeld` is physical state and stays.
+    ///
+    /// Skipped while an edge is still queued for main: that edge is a press or a
+    /// stop the app has not seen yet, and unlatching under it would leave the
+    /// monitor idle beneath a session that is about to start recording.
+    public func endSession() {
+        lock.lock(); defer { lock.unlock() }
+        guard undelivered == 0 else { return }
+        session = .idle
+    }
+
+    /// Hand an edge to the app. From the tap thread that means a hop to main —
+    /// `onEdge` runs the capture start, the AX probe and sometimes a model
+    /// reload, none of which may run inside the tap callback. Order is the
+    /// order of decision: main's queue is FIFO.
+    private func emit(_ edge: Edge) {
+        guard deliversOnMain else { onEdge?(edge); return }
+        undelivered += 1
+        DispatchQueue.main.async { [self] in
+            onEdge?(edge)
+            lock.lock(); undelivered -= 1; lock.unlock()
         }
     }
 
@@ -344,11 +431,11 @@ public final class HotkeyMonitor {
             switch session {
             case .push: // convert the held push-to-talk: recording survives the trigger release
                 session = .handsFree
-                onEdge?(.handsFree)
+                emit(.handsFree)
                 return true
             case .handsFree: // trigger held since the latch, so the stop below never fired
                 session = .idle
-                onEdge?(.up(short: time - downAt < shortTapThreshold))
+                emit(.up(short: time - downAt < shortTapThreshold))
                 return true
             case .idle where triggerHeld:
                 return true // the trigger press just stopped the session — swallow, no restart
@@ -367,12 +454,12 @@ public final class HotkeyMonitor {
         // second press goes through. Deliberate trade, not an oversight.
         if keyCode == 53, session != .idle { // Esc: cancel the dictation
             session = .idle
-            onEdge?(.cancel)
+            emit(.cancel)
             return true
         }
         if session == .push { // any other key while the trigger is held cancels (and passes through)
             session = .idle
-            onEdge?(.cancel)
+            emit(.cancel)
             return false
         }
         // The latch key or Return also stop hands-free once the trigger is
@@ -383,19 +470,19 @@ public final class HotkeyMonitor {
         if session == .handsFree, keyCode == bindings.handsFree.keyCode || keyCode == 36,
            modifiers.subtracting(.shift).isEmpty {
             session = .idle
-            onEdge?(.up(short: time - downAt < shortTapThreshold))
+            emit(.up(short: time - downAt < shortTapThreshold))
             return true // swallow — a space/newline must not land in the field before the transcript
         }
         if session == .handsFree { return false } // other typing while hands-free is fine
         if bindings.pasteLast.matches(keyCode, modifiers) {
-            onEdge?(.pasteLast)
+            emit(.pasteLast)
             return true
         }
         if bindings.openScratchpad.matches(keyCode, modifiers) {
-            onEdge?(.openScratchpad)
+            emit(.openScratchpad)
             return true
         }
-        if keyCode == 53 { onEdge?(.dismiss) } // Esc while idle: dismiss HUD toast, pass through
+        if keyCode == 53 { emit(.dismiss) } // Esc while idle: dismiss HUD toast, pass through
         return false
     }
 
@@ -419,8 +506,12 @@ public final class HotkeyMonitor {
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
             eventsOfInterest: mask,
             callback: { _, type, event, refcon in
-                Unmanaged<HotkeyMonitor>.fromOpaque(refcon!).takeUnretainedValue()
-                    .process(type: type, event: event)
+                // A bare thread's run loop drains no pool, and refreshBindings
+                // makes Foundation objects on every key.
+                autoreleasepool {
+                    Unmanaged<HotkeyMonitor>.fromOpaque(refcon!).takeUnretainedValue()
+                        .process(type: type, event: event)
+                }
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque())
         else {
@@ -430,9 +521,28 @@ public final class HotkeyMonitor {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.start() }
             return
         }
+        lock.lock()
         self.tap = tap
+        deliversOnMain = true
+        lock.unlock()
+        // The tap gets a thread of its own. On the main run loop it held every
+        // key the user typed, in any app, behind whatever main was doing — and a
+        // trigger-down does the whole capture start there (device open, AX
+        // probe, sometimes a model reload): long enough for macOS to disable the
+        // tap and for the release to slip past it. Here the callback runs the
+        // state machine and nothing else; `emit` carries the edges to main.
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        let thread = Thread { [weak self] in
+            let runLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            if let self {
+                self.lock.lock(); self.tapRunLoop = runLoop; self.lock.unlock()
+            }
+            CFRunLoopRun() // until ensureAlive stops it to replace a dead port
+        }
+        thread.name = "parla.hotkey-tap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
 
         // Parla is LSUIElement with no windows, which makes it a prime App Nap
         // target. A napped process gets its run loop throttled, the tap callback
@@ -472,11 +582,19 @@ public final class HotkeyMonitor {
     /// Re-enable a tap macOS turned off behind our back; recreate it if the port
     /// itself died. No-op in the normal case (one bool check).
     private func ensureAlive() {
+        lock.lock(); defer { lock.unlock() }
         guard let tap else { return } // never created: start()'s own retry owns that
+        // Every tick, not only after a revive: secure input deafens the tap
+        // without ever disabling it, so "enabled" proves nothing about a release.
+        defer { reconcileWithKeyboard() }
         guard CFMachPortIsValid(tap) else {
             NSLog("Parla: hotkey tap port went invalid, recreating")
             CFMachPortInvalidate(tap) // also drops the dead port's run-loop source
             self.tap = nil
+            // Dropping its only source does not wake a run loop asleep in
+            // mach_msg — stop it, or each dead port strands a thread.
+            if let tapRunLoop { CFRunLoopStop(tapRunLoop) }
+            tapRunLoop = nil
             start()
             return
         }
@@ -485,7 +603,27 @@ public final class HotkeyMonitor {
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
+    /// The trigger as the keyboard reports it, not as our bookkeeping remembers
+    /// it — the bookkeeping is the thing under suspicion.
+    private func triggerPhysicallyDown() -> Bool {
+        guard let trigger = KeyChord.modifierKey(bindings.pushToTalk.keyCode) else { return false }
+        return KeyChord.Modifiers(CGEventSource.flagsState(.hidSystemState)).contains(trigger)
+    }
+
+    /// `reconcile` against the real keyboard. Gated on `hidTracksTrigger`: a
+    /// trigger that never shows up in the HID flags would otherwise have its
+    /// dictation cut short at the next watchdog tick.
+    private func reconcileWithKeyboard() {
+        guard hidTracksTrigger else { return }
+        // Nobody saw this release, so it has no honest timestamp. Far future
+        // makes it never "short": the audio is transcribed, not thrown away.
+        reconcile(triggerDown: triggerPhysicallyDown(), at: .greatestFiniteMagnitude)
+    }
+
+    /// The tap callback, on the tap thread. Everything here is bookkeeping —
+    /// no I/O beyond one stat() and the HID flags, so it returns in microseconds.
     private func process(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        lock.lock(); defer { lock.unlock() }
         let pass = Unmanaged.passUnretained(event)
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
@@ -495,13 +633,22 @@ public final class HotkeyMonitor {
             NSLog("Parla: hotkey tap disabled by %@, re-enabling",
                   type == .tapDisabledByTimeout ? "timeout" : "user input")
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) } // macOS disables slow taps; revive
+            reconcileWithKeyboard() // a release during the outage went straight past us
             return pass
         case _ where Self.suspended: // the Hub is recording a binding — see `suspended`
             return pass
         case .flagsChanged:
             refreshBindings()
-            handle(keyCode: UInt16(event.getIntegerValueField(.keyboardEventKeycode)),
-                   modifiers: KeyChord.Modifiers(event.flags),
+            let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            let modifiers = KeyChord.Modifiers(event.flags)
+            // Sampled here, at the event: by the time main gets round to the
+            // edge the key may already be up, and a release that then goes
+            // missing is exactly the one reconcile needs this trust for.
+            if let trigger = KeyChord.modifierKey(bindings.pushToTalk.keyCode),
+               KeyChord.modifierKey(code) == trigger, modifiers.contains(trigger) {
+                hidTracksTrigger = triggerPhysicallyDown()
+            }
+            handle(keyCode: code, modifiers: modifiers,
                    at: Double(event.timestamp) / 1_000_000_000)
             return pass
         case .keyDown:

@@ -183,6 +183,10 @@ struct ShortcutRecorder: View {
     /// every other binding waits for a real key press.
     var modifierOnly = false
     @State private var monitor: Any?
+    /// Stops whichever recorder is armed. One at a time: two armed rows share
+    /// the single `HotkeyMonitor.suspended` flag, so the first to finish used to
+    /// switch the global tap back on underneath the other. Main thread only.
+    private static var disarm: (() -> Void)?
 
     private var chord: KeyChord { model.settings.hotkeys[keyPath: path] }
     private var original: KeyChord { HotkeyBindings()[keyPath: path] }
@@ -203,9 +207,19 @@ struct ShortcutRecorder: View {
             }
         }
         .onDisappear(perform: stop)
+        // The local monitor only hears keys while the Hub is key, so "Change"
+        // followed by a click into another app — or closing the window, which
+        // never fires onDisappear (see OnboardingView) — left the global tap
+        // suspended and every hotkey dead until the Hub was reopened. Any
+        // window, on purpose: stop() is idempotent and a stray one is harmless.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            stop()
+        }
     }
 
     private func start() {
+        Self.disarm?()
+        Self.disarm = { stop() }
         model.hotkeyError = nil
         HotkeyMonitor.suspended = true
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
@@ -232,9 +246,13 @@ struct ShortcutRecorder: View {
         model.setHotkey(path, to: chord)
     }
 
+    /// No-op unless this row is the armed one — every row hears onDisappear and
+    /// the resign-key notification, and only the armed one owns the flag.
     private func stop() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
+        guard let monitor else { return }
+        NSEvent.removeMonitor(monitor)
+        self.monitor = nil
+        Self.disarm = nil
         HotkeyMonitor.suspended = false
     }
 }

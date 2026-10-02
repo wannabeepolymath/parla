@@ -7,6 +7,7 @@ final class HotkeyTests: XCTestCase {
         // no test can be steered by the developer's real settings.json.
         let m = HotkeyMonitor(store: SettingsStore(url: URL(fileURLWithPath: "/dev/null/parla-tests")))
         m.onEdge = { out.pointee.append($0) }
+        m.keyIsPhysicallyDown = { _ in false } // no HID in tests; injected where it matters
         return m
     }
 
@@ -84,6 +85,165 @@ final class HotkeyTests: XCTestCase {
         let m = monitor(&out)
         XCTAssertFalse(m.keyDown(keyCode: 0, at: 0))
         XCTAssertEqual(out, [])
+    }
+
+    // MARK: reconcile — a release the tap never saw
+
+    /// The tap was disabled (or deaf) when the trigger came up. Without this the
+    /// capture runs on — mic open, room recorded — until the next keystroke.
+    func testMissedReleaseIsSynthesizedAndTheNextPressStartsFresh() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.reconcile(triggerDown: false, at: 3)
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+        m.handle(keyCode: 63, modifiers: [.fn], at: 4)                     // not a no-op any more
+        XCTAssertEqual(out, [.down(command: false), .up(short: false), .down(command: false)])
+    }
+
+    func testReconcileLeavesAHeldTriggerAlone() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.reconcile(triggerDown: true, at: 3)
+        XCTAssertEqual(out, [.down(command: false)])
+    }
+
+    /// Hands-free is meant to outlive the release, so a missed one ends nothing —
+    /// but the stale "held" bit must clear, or once the latch is stopped the
+    /// front app's own fn+Space is swallowed as if it were the tail of ours.
+    func testReconcileDoesNotEndHandsFreeButClearsTheHeldBit() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)              // latch; release then missed
+        m.reconcile(triggerDown: false, at: 3)
+        XCTAssertEqual(out, [.down(command: false), .handsFree])
+        XCTAssertTrue(m.keyDown(keyCode: 49, at: 4))                       // bare Space stops it
+        XCTAssertEqual(out, [.down(command: false), .handsFree, .up(short: false)])
+        XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.fn], at: 5))    // idle, trigger up: not ours
+    }
+
+    /// The gap reconcile's 5 s cadence leaves: the release slipped past AND the
+    /// user re-pressed before the next tick — the re-press re-arms `triggerHeld`,
+    /// so the tick sees a held key and ends nothing, and the two dictations
+    /// finalize as ONE transcript. The same physical key going down again is
+    /// itself proof the release was missed, so the session splits right there.
+    func testRepressAfterMissedReleaseSplitsTheSessions() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.keyIsPhysicallyDown = { $0 == 63 }               // the re-press is a real press
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)     // down; its release then missed
+        m.handle(keyCode: 63, modifiers: [.fn], at: 5)     // pressed again
+        XCTAssertEqual(out, [.down(command: false), .up(short: false), .down(command: false)])
+        m.handle(keyCode: 63, modifiers: [], at: 7)        // this release arrives normally
+        XCTAssertEqual(out, [.down(command: false), .up(short: false), .down(command: false),
+                             .up(short: false)])
+    }
+
+    func testTwinEventsDoNotSplitTheSession() {
+        // Left and right option share the flag bit, so both twin events spell
+        // "trigger down" — neither is a re-press of the key that started the
+        // session: the twin's press carries its own keyCode, and the bound key's
+        // release under a twin-held bit reports physically up.
+        var down = Set<UInt16>()
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.keyIsPhysicallyDown = { down.contains($0) }
+        m.bindings.pushToTalk = KeyChord(61)                              // right option
+        m.bindings.handsFree = KeyChord(49, .opt)
+        down = [61]; m.handle(keyCode: 61, modifiers: [.opt], at: 0)      // right down → push
+        down = [61, 58]; m.handle(keyCode: 58, modifiers: [.opt], at: 1)  // left down too
+        down = [58]; m.handle(keyCode: 61, modifiers: [.opt], at: 2)      // right up, bit held
+        XCTAssertEqual(out, [.down(command: false)])                      // one session, still live
+        down = []; m.handle(keyCode: 58, modifiers: [], at: 3)            // left up: bit clears
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+    }
+
+    func testReconcileWhileIdleIsSilent() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.reconcile(triggerDown: false, at: 1)
+        m.reconcile(triggerDown: true, at: 2)
+        XCTAssertEqual(out, [])
+    }
+
+    // MARK: endSession — the capture ended by itself (10-minute cap, mic lost)
+
+    func testSelfEndedHandsFreeDoesNotSwallowTheNextSpaceReturnOrEsc() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)
+        m.handle(keyCode: 63, modifiers: [], at: 0.3)
+        m.endSession()
+        XCTAssertFalse(m.keyDown(keyCode: 49, at: 700))                    // the user's own Space
+        XCTAssertFalse(m.keyDown(keyCode: 36, at: 701))                    // …and Return
+        XCTAssertFalse(m.keyDown(keyCode: 53, at: 702))                    // …and Esc
+        XCTAssertEqual(out, [.down(command: false), .handsFree, .dismiss])
+    }
+
+    func testSelfEndedPushIgnoresTheLateReleaseAndTheNextPressStarts() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.endSession()
+        m.handle(keyCode: 63, modifiers: [], at: 600)                      // trigger finally released
+        XCTAssertEqual(out, [.down(command: false)])
+        m.handle(keyCode: 63, modifiers: [.fn], at: 601)
+        XCTAssertEqual(out, [.down(command: false), .down(command: false)])
+    }
+
+    // MARK: delivery — the tap runs on its own thread, edges land on main
+
+    /// Let everything already queued on main run.
+    func drainMain() {
+        let done = expectation(description: "main drained")
+        DispatchQueue.main.async { done.fulfill() }
+        wait(for: [done], timeout: 2)
+    }
+
+    /// As start() configures it: the machine decides on the tap thread and
+    /// returns at once; the edges — and the capture start behind `.down` — run
+    /// on main afterwards, in the order they were decided.
+    func testTapEdgesAreDeliveredOnMainLaterAndInOrder() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.deliversOnMain = true
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.handle(keyCode: 63, modifiers: [], at: 0.5)
+        XCTAssertEqual(out, [])                                            // nothing ran inside the "callback"
+        drainMain()
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+    }
+
+    /// The cap fires on main while a press the tap has already accepted is
+    /// still queued behind it. Unlatching then would leave the monitor idle
+    /// under a recording session, and its release would end nothing.
+    func testEndSessionLeavesAPressMainHasNotSeenYet() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.deliversOnMain = true
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)                     // accepted, .down still queued
+        m.endSession()
+        m.handle(keyCode: 63, modifiers: [], at: 0.5)
+        drainMain()
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+    }
+
+    /// …and with nothing queued it applies, exactly as it does off the tap.
+    func testEndSessionAppliesOnceMainHasCaughtUp() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.deliversOnMain = true
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)              // latch
+        m.handle(keyCode: 63, modifiers: [], at: 0.3)
+        drainMain()
+        m.endSession()
+        XCTAssertFalse(m.keyDown(keyCode: 49, at: 700))                    // not swallowed as a stop
+        drainMain()
+        XCTAssertEqual(out, [.down(command: false), .handsFree])
     }
 
     // MARK: hands-free (fn+Space)

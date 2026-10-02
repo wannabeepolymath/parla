@@ -469,7 +469,8 @@ public final class DictationSession {
         let historyHUD: HUDState = willPolish ? .polishing
             : s.settings.historyEnabled ? .savedToHistory : .error("History off — text discarded")
 
-        var fx: [Effect] = [.log("Parla finish: raw=\(insertText) live=\(s.live ? 1 : 0) "
+        // Length, never the text: logs land in a plain file that outlives "history off".
+        var fx: [Effect] = [.log("Parla finish: chars=\(insertText.count) live=\(s.live ? 1 : 0) "
                                  + "focus=\(s.focus == .none ? 0 : 1) typed=\(ledger.count)")]
         let landing: Landing
 

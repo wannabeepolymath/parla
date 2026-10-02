@@ -37,6 +37,8 @@ public final class AudioRecorder {
     /// chunk joins the dictation or the pre-roll ring.
     private var capturing = false
     private var preRoll = PreRollRing()
+    /// When the tap last delivered a buffer, live or pre-roll. Under `lock`.
+    private var lastFeed: TimeInterval?
 
     /// Engine-side state. Only ever touched on the main thread: prepare/start/
     /// stop are called from the hotkey handler and the notification observer is
@@ -49,6 +51,8 @@ public final class AudioRecorder {
     private var builtAuthorized = false
     private var boundDevice: AudioDeviceID?
     private var rebuildGeneration = 0
+    /// Mid-capture rebuilds since start() — see rebuildAction.
+    private var resumes = 0
 
     /// Shared with the audio thread now that the engine can outlive a capture:
     /// stop() flushes the filter tail while the tap is still converting pre-roll.
@@ -325,8 +329,40 @@ public final class AudioRecorder {
     /// runs and delivers zeros forever, and the later grant never reaches it —
     /// so it must be handed back at stop(), warm or not, and rebuilt against the
     /// fresh grant. That also covers a grant that lands mid-dictation.
-    static func shouldTeardown(warm: Bool, builtAuthorized: Bool, bluetooth: Bool) -> Bool {
-        !warm || !builtAuthorized || bluetooth
+    /// `capturedNothing` is the other dead-unit signal: a capture with not one
+    /// sample in it, pre-roll included, means the tap is no longer being fed.
+    static func shouldTeardown(warm: Bool, builtAuthorized: Bool, bluetooth: Bool,
+                               capturedNothing: Bool) -> Bool {
+        !warm || !builtAuthorized || bluetooth || capturedNothing
+    }
+
+    /// What a settled route change calls for, pure so it can be checked without
+    /// an engine. Idle, the warm engine is rebuilt against the new route. Mid-
+    /// dictation the question is whether the engine survived: AVAudioEngine stops
+    /// itself on a configuration change and nothing else restarts it, so a
+    /// stopped one has to be rebuilt under the capture — while a running one was
+    /// built by this very press, after the change, and must be left alone.
+    ///
+    /// A rebuild can itself provoke the next change (opening an AirPods mic drops
+    /// the link to HFP). Each lap under a capture is a hole in the dictation, so
+    /// past `maxResumes` the capture ends and what was said is finalized.
+    /// Tap buffers arrive every ~85 ms; this many seconds without one, by the
+    /// time the debounce fires, means the engine is not feeding whatever
+    /// `isRunning` says. nil = built and not yet fed, which proves nothing.
+    static let feedGap: TimeInterval = 0.3
+    static func recentlyFed(lastFeed: TimeInterval?, now: TimeInterval) -> Bool {
+        guard let lastFeed else { return true }
+        return now - lastFeed <= feedGap
+    }
+
+    enum RebuildAction: Equatable { case none, resumeCapture, endCapture, rewarm }
+    /// ponytail: a guess with headroom — one real device switch costs one or two
+    /// laps. Raise it if `Parla.log` ever shows dictations ending here.
+    static let maxResumes = 3
+    static func rebuildAction(live: Bool, engineRunning: Bool, resumes: Int) -> RebuildAction {
+        guard live else { return .rewarm }
+        guard !engineRunning else { return .none }
+        return resumes < maxResumes ? .resumeCapture : .endCapture
     }
 
     private func build(device: AudioDeviceID?) throws {
@@ -344,6 +380,7 @@ public final class AudioRecorder {
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputFormat }
         resamplerLock.lock(); resampler.reset(); resamplerLock.unlock()
+        lock.lock(); lastFeed = nil; lock.unlock() // this engine has not fed anything yet
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
             guard let self else { return }
             self.resamplerLock.lock()
@@ -374,9 +411,11 @@ public final class AudioRecorder {
     /// Tap-side fan-out. Returns true when the chunk joined the dictation, false
     /// when it went to the pre-roll ring (warm engine, no capture in flight).
     private func route(_ chunk: [Float]?) -> Bool {
+        let now = AudioRecorder.nowSeconds()
         lock.lock()
         let live = capturing
-        if !live, let chunk { preRoll.write(chunk, now: AudioRecorder.nowSeconds()) }
+        lastFeed = now
+        if !live, let chunk { preRoll.write(chunk, now: now) }
         lock.unlock()
         guard live else { return false }
         append(chunk)
@@ -388,26 +427,10 @@ public final class AudioRecorder {
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.lock.lock()
-            let live = self.capturing
-            self.lock.unlock()
-            guard live else {
-                // Idle: the route moved under a warm engine (device swapped,
-                // AirPods connected, rate changed). Rebuild once the burst ends.
-                self.scheduleRebuild()
-                return
-            }
-            // Mid-dictation a mic that goes away (unplugged, seized by another
-            // app) leaves the tap silent forever. End the capture with a reason
-            // so stop() still finalizes what was already spoken.
-            // ponytail: only a lost input format ends it — a benign
-            // reconfiguration (default device swapped, rate changed) keeps a
-            // valid format. Follow-up: that swap leaves the tap on the old
-            // device, which needs a restart, not an end.
-            let format = self.engine.inputNode.inputFormat(forBus: 0)
-            guard format.sampleRate == 0 || format.channelCount == 0 else { return }
-            self.endCapture(.deviceLost)
+            // The route moved (device swapped, AirPods connected, rate changed)
+            // and the engine has stopped itself. Idle or mid-dictation, the
+            // answer is a rebuild once the burst ends — see scheduleRebuild.
+            self?.scheduleRebuild()
         }
     }
 
@@ -421,10 +444,36 @@ public final class AudioRecorder {
             guard let self, self.rebuildGeneration == generation else { return }
             self.lock.lock()
             let live = self.capturing
+            let fed = AudioRecorder.recentlyFed(lastFeed: self.lastFeed, now: AudioRecorder.nowSeconds())
             self.lock.unlock()
-            guard !live else { return } // a dictation started during the debounce
-            self.teardown()
-            self.warmUp() // re-reads the transport: AirPods leave the engine cold
+            switch AudioRecorder.rebuildAction(live: live, engineRunning: self.engine.isRunning && fed,
+                                               resumes: self.resumes) {
+            case .none:
+                break
+            case .endCapture:
+                NSLog("Parla recorder: route would not settle, ending the capture")
+                self.endCapture(.deviceLost)
+            case .rewarm:
+                self.teardown()
+                self.warmUp() // re-reads the transport: AirPods leave the engine cold
+            case .resumeCapture:
+                // Same samples, new engine: `capturing` never drops, so the tap
+                // on the rebuilt engine appends to the dictation already in
+                // flight. What was said during the debounce and the device open
+                // is lost — unavoidable, the old engine was already stopped.
+                // No warm gate here: the Bluetooth rule is about *holding* a
+                // headset between dictations, not about recording from one.
+                self.resumes += 1
+                self.teardown()
+                do {
+                    try self.build(device: self.inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:)))
+                    NSLog("Parla recorder: route changed mid-dictation, capture resumed")
+                } catch {
+                    // No usable input left (unplugged, seized by another app):
+                    // end with a reason so stop() still finalizes what was said.
+                    self.endCapture(.deviceLost)
+                }
+            }
         }
     }
 
@@ -454,8 +503,15 @@ public final class AudioRecorder {
         let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
         // Behind the trace gate so a normal start pays no extra HAL queries.
         if Trace.enabled { Trace.setTransport(AudioRecorder.transport(of: device)) }
-        // A warm engine bound to some other mic is worse than no warm engine.
-        if engine.isRunning && boundDevice != device { teardown() }
+        // A warm engine bound to some other mic is worse than no warm engine — and
+        // so is one that still reports isRunning but has stopped feeding its tap.
+        // Nothing else would ever rebuild that one (stop() keeps a warm engine,
+        // warmUp() skips a running one), so every dictation would be silence
+        // until relaunch. The pre-roll ring going stale is the tell.
+        lock.lock()
+        let wedged = preRoll.isStale(now: AudioRecorder.nowSeconds())
+        lock.unlock()
+        if engine.isRunning && (boundDevice != device || wedged) { teardown() }
 
         // The ring is claimed before `capturing` flips so the splice has no gap
         // and no overlap: every chunk lands on exactly one side of it.
@@ -467,6 +523,7 @@ public final class AudioRecorder {
         ended = nil
         capturing = true
         lock.unlock()
+        resumes = 0
 
         if !engine.isRunning {
             // Cold path — what every press used to pay. Also the Bluetooth path:
@@ -515,7 +572,8 @@ public final class AudioRecorder {
         // A cold-path start may have bound a headset (the gate only allows
         // *holding* a non-Bluetooth device) or a mic that was not yet granted.
         if AudioRecorder.shouldTeardown(warm: warm, builtAuthorized: builtAuthorized,
-                                        bluetooth: AudioRecorder.isBluetooth(boundDevice)) {
+                                        bluetooth: AudioRecorder.isBluetooth(boundDevice),
+                                        capturedNothing: captured.isEmpty) {
             teardown()
         }
         warmUp() // no-op while the engine is still running; rebuilds after a teardown
@@ -557,6 +615,14 @@ struct PreRollRing {
         defer { reset() }
         guard !mediaPlaying, let lastWrite, now - lastWrite <= Self.maxAge else { return [] }
         return Array(samples.suffix(Self.prependSamples))
+    }
+
+    /// The tap stopped feeding — `take`'s own test, without consuming the ring.
+    /// A ring not yet written (just built, just reset) is not stale: its first
+    /// buffer is ~85 ms away.
+    func isStale(now: TimeInterval) -> Bool {
+        guard let lastWrite else { return false }
+        return now - lastWrite > Self.maxAge
     }
 
     mutating func reset() {
