@@ -7,6 +7,7 @@ final class HotkeyTests: XCTestCase {
         // no test can be steered by the developer's real settings.json.
         let m = HotkeyMonitor(store: SettingsStore(url: URL(fileURLWithPath: "/dev/null/parla-tests")))
         m.onEdge = { out.pointee.append($0) }
+        m.keyIsPhysicallyDown = { _ in false } // no HID in tests; injected where it matters
         return m
     }
 
@@ -121,6 +122,42 @@ final class HotkeyTests: XCTestCase {
         XCTAssertTrue(m.keyDown(keyCode: 49, at: 4))                       // bare Space stops it
         XCTAssertEqual(out, [.down(command: false), .handsFree, .up(short: false)])
         XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.fn], at: 5))    // idle, trigger up: not ours
+    }
+
+    /// The gap reconcile's 5 s cadence leaves: the release slipped past AND the
+    /// user re-pressed before the next tick — the re-press re-arms `triggerHeld`,
+    /// so the tick sees a held key and ends nothing, and the two dictations
+    /// finalize as ONE transcript. The same physical key going down again is
+    /// itself proof the release was missed, so the session splits right there.
+    func testRepressAfterMissedReleaseSplitsTheSessions() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.keyIsPhysicallyDown = { $0 == 63 }               // the re-press is a real press
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)     // down; its release then missed
+        m.handle(keyCode: 63, modifiers: [.fn], at: 5)     // pressed again
+        XCTAssertEqual(out, [.down(command: false), .up(short: false), .down(command: false)])
+        m.handle(keyCode: 63, modifiers: [], at: 7)        // this release arrives normally
+        XCTAssertEqual(out, [.down(command: false), .up(short: false), .down(command: false),
+                             .up(short: false)])
+    }
+
+    func testTwinEventsDoNotSplitTheSession() {
+        // Left and right option share the flag bit, so both twin events spell
+        // "trigger down" — neither is a re-press of the key that started the
+        // session: the twin's press carries its own keyCode, and the bound key's
+        // release under a twin-held bit reports physically up.
+        var down = Set<UInt16>()
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.keyIsPhysicallyDown = { down.contains($0) }
+        m.bindings.pushToTalk = KeyChord(61)                              // right option
+        m.bindings.handsFree = KeyChord(49, .opt)
+        down = [61]; m.handle(keyCode: 61, modifiers: [.opt], at: 0)      // right down → push
+        down = [61, 58]; m.handle(keyCode: 58, modifiers: [.opt], at: 1)  // left down too
+        down = [58]; m.handle(keyCode: 61, modifiers: [.opt], at: 2)      // right up, bit held
+        XCTAssertEqual(out, [.down(command: false)])                      // one session, still live
+        down = []; m.handle(keyCode: 58, modifiers: [], at: 3)            // left up: bit clears
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
     }
 
     func testReconcileWhileIdleIsSilent() {

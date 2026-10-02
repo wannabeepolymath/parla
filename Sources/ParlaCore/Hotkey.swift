@@ -290,6 +290,15 @@ public final class HotkeyMonitor {
 
     private enum Session { case idle, push, handsFree }
     private var session = Session.idle
+    /// The keyCode whose press started the current session. The flag bit alone
+    /// can't say which physical key moved (twins share it); this is what lets a
+    /// later down of the SAME key read as proof its release was missed.
+    private var downKeyCode: UInt16 = 0
+    /// Key-level HID state (`CGEventSource.keyState`) — per physical key, unlike
+    /// the shared flag bit. Injectable so the tests can play both twins.
+    var keyIsPhysicallyDown: (UInt16) -> Bool = {
+        CGEventSource.keyState(.hidSystemState, key: CGKeyCode($0))
+    }
     /// The trigger's flag bit as of the last flagsChanged on one of its keys.
     /// `session` alone can't tell a latch chord that is the tail of the press
     /// which just stopped a session from the front app's own chord.
@@ -334,9 +343,23 @@ public final class HotkeyMonitor {
               KeyChord.modifierKey(keyCode) == trigger else { return }
         let active = modifiers.contains(trigger)
         triggerHeld = active
+        // The bound key DOWN again while its own session is live: the release
+        // never reached us (tap disabled or deaf when it happened), and this
+        // press is a new dictation — without a split the two finalize as one
+        // transcript. This is reconcile's gap: its watchdog ticks every ~5 s,
+        // and a re-press inside that window re-arms `triggerHeld`, so the tick
+        // sees a held key and ends nothing. Twins can't land here — a twin's
+        // press carries its own keyCode, and the bound key's release under a
+        // twin-held bit reports physically up.
+        if active, session == .push, keyCode == downKeyCode, keyIsPhysicallyDown(keyCode) {
+            NSLog("Parla: trigger pressed again with no release seen, splitting the capture")
+            session = .idle
+            emit(.up(short: time - downAt < shortTapThreshold))
+        }
         if active, session == .idle {
             session = .push
             downAt = time
+            downKeyCode = keyCode
             emit(.down(command: modifiers.contains(.shift)))
         } else if active, session == .handsFree {
             session = .idle
