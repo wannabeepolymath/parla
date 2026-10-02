@@ -202,6 +202,11 @@ public final class DictationSession {
                                verifiedHUD: HUDState, unverifiedHUD: HUDState)
         // UI
         case hud(HUDState)
+        /// The toast for a `.secure` refusal, carrying the password-field wording.
+        /// Its own effect because `.secure` is two signals — a password field, or
+        /// secure input held somewhere on the Mac — and telling them apart is a
+        /// read of the world, which is the interpreter's job.
+        case secureRefusal(String)
         case hideHUD
         case menuBar(MenuBarState)
         case playSound(SoundCue)
@@ -286,7 +291,7 @@ public final class DictationSession {
             // Refuse early — before any recording, and without consuming a
             // generation: a refused command must not silently invalidate an
             // in-flight polish.
-            guard focus != .secure else { return [.hud(.error("No transforms in password fields"))] }
+            guard focus != .secure else { return [.secureRefusal("No transforms in password fields")] }
             guard let selection else { return [.hud(.error("Select text first"))] }
             gen += 1
             state = .starting(Session(gen: gen, mode: .command(selection: selection), settings: settings,
@@ -309,7 +314,7 @@ public final class DictationSession {
             // queued HUD hide would wipe this toast.
             guard focus != .secure else {
                 state = .idle
-                return [.stopCapture(discard: true), .hud(.error("Not supported in password fields")),
+                return [.stopCapture(discard: true), .secureRefusal("Not supported in password fields"),
                         .menuBar(.idle)]
             }
             s.focus = focus
@@ -455,7 +460,7 @@ public final class DictationSession {
         // plausibly a password. Never type it, never log it, never store it.
         guard probe.focus != .secure, s.focus != .secure else {
             return [.log("Parla finish path: focus moved to secure field, dropped"),
-                    .hud(.error("Not supported in password fields"))] + finishTail(s)
+                    .secureRefusal("Not supported in password fields")] + finishTail(s)
         }
 
         let willPolish = s.cleanupConfigured

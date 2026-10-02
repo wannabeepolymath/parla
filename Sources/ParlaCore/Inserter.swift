@@ -122,6 +122,22 @@ public enum Inserter {
         return result
     }
 
+    /// The toast for a `.secure` refusal. `.secure` is two signals, and only one
+    /// of them is a password field: with secure input on, every ordinary field
+    /// is refused too, and a toast that blames a password field the user is not
+    /// in reads as a bug. No holder is named — the registry's
+    /// `kCGSSessionSecureInputPID` reports the frontmost app, not the process
+    /// that asked (verified: a background process enabling it shows up as
+    /// whatever is in front).
+    public static func secureRefusalMessage(_ passwordField: String) -> String {
+        secureRefusalMessage(passwordField, secureInput: IsSecureEventInputEnabled(),
+                             fieldIsSecure: classifyFocus() == .secure)
+    }
+
+    static func secureRefusalMessage(_ passwordField: String, secureInput: Bool, fieldIsSecure: Bool) -> String {
+        secureInput && !fieldIsSecure ? "Secure input is on — typing is blocked" : passwordField
+    }
+
     /// Focused element via the system-wide query, falling back to asking the
     /// frontmost app directly — Electron/Chromium apps often answer only the
     /// app-level query.

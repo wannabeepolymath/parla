@@ -539,7 +539,7 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.recorderStarted(gen: 1))
         let fx = m.handle(.focusSampled(gen: 1, focus: .secure))
         XCTAssertEqual(fx, [.stopCapture(discard: true),
-                            .hud(.error("Not supported in password fields")), .menuBar(.idle)])
+                            .secureRefusal("Not supported in password fields"), .menuBar(.idle)])
         XCTAssertFalse(fx.contains(.hideHUD))   // a queued hide would wipe the toast
         XCTAssertFalse(fx.contains { if case .startStreamLoop = $0 { return true }; return false })
         XCTAssertEqual(m.state, .idle)
@@ -548,7 +548,7 @@ final class DictationSessionTests: XCTestCase {
     func testSecureFocusRefusesCommandModeBeforeAnyRecording() {
         XCTAssertEqual(m.handle(.startCommand(settings: settings(), cleanupConfigured: true,
                                               focus: .secure, selection: "the cat")),
-                       [.hud(.error("No transforms in password fields"))])
+                       [.secureRefusal("No transforms in password fields")])
         XCTAssertEqual(m.state, .idle)
         XCTAssertEqual(m.gen, 0)
     }
@@ -568,7 +568,7 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.streamTyped(gen: 1, text: "hun"))
         _ = m.handle(.stopRequested)
         let fx = m.handle(.transcribed(s, raw: secret, probe: probe(.secure, typedIsOurs: true)))
-        XCTAssertEqual(quiet(fx), [.hud(.error("Not supported in password fields")),
+        XCTAssertEqual(quiet(fx), [.secureRefusal("Not supported in password fields"),
                                    .flushTrace, .menuBar(.idle), .releaseModelIfPolicyImmediate])
         for effect in fx {
             switch effect {
