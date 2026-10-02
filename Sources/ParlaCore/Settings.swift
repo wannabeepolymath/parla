@@ -30,6 +30,10 @@ public struct Settings: Codable, Equatable, Sendable {
     public var cleanupModel: String = "claude-haiku-4-5"
     public var anthropicApiKey: String? = nil
     public var whisperModelPath: String? = nil
+    // Spoken language for a multilingual whisper model: nil ⇒ detect it on
+    // every dictation, a code ("en", "hi") ⇒ skip detection and its second
+    // encoder pass. English-only models ignore it. Read when the model loads.
+    public var language: String? = nil
     public var cleanup: CleanupSettings = CleanupSettings()
     // Local-only dictation history (menu paste-last / Recent). Never leaves the
     // machine; secure-field dictations are never recorded regardless.
@@ -75,6 +79,7 @@ public struct Settings: Codable, Equatable, Sendable {
         cleanupModel = try c.decodeIfPresent(String.self, forKey: .cleanupModel) ?? cleanupModel
         anthropicApiKey = try c.decodeIfPresent(String.self, forKey: .anthropicApiKey) ?? anthropicApiKey
         whisperModelPath = try c.decodeIfPresent(String.self, forKey: .whisperModelPath) ?? whisperModelPath
+        language = try c.decodeIfPresent(String.self, forKey: .language) ?? language
         cleanup = try c.decodeIfPresent(CleanupSettings.self, forKey: .cleanup) ?? cleanup
         historyEnabled = try c.decodeIfPresent(Bool.self, forKey: .historyEnabled) ?? historyEnabled
         showHudAlways = try c.decodeIfPresent(Bool.self, forKey: .showHudAlways) ?? showHudAlways
