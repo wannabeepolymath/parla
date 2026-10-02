@@ -25,18 +25,21 @@ extension AppDelegate: NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        if !modelReady {
-            if let downloading = hubModel.downloadingModel {
-                let item = NSMenuItem(title: "Downloading \(downloading.displayName)…", action: nil, keyEquivalent: "")
-                item.isEnabled = false
-                menu.addItem(item)
-            } else {
-                let m = ModelCatalog.default
-                let item = NSMenuItem(title: "Download model (\(m.displayName), \(m.sizeLabel))",
-                                       action: #selector(downloadModel), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            }
+        // A download shows here whether or not a model is already loaded — this
+        // line and the Hub's bar are the only places its progress appears.
+        if let downloading = hubModel.downloadingModel {
+            let percent = Int((hubModel.downloadProgress ?? 0) * 100)
+            let item = NSMenuItem(title: "Downloading \(downloading.displayName)… \(percent)%",
+                                   action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            menu.addItem(.separator())
+        } else if !modelReady {
+            let m = ModelCatalog.default
+            let item = NSMenuItem(title: "Download model (\(m.displayName), \(m.sizeLabel))",
+                                   action: #selector(downloadModel), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
             menu.addItem(.separator())
         }
 

@@ -41,6 +41,8 @@ final class HubModel: ObservableObject {
     @Published var modelLoaded = false
     @Published var downloadProgress: Double? // non-nil while downloading
     @Published var downloadingModel: ModelCatalog.Model?
+    /// Why the last download failed, nil once another one starts.
+    @Published var downloadError: String?
     @Published var historyEntries: [HistoryEntry] = []
     @Published var launchAtLogin = false
     @Published var micGranted = false
@@ -75,11 +77,7 @@ final class HubModel: ObservableObject {
     func refresh() {
         // Becoming key must not clobber a pending edit: flush any debounced
         // save before re-reading from disk, or the reload below discards it.
-        if saveItem != nil {
-            saveItem?.cancel()
-            saveItem = nil
-            save()
-        }
+        flushPendingSave()
         loading = true
         defer { loading = false }
         settings = store.load()
@@ -90,6 +88,24 @@ final class HubModel: ObservableObject {
         historyEntries = history.entries
         launchAtLogin = SMAppService.mainApp.status == .enabled
         refreshPermissions()
+    }
+
+    /// Write a debounced edit now, so whatever the caller does to
+    /// settings.json next lands after it instead of underneath it.
+    func flushPendingSave() {
+        guard saveItem != nil else { return }
+        saveItem?.cancel()
+        saveItem = nil
+        save()
+    }
+
+    /// A finished download switched models behind the Hub's back. Only the
+    /// path is taken, not a full refresh(): that rebuilds the dictionary and
+    /// snippet rows, which drops focus from a field being typed in.
+    func adoptModelPath(_ path: String) {
+        loading = true
+        defer { loading = false }
+        settings.whisperModelPath = path
     }
 
     func refreshPermissions() {
@@ -157,7 +173,13 @@ final class HubModel: ObservableObject {
     private func touch() {
         guard !loading, loadError == nil else { return }
         saveItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.save() }
+        // Cleared as it fires: a non-nil saveItem has to mean "an edit is still
+        // unsaved". Left set, the next flush replayed this save over anything
+        // written to settings.json since.
+        let item = DispatchWorkItem { [weak self] in
+            self?.saveItem = nil
+            self?.save()
+        }
         saveItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }

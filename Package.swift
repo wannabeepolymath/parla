@@ -23,5 +23,6 @@ let package = Package(
         // the Tier 0 #8 insertion check that unit tests structurally cannot do.
         .executableTarget(name: "parla-insert-check", dependencies: ["ParlaCore"]),
         .testTarget(name: "ParlaCoreTests", dependencies: ["ParlaCore"]),
+        .testTarget(name: "ParlaTests", dependencies: ["Parla"]),
     ]
 )
