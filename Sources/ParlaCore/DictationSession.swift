@@ -597,7 +597,8 @@ public final class DictationSession {
         // The cleaned text replaces insertText in the field, so it must be
         // flattened too — and diffed flattened-vs-flattened or the erase counts
         // won't match what's on screen.
-        let cleaned = TextRules.flattensNewlines(bundleID: landed.bundleID)
+        let category = TextRules.category(bundleID: landed.bundleID, browserURL: landed.browserURL)
+        let cleaned = landed.singleLine || category == .terminal || category == .chat
             ? TextRules.flattenForTerminal(text) : text
         let plan = LiveTyper.swapPlan(raw: landed.insertText, cleaned: cleaned)
         let failureHUD = failure.map(HUDState.rawFallback)

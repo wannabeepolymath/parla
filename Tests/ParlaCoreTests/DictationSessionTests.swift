@@ -134,6 +134,24 @@ final class DictationSessionTests: XCTestCase {
         XCTAssertTrue(fx.contains(.insertText("Project update")))
     }
 
+    /// The cleaned swap flattens by the same rule as the raw landing: browser chat
+    /// sites and single-line fields, not just native chat apps.
+    func testCleanedSwapIntoBrowserChatTypesNoNewline() {
+        let s = startDictation()
+        _ = m.handle(.stopRequested)
+        let probe = LandingProbe(focus: .editable, bundleID: "com.google.Chrome", appName: "Chrome",
+                                 browserURL: "https://app.slack.com/client/T1/C1")
+        let fx = m.handle(.transcribed(s, raw: "hi there", probe: probe))
+        guard case .polish(_, let landed)? = fx.first(where: {
+            if case .polish = $0 { return true }; return false
+        }) else { return XCTFail("no cleanup request") }
+        let swap = m.handle(.cleanReady(s, landed, text: "Hi.\n\nThere.", failure: nil, focus: .editable))
+        guard case let .replaceTailIfOurs(_, _, append, _, _)? = swap.first(where: {
+            if case .replaceTailIfOurs = $0 { return true }; return false
+        }) else { return XCTFail("no swap") }
+        XCTAssertFalse(append.contains("\n"))
+    }
+
     func testHappyPathNoCleanupLandsRawAndStops() {
         let s = startDictation(cleanup: false)
         XCTAssertEqual(quiet(m.handle(.stopRequested)),
