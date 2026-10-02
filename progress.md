@@ -695,7 +695,9 @@ makes the next report diagnosable.
 | 5 | Shortcut recorder left the global tap suspended after an app switch or window close | `Parla/Hub/HubPages.swift` | **done** | build only |
 | 6 | Onboarding tryout kept the mic open and the tap suspended behind a minimised/background Hub | `Parla/Hub/Onboarding.swift` | **done** | build only |
 | 7 | NSLog → `~/Library/Logs/Parla.log` (one `dup2` onto stderr); dictated text removed from the three log lines that carried it | `Parla/main.swift`, `ParlaCore/DictationSession.swift`, `Parla/Dictation.swift` | **done** | 1 test + mechanism verified standalone |
-| 8 | Off-main hardware start (the cold open inside the tap callback) | — | **skipped** | see below |
+| 8 | The event tap runs on its own thread; edges hop to main (`emit`) | `ParlaCore/Hotkey.swift` | **done** | 2 tests; the thread itself needs a keyboard |
+| 9 | A route change mid-dictation rebuilds the engine under the capture instead of recording silence to the end (`rebuildAction`) | `ParlaCore/AudioRecorder.swift` | **done** | 4 tests; needs a real device switch |
+| 10 | One shortcut recorder armed at a time | `Parla/Hub/HubPages.swift` | **done** | build only |
 
 **#1 trusts the HID modifier flags only for a press whose trigger-down they
 agreed with** (`hidTracksTrigger`, sampled per press at callback entry). A
@@ -717,16 +719,29 @@ Answered, not changed: the clock question is moot now that a replayed release
 carries no timestamp, and the tests cover the pure halves only — the HID read
 and the tap wiring need a keyboard.
 
-**#8 skipped, deliberately.** The harm of a slow tap callback is the lost
-release, and #1 heals that whatever caused it. Measured on this machine from the
-system log: fn-down to mic-open ~150 ms, and under 0.5 s on the first press after
-the idle unload (base.en reload included). The off-main start is still the right
-fix for a slow AX target or a USB/Bluetooth mic; `Parla.log` now records
-`hotkey tap disabled by timeout` if it ever fires, which is the evidence to
-build it on.
+**#8 was first skipped, then done a different way.** The named fix was an
+off-main hardware start, which needs a "starting" state in the recorder and the
+reducer. The cheaper cut is the other side of the same seam: leave the capture
+start on main and take the *tap* off it. The callback now runs the pure state
+machine under a lock and returns in microseconds; `emit` queues each edge to
+main in decision order. That removes the tap timeout as a failure at all —
+main can stall for as long as it likes — and stops every keystroke in every app
+from waiting behind Parla's device open. Main still blocks ~150–500 ms per
+press; only Parla's own HUD can feel that. `endSession` is skipped while an edge
+is still queued, so a cap firing on main cannot unlatch a press main has not
+seen yet.
 
-**Not fixed:** two shortcut recorders armed at once share one `suspended` Bool,
-so stopping one unsuspends the tap under the other.
+**#9.** `AVAudioEngine` stops itself on a configuration change and nothing
+restarted it mid-capture: the dictation went on "recording" nothing until
+release. The debounced rebuild now covers a live capture too — same samples,
+new engine, `capturing` never drops. Roughly the 0.5 s debounce plus the device
+open is lost from the audio. A selected mic that vanishes falls back to the
+system default; no input at all still ends the capture as `.deviceLost`. Bounded
+at `maxResumes` laps in case a route never settles.
+
+**Still open:** main blocks for the device open on every press (see #8). And
+everything marked "needs a keyboard / a real device switch" above is unverified
+on hardware.
 
 ## Log
 
@@ -752,3 +767,4 @@ so stopping one unsuspends the tap under the other.
 | 2026-08-13 | **Merge-resolution review: 6 raised, 5 fixed, 1 documented.** The atomic AX swap had survived only as an uncalled helper — now wired into `.replaceTailIfOurs` with the keystroke path as fallback; the non-live landing branched on fn-down-latched focus instead of the landing probe; transforms regained the sanitizer's quote-strip ("put this in quotes" undone) — trim-only again; the 60s cleanup timeout (safe only in the old detached-polish design) held the next dictation hostage on audit's serialized chain — back to 15s with the ceiling named; dead `warmCleanupConnection` deleted and four stale doc claims corrected. Documented, not fixed: a refused fn-down can leave the hotkey monitor holding a ghost session that eats one keystroke (ISSUES #5). 405/405 pass. |
 | 2026-08-14 | **Warm mic is now `Settings.warmMic`, off by default** — the audit specified that default (`01-landscape.md:248`) and it shipped inverted. `prepare()` → `setWarm(_:)` puts the gate in the recorder and retires the one-way `warm` latch, so switching it off actually puts the indicator out. Four copy sites corrected. Open cost: the cold path's 240–700 ms device open now runs on every press inside the event-tap callback — measure with `PARLA_TRACE=1` before deciding on an off-main start. 407/407 pass. |
 | 2026-10-02 | **Mic/hotkey reliability, 7 fixes on `fix/mic-hotkey-reliability`.** Missed trigger release replayed from the HID flags; self-ended capture unlatches the monitor; wedged warm engine rebuilt at start(); failed model reload retried; armed shortcut recorder and backgrounded tryout no longer leave the tap suspended; NSLog lands in `~/Library/Logs/Parla.log` with transcripts kept out of it. Root cause of "mic always on" was a stale 0.1.0 build in `/Applications`, not code. 417/417 pass. |
+| 2026-10-02 | **The three items left open, closed.** Event tap moved to its own thread with edges delivered on main in order; a route change mid-dictation resumes the capture on a rebuilt engine; one shortcut recorder armed at a time. 423/423 pass. |

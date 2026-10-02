@@ -185,6 +185,36 @@ final class AudioRecorderTests: XCTestCase {
                                                    bluetooth: false, capturedNothing: true))
     }
 
+    // MARK: - Route change
+
+    /// AVAudioEngine stops itself on a configuration change and nothing restarts
+    /// it, so a dictation in flight went on "recording" silence to the end.
+    func testRouteChangeMidCaptureResumesOnAStoppedEngine() {
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: false, resumes: 0), .resumeCapture)
+    }
+
+    /// The press itself built a fresh engine after the change (start() does
+    /// when the old one stopped): rebuilding again would only cut a hole in it.
+    func testRouteChangeMidCaptureLeavesARunningEngineAlone() {
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: true, resumes: 0), .none)
+    }
+
+    /// A rebuild can provoke the next route change. Idle, that loop only costs
+    /// rebuilds; under a capture each lap is a hole in the dictation, so after a
+    /// few the capture ends and what was said is finalized.
+    func testRouteThatWillNotSettleEndsTheCapture() {
+        let limit = AudioRecorder.maxResumes
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: false, resumes: limit - 1),
+                       .resumeCapture)
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: false, resumes: limit),
+                       .endCapture)
+    }
+
+    func testRouteChangeWhileIdleRewarms() {
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: false, engineRunning: false, resumes: 0), .rewarm)
+        XCTAssertEqual(AudioRecorder.rebuildAction(live: false, engineRunning: true, resumes: 0), .rewarm)
+    }
+
     func testColdOrBluetoothStillTearsDown() {
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: false, builtAuthorized: true,
                                                    bluetooth: false, capturedNothing: false))

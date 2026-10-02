@@ -157,6 +157,47 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(out, [.down(command: false), .down(command: false)])
     }
 
+    // MARK: delivery — the tap runs on its own thread, edges land on main
+
+    /// Let everything already queued on main run.
+    func drainMain() {
+        let done = expectation(description: "main drained")
+        DispatchQueue.main.async { done.fulfill() }
+        wait(for: [done], timeout: 2)
+    }
+
+    /// As start() configures it: the machine decides on the tap thread and
+    /// returns at once; the edges — and the capture start behind `.down` — run
+    /// on main afterwards, in the order they were decided.
+    func testTapEdgesAreDeliveredOnMainLaterAndInOrder() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.deliversOnMain = true
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.handle(keyCode: 63, modifiers: [], at: 0.5)
+        XCTAssertEqual(out, [])                                            // nothing ran inside the "callback"
+        drainMain()
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+    }
+
+    /// The cap fires on main while a press the tap has already accepted is
+    /// still queued behind it. Unlatching then would leave the monitor idle
+    /// under a recording session, and its release would end nothing.
+    func testEndSessionLeavesAPressMainHasNotSeenYet() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.deliversOnMain = true
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)                     // accepted, .down still queued
+        m.endSession()
+        m.handle(keyCode: 63, modifiers: [], at: 0.5)
+        drainMain()
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+        m.endSession()                                                     // nothing pending now: it applies
+        m.handle(keyCode: 63, modifiers: [.fn], at: 2)
+        drainMain()
+        XCTAssertEqual(out.last, .down(command: false))
+    }
+
     // MARK: hands-free (fn+Space)
 
     func testHandsFreeLatchSurvivesFnReleaseAndFnStops() {

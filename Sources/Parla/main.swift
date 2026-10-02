@@ -57,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The model path that last loaded successfully. A key press retries a
     /// failed load only for this one — a model that has never loaded (missing,
     /// damaged, a broken file of the user's own) would otherwise be re-read, or
-    /// re-hashed, inside the tap callback on every press.
+    /// re-hashed, on the main thread at every press.
     var lastGoodModelPath: String?
     var loadedModelPath: String?
     var lastModelUse = Date()
