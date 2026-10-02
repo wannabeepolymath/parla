@@ -111,6 +111,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openHub() { hubController.show() }
     @objc func openScratchpad() { scratchpad.show() }
 
+    // Opening Parla again from Finder/Spotlight while it runs lands here, not on
+    // the single-instance alert. Show the Hub: macOS can hide the menu-bar icon
+    // (notch overflow, Menu Bar settings), and then this is the only way in.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        hubController.show()
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         scratchpad.save() // flush a pending debounced edit
     }
@@ -136,7 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Fresh install: open the setup flow instead of leaving a ⚠️ glyph in the
         // menu bar for the user to find and decode. A broken settings.json is a
         // different problem with its own banner — don't onboard over it.
-        if !launchSettings.onboardingCompleted, store.lastError == nil {
+        // Otherwise a launch the user asked for (Finder, Spotlight) opens the Hub
+        // too — macOS can hide the menu-bar icon, which left nothing on screen —
+        // but a login-item launch stays silent in the menu bar.
+        if store.lastError == nil, !launchSettings.onboardingCompleted || !Self.launchedAtLogin {
             hubController.show()
         }
 
@@ -225,6 +236,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The launch Apple event marks an SMAppService login-item start. Only
+    /// meaningful during applicationDidFinishLaunching, while that event is current.
+    static var launchedAtLogin: Bool {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        return event?.eventID == kAEOpenApplication
+            && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+
     /// App version from the bundle's Info.plist (CFBundleShortVersionString).
     /// nil under `swift run` (no bundle) so the update check skips.
     static var appVersion: String? {
@@ -248,6 +267,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Every `.secure` refusal's toast, and its only log line: the refusal at
+    /// fn-down logged nothing, so "it said password field in a plain text box"
+    /// left no trace to diagnose. The frontmost app is the one lead there is.
+    func showSecureRefusal(_ passwordField: String) {
+        let message = Inserter.secureRefusalMessage(passwordField)
+        NSLog("Parla secure refusal: %@ (frontmost: %@)", message,
+              NSWorkspace.shared.frontmostApplication?.localizedName ?? "none")
+        hud.show(.error(message))
+    }
+
     /// History can outlive its source app. Resolve the target at the keystroke,
     /// then flatten newlines where Return would fire: terminals run commands,
     /// chat apps (Slack, Discord, etc.) send the message.
@@ -257,8 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // password field — the single invariant the rest of the app never
         // breaks. The text stays in history for a retry somewhere sane.
         guard Inserter.focusTarget() != .secure else {
-            NSLog("Parla paste-last: focus is a secure field, refused")
-            hud.show(.error("Not supported in password fields"))
+            showSecureRefusal("Not supported in password fields")
             return
         }
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier

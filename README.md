@@ -264,6 +264,10 @@ neither the app's name nor its bundle ID is in the request.
 Password fields (`AXSecureTextField`) are detected via Accessibility and
 refused outright: dictation into one shows "⚠️ Not supported in password
 fields" — nothing is typed, stored in history, or sent to the cleanup model.
+The same refusal applies while any app has macOS Secure Event Input on (a
+`sudo` prompt, a password manager): synthetic keystrokes are dropped then, so
+the toast reads "⚠️ Secure input is on — typing is blocked" instead, and
+`~/Library/Logs/Parla.log` records which app was frontmost.
 
 ## Configuration
 

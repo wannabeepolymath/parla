@@ -59,6 +59,17 @@ final class InserterTests: XCTestCase {
         XCTAssertEqual(Inserter.focusTarget(secureInput: true), .secure)
     }
 
+    /// `.secure` is two signals, and the toast used to blame a password field for
+    /// both — in a plain text field, whenever some app had secure input on.
+    func testSecureRefusalBlamesAPasswordFieldOnlyWhenThereIsOne() {
+        let field = "Not supported in password fields"
+        XCTAssertEqual(Inserter.secureRefusalMessage(field, secureInput: true, fieldIsSecure: false),
+                       "Secure input is on — typing is blocked")
+        // A real password field turns secure input on itself: still the field's toast.
+        XCTAssertEqual(Inserter.secureRefusalMessage(field, secureInput: true, fieldIsSecure: true), field)
+        XCTAssertEqual(Inserter.secureRefusalMessage(field, secureInput: false, fieldIsSecure: true), field)
+    }
+
     // MARK: - canErase (the pure (text, cursor, selLength, typed) decision)
 
     func testCanEraseWithBareCaretAfterOurText() {

@@ -174,6 +174,7 @@ extension AppDelegate {
         // MARK: - UI
 
         case let .hud(state): hud.show(state)
+        case let .secureRefusal(passwordField): showSecureRefusal(passwordField)
         case .hideHUD: hud.hide()
         case let .menuBar(state):
             switch state {
