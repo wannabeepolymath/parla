@@ -45,8 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// by the finish() queued right after it — the processTask chain serializes.
     var window: StreamWindow?
 
-    // Model download-in-progress state (feature 4): non-nil task means the menu
-    // shows a disabled "Downloading…" item instead of the download action.
+    // Model download-in-progress state (feature 4): non-nil task means a
+    // download is running and a second one is refused.
     var downloadTask: URLSessionDownloadTask?
     var downloadObservation: NSKeyValueObservation?
     // Idle model-unload. `transcriber` is the *resident* context, which the
@@ -441,8 +441,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // Text/emoji states (… transcribing, ⚠️ error, ⬇️% download) clear
-    // any logo image first so they don't render side by side.
+    // Text/emoji states (… transcribing, ⚠️ error) clear any logo image
+    // first so they don't render side by side.
     func setStatus(_ s: String) {
         statusItem.button?.image = nil
         statusItem.button?.title = s

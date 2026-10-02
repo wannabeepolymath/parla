@@ -30,6 +30,9 @@ struct GeneralPage: View {
                               detail: "Global hotkey and typing into the frontmost app")
             }
 
+            if let problem = model.downloadError {
+                HubBanner(text: problem)
+            }
             HubSection("Whisper model", footer: model.modelPath) {
                 ForEach(ModelCatalog.all) { m in
                     if m.id != ModelCatalog.all.first?.id { HubDivider() }
@@ -138,19 +141,20 @@ struct GeneralPage: View {
         return devices
     }
 
-    /// Downloading / selected / on disk / not here — in that order, because
-    /// only one download runs at a time and it owns the whole section while it
-    /// does. "Installed" is file existence only: hashing three models on every
+    /// Downloading / not here / selected / on disk. Only one download runs at
+    /// a time, so the other Download buttons go while it does — but the
+    /// installed rows keep their state, or a download hides which model is in
+    /// use. "Installed" is file existence only: hashing three models on every
     /// render is exactly ghost-pepper #163.
     @ViewBuilder
     private func modelControl(_ m: ModelCatalog.Model) -> some View {
         if model.downloadingModel == m, let progress = model.downloadProgress {
             ProgressView(value: progress).frame(width: 160)
-        } else if model.downloadingModel != nil {
-            EmptyView() // one download at a time
         } else if !ModelCatalog.isInstalled(m) {
-            Button("Download") { model.onDownloadModel(m) }
-                .buttonStyle(HubButtonStyle(kind: model.isSelected(m) ? .primary : .normal))
+            if model.downloadingModel == nil {
+                Button("Download") { model.onDownloadModel(m) }
+                    .buttonStyle(HubButtonStyle(kind: model.isSelected(m) ? .primary : .normal))
+            }
         } else if model.isSelected(m) {
             StatusChip(text: model.modelLoaded ? "In use" : "Selected",
                        color: model.modelLoaded ? Theme.success : Theme.danger)

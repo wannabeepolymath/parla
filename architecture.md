@@ -91,7 +91,7 @@ effect.
 `main.swift` is **499 lines of app wiring** (458 when the machine was extracted,
 down from 1364): the delegate's stored properties, launch, permissions, model
 load/unload watcher, menu-bar and main-menu construction. `StatusMenu.swift`
-(205) and `ModelInstaller.swift` (76) were split out of it.
+(209) and `ModelInstaller.swift` (94) were split out of it.
 
 ## ParlaCore, piece by piece
 

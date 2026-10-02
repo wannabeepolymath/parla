@@ -95,10 +95,11 @@ soft system sound.
 
 The menu-bar icon is the Parla logo glyph both when idle and while recording —
 the pill is what shows the live recording state. It switches to text for the
-rest: … processing · ⬇️ N% downloading the model · ⚠️ problem (no model,
-mic/Accessibility permission missing, or a broken `settings.json`). Run
-unbundled via `swift run` and there's no logo resource, so those two states
-show 🎤 and 🔴 instead.
+rest: … processing · ⚠️ problem (no model, mic/Accessibility permission
+missing, or a broken `settings.json`). A model download never takes over the
+icon: its progress is in the menu and in the Hub. Run unbundled via
+`swift run` and there's no logo resource, so those two states show 🎤 and 🔴
+instead.
 
 By default the dictation pill stays visible as a small idle capsule floating on
 screen, morphing into the full pill while you dictate. Turn off **Show pill at
