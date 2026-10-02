@@ -278,8 +278,10 @@ public final class HotkeyMonitor {
     /// `session` alone can't tell a latch chord that is the tail of the press
     /// which just stopped a session from the front app's own chord.
     private var triggerHeld = false
-    /// Set once the HID flags have been seen to agree with a trigger-down the
-    /// tap delivered. Until then they are not trusted to report a release.
+    /// Whether the HID flags agreed with the trigger-down that began the current
+    /// press. Only then are they trusted to report its release — re-sampled per
+    /// press, because a trigger can also arrive from a source the HID state
+    /// never sees (Screen Sharing, a remapper).
     private var hidTracksTrigger = false
     private var downAt: TimeInterval = 0
     private var tap: CFMachPort?
@@ -431,7 +433,6 @@ public final class HotkeyMonitor {
         guard next != loadedBindings else { return }
         loadedBindings = next
         bindings = next.problem() == nil ? next : HotkeyBindings()
-        hidTracksTrigger = false // a different trigger has to earn the trust again
     }
 
     // MARK: - Event tap
@@ -520,12 +521,13 @@ public final class HotkeyMonitor {
     }
 
     /// `reconcile` against the real keyboard. Gated on `hidTracksTrigger`: a
-    /// keyboard whose trigger never shows up in the HID flags would otherwise
-    /// have every dictation cut short at the next watchdog tick.
+    /// trigger that never shows up in the HID flags would otherwise have its
+    /// dictation cut short at the next watchdog tick.
     private func reconcileWithKeyboard() {
         guard hidTracksTrigger else { return }
-        // systemUptime shares CGEvent.timestamp's clock (seconds since boot).
-        reconcile(triggerDown: triggerPhysicallyDown(), at: ProcessInfo.processInfo.systemUptime)
+        // Nobody saw this release, so it has no honest timestamp. Far future
+        // makes it never "short": the audio is transcribed, not thrown away.
+        reconcile(triggerDown: triggerPhysicallyDown(), at: .greatestFiniteMagnitude)
     }
 
     private func process(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -544,12 +546,18 @@ public final class HotkeyMonitor {
             return pass
         case .flagsChanged:
             refreshBindings()
-            handle(keyCode: UInt16(event.getIntegerValueField(.keyboardEventKeycode)),
-                   modifiers: KeyChord.Modifiers(event.flags),
+            let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+            let modifiers = KeyChord.Modifiers(event.flags)
+            // Sampled BEFORE handle(): a trigger-down runs the whole capture
+            // start inside this callback, and a release during that stall is
+            // exactly the one reconcile exists for — sampling afterwards would
+            // find the key already up and withhold the trust it needs.
+            if let trigger = KeyChord.modifierKey(bindings.pushToTalk.keyCode),
+               KeyChord.modifierKey(code) == trigger, modifiers.contains(trigger) {
+                hidTracksTrigger = triggerPhysicallyDown()
+            }
+            handle(keyCode: code, modifiers: modifiers,
                    at: Double(event.timestamp) / 1_000_000_000)
-            // The tap and the HID flags agree the trigger is down: from here on
-            // the HID flags are evidence enough to call a release (see reconcile).
-            if triggerHeld, !hidTracksTrigger { hidTracksTrigger = triggerPhysicallyDown() }
             return pass
         case .keyDown:
             // Skip Parla's OWN synthetic keystrokes (typing/erasing while

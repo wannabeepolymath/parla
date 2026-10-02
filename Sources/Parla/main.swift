@@ -54,10 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // least once" and survives an unload — every health check reads that one,
     // so an unloaded model doesn't put ⚠️ in the menu bar.
     var modelReady = false
-    /// The file failed verification. The one load failure a key press must not
-    /// retry: the verdict for a bad file is never cached, so each retry would
-    /// re-hash the whole model on the main thread.
-    var modelRefused = false
+    /// The model path that last loaded successfully. A key press retries a
+    /// failed load only for this one — a model that has never loaded (missing,
+    /// damaged, a broken file of the user's own) would otherwise be re-read, or
+    /// re-hashed, inside the tap callback on every press.
+    var lastGoodModelPath: String?
     var loadedModelPath: String?
     var lastModelUse = Date()
     var unloadTimer: Timer?
@@ -271,10 +272,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // cached on (size, mtime) so the 574 MB hash happens once, not per
         // launch. A model outside Parla's own models dir is the user's and is
         // never checked — see ModelCatalog.verifyInstalled.
-        let refusal = ModelCatalog.verifyInstalled(path: path)
-        modelRefused = refusal != nil
-        if let bad = refusal {
+        if let bad = ModelCatalog.verifyInstalled(path: path) {
             NSLog("%@", "Parla: refusing model — \(bad.description)")
+            lastGoodModelPath = nil
             transcriber = nil
             modelReady = false
             loadedModelPath = nil
@@ -286,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         transcriber = try? WhisperTranscriber(modelPath: path)
         modelReady = transcriber != nil
         loadedModelPath = modelReady ? path : nil
+        if modelReady { lastGoodModelPath = path }
         lastModelUse = Date()
         hubModel.modelLoaded = modelReady
         showIdle()
@@ -317,7 +318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastModelUse = Date()
         // Not gated on modelReady: one failed reload clears it, and gating on it
         // made that failure permanent — "No whisper model" until relaunch.
-        if transcriber == nil, !modelRefused { loadModel() }
+        if transcriber == nil,
+           lastGoodModelPath == store.load().whisperModelPath ?? WhisperTranscriber.defaultModelPath() {
+            loadModel()
+        }
         return transcriber
     }
 
@@ -510,7 +514,7 @@ func claimSingleInstanceLock() -> Bool {
 /// Send NSLog to ~/Library/Logs/Parla.log. NSLog is the app's only diagnostics,
 /// and the unified log stores every line of it as `<private>` — so "it stopped
 /// working overnight" left nothing behind to read. NSLog also writes to stderr
-/// whenever stderr is a file, which makes this one freopen the whole feature:
+/// whenever stderr is a file, which makes this one redirect the whole feature:
 /// every existing call site lands in the file, timestamped, with no new API.
 /// Under `swift run` stderr is the terminal and is left alone.
 func logToFile() {
@@ -524,8 +528,12 @@ func logToFile() {
         try? FileManager.default.removeItem(at: old)
         try? FileManager.default.moveItem(at: url, to: old)
     }
-    guard freopen(url.path, "a", stderr) != nil else { return }
-    chmod(url.path, 0o600) // app names and timings; never a transcript, but still the user's
+    // open + dup2, not freopen: a failed freopen has already closed stderr, and
+    // the next file the app opens would inherit fd 2 and collect NSLog's output.
+    let fd = open(url.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+    guard fd >= 0 else { return }
+    dup2(fd, STDERR_FILENO)
+    close(fd)
 }
 
 let app = NSApplication.shared

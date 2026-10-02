@@ -641,8 +641,8 @@ final class CorrectionWatcher {
             return // keep watching: the user may still be mid-correction
         }
         if DictionaryLearner.Store.shared.add(proposal) {
-            NSLog("Parla learn: proposed \"%@\" → \"%@\" (Hub → Dictionary to confirm)",
-                  proposal.from, proposal.to)
+            // The words themselves stay out of the log file; the Hub shows them.
+            NSLog("Parla learn: proposed a dictionary correction (Hub → Dictionary to confirm)")
         }
         disarm() // one proposal per insertion, never a chain of them
     }

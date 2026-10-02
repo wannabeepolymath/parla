@@ -325,8 +325,11 @@ public final class AudioRecorder {
     /// runs and delivers zeros forever, and the later grant never reaches it —
     /// so it must be handed back at stop(), warm or not, and rebuilt against the
     /// fresh grant. That also covers a grant that lands mid-dictation.
-    static func shouldTeardown(warm: Bool, builtAuthorized: Bool, bluetooth: Bool) -> Bool {
-        !warm || !builtAuthorized || bluetooth
+    /// `capturedNothing` is the other dead-unit signal: a capture with not one
+    /// sample in it, pre-roll included, means the tap is no longer being fed.
+    static func shouldTeardown(warm: Bool, builtAuthorized: Bool, bluetooth: Bool,
+                               capturedNothing: Bool) -> Bool {
+        !warm || !builtAuthorized || bluetooth || capturedNothing
     }
 
     private func build(device: AudioDeviceID?) throws {
@@ -522,7 +525,8 @@ public final class AudioRecorder {
         // A cold-path start may have bound a headset (the gate only allows
         // *holding* a non-Bluetooth device) or a mic that was not yet granted.
         if AudioRecorder.shouldTeardown(warm: warm, builtAuthorized: builtAuthorized,
-                                        bluetooth: AudioRecorder.isBluetooth(boundDevice)) {
+                                        bluetooth: AudioRecorder.isBluetooth(boundDevice),
+                                        capturedNothing: captured.isEmpty) {
             teardown()
         }
         warmUp() // no-op while the engine is still running; rebuilds after a teardown

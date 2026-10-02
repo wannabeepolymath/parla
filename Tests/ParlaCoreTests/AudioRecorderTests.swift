@@ -167,19 +167,28 @@ final class AudioRecorderTests: XCTestCase {
     /// dictation reused it until relaunch.
     func testEngineBuiltBeforeTheMicGrantIsTornDownEvenWhenWarm() {
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: false,
-                                                   bluetooth: false))
+                                                   bluetooth: false, capturedNothing: false))
     }
 
     /// The whole point of warmth: a legitimately warm engine is kept.
     func testAuthorizedWarmEngineIsKept() {
         XCTAssertFalse(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
-                                                    bluetooth: false))
+                                                    bluetooth: false, capturedNothing: false))
+    }
+
+    /// A warm engine that delivered not one sample — pre-roll included — has
+    /// stopped feeding its tap. Kept, it would make every later dictation silent
+    /// too: the stale-ring check in start() cannot see it once stop() has reset
+    /// the ring. Costs one rebuild after a tap too short to span a buffer.
+    func testWarmEngineThatCapturedNothingIsTornDown() {
+        XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
+                                                   bluetooth: false, capturedNothing: true))
     }
 
     func testColdOrBluetoothStillTearsDown() {
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: false, builtAuthorized: true,
-                                                   bluetooth: false))
+                                                   bluetooth: false, capturedNothing: false))
         XCTAssertTrue(AudioRecorder.shouldTeardown(warm: true, builtAuthorized: true,
-                                                   bluetooth: true))
+                                                   bluetooth: true, capturedNothing: false))
     }
 }
