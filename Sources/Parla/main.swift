@@ -111,6 +111,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openHub() { hubController.show() }
     @objc func openScratchpad() { scratchpad.show() }
 
+    // Opening Parla again from Finder/Spotlight while it runs lands here, not on
+    // the single-instance alert. Show the Hub: macOS can hide the menu-bar icon
+    // (notch overflow, Menu Bar settings), and then this is the only way in.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        hubController.show()
+        return false
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         scratchpad.save() // flush a pending debounced edit
     }
@@ -136,7 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Fresh install: open the setup flow instead of leaving a ⚠️ glyph in the
         // menu bar for the user to find and decode. A broken settings.json is a
         // different problem with its own banner — don't onboard over it.
-        if !launchSettings.onboardingCompleted, store.lastError == nil {
+        // Otherwise a launch the user asked for (Finder, Spotlight) opens the Hub
+        // too — macOS can hide the menu-bar icon, which left nothing on screen —
+        // but a login-item launch stays silent in the menu bar.
+        if store.lastError == nil, !launchSettings.onboardingCompleted || !Self.launchedAtLogin {
             hubController.show()
         }
 
@@ -223,6 +234,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { self.availableUpdate = update }
             }
         }
+    }
+
+    /// The launch Apple event marks an SMAppService login-item start. Only
+    /// meaningful during applicationDidFinishLaunching, while that event is current.
+    static var launchedAtLogin: Bool {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        return event?.eventID == kAEOpenApplication
+            && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
     }
 
     /// App version from the bundle's Info.plist (CFBundleShortVersionString).
