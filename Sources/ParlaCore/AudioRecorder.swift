@@ -454,8 +454,15 @@ public final class AudioRecorder {
         let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
         // Behind the trace gate so a normal start pays no extra HAL queries.
         if Trace.enabled { Trace.setTransport(AudioRecorder.transport(of: device)) }
-        // A warm engine bound to some other mic is worse than no warm engine.
-        if engine.isRunning && boundDevice != device { teardown() }
+        // A warm engine bound to some other mic is worse than no warm engine — and
+        // so is one that still reports isRunning but has stopped feeding its tap.
+        // Nothing else would ever rebuild that one (stop() keeps a warm engine,
+        // warmUp() skips a running one), so every dictation would be silence
+        // until relaunch. The pre-roll ring going stale is the tell.
+        lock.lock()
+        let wedged = preRoll.isStale(now: AudioRecorder.nowSeconds())
+        lock.unlock()
+        if engine.isRunning && (boundDevice != device || wedged) { teardown() }
 
         // The ring is claimed before `capturing` flips so the splice has no gap
         // and no overlap: every chunk lands on exactly one side of it.
@@ -557,6 +564,14 @@ struct PreRollRing {
         defer { reset() }
         guard !mediaPlaying, let lastWrite, now - lastWrite <= Self.maxAge else { return [] }
         return Array(samples.suffix(Self.prependSamples))
+    }
+
+    /// The tap stopped feeding — `take`'s own test, without consuming the ring.
+    /// A ring not yet written (just built, just reset) is not stale: its first
+    /// buffer is ~85 ms away.
+    func isStale(now: TimeInterval) -> Bool {
+        guard let lastWrite else { return false }
+        return now - lastWrite > Self.maxAge
     }
 
     mutating func reset() {

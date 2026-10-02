@@ -67,6 +67,11 @@ struct OnboardingView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
             endTryout()
         }
+        // Minimising or switching apps closes nothing, and left the mic open
+        // and the hotkey suspended behind a window nobody was looking at.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            endTryout()
+        }
     }
 
     private var header: some View {

@@ -86,6 +86,77 @@ final class HotkeyTests: XCTestCase {
         XCTAssertEqual(out, [])
     }
 
+    // MARK: reconcile — a release the tap never saw
+
+    /// The tap was disabled (or deaf) when the trigger came up. Without this the
+    /// capture runs on — mic open, room recorded — until the next keystroke.
+    func testMissedReleaseIsSynthesizedAndTheNextPressStartsFresh() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.reconcile(triggerDown: false, at: 3)
+        XCTAssertEqual(out, [.down(command: false), .up(short: false)])
+        m.handle(keyCode: 63, modifiers: [.fn], at: 4)                     // not a no-op any more
+        XCTAssertEqual(out, [.down(command: false), .up(short: false), .down(command: false)])
+    }
+
+    func testReconcileLeavesAHeldTriggerAlone() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.reconcile(triggerDown: true, at: 3)
+        XCTAssertEqual(out, [.down(command: false)])
+    }
+
+    /// Hands-free is meant to outlive the release, so a missed one ends nothing —
+    /// but the stale "held" bit must clear, or once the latch is stopped the
+    /// front app's own fn+Space is swallowed as if it were the tail of ours.
+    func testReconcileDoesNotEndHandsFreeButClearsTheHeldBit() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)              // latch; release then missed
+        m.reconcile(triggerDown: false, at: 3)
+        XCTAssertEqual(out, [.down(command: false), .handsFree])
+        XCTAssertTrue(m.keyDown(keyCode: 49, at: 4))                       // bare Space stops it
+        XCTAssertEqual(out, [.down(command: false), .handsFree, .up(short: false)])
+        XCTAssertFalse(m.keyDown(keyCode: 49, modifiers: [.fn], at: 5))    // idle, trigger up: not ours
+    }
+
+    func testReconcileWhileIdleIsSilent() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.reconcile(triggerDown: false, at: 1)
+        m.reconcile(triggerDown: true, at: 2)
+        XCTAssertEqual(out, [])
+    }
+
+    // MARK: endSession — the capture ended by itself (10-minute cap, mic lost)
+
+    func testSelfEndedHandsFreeDoesNotSwallowTheNextSpaceReturnOrEsc() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)
+        m.handle(keyCode: 63, modifiers: [], at: 0.3)
+        m.endSession()
+        XCTAssertFalse(m.keyDown(keyCode: 49, at: 700))                    // the user's own Space
+        XCTAssertFalse(m.keyDown(keyCode: 36, at: 701))                    // …and Return
+        XCTAssertFalse(m.keyDown(keyCode: 53, at: 702))                    // …and Esc
+        XCTAssertEqual(out, [.down(command: false), .handsFree, .dismiss])
+    }
+
+    func testSelfEndedPushIgnoresTheLateReleaseAndTheNextPressStarts() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        m.endSession()
+        m.handle(keyCode: 63, modifiers: [], at: 600)                      // trigger finally released
+        XCTAssertEqual(out, [.down(command: false)])
+        m.handle(keyCode: 63, modifiers: [.fn], at: 601)
+        XCTAssertEqual(out, [.down(command: false), .down(command: false)])
+    }
+
     // MARK: hands-free (fn+Space)
 
     func testHandsFreeLatchSurvivesFnReleaseAndFnStops() {

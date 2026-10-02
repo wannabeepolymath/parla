@@ -54,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // least once" and survives an unload — every health check reads that one,
     // so an unloaded model doesn't put ⚠️ in the menu bar.
     var modelReady = false
+    /// The file failed verification. The one load failure a key press must not
+    /// retry: the verdict for a bad file is never cached, so each retry would
+    /// re-hash the whole model on the main thread.
+    var modelRefused = false
     var loadedModelPath: String?
     var lastModelUse = Date()
     var unloadTimer: Timer?
@@ -142,8 +146,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Capture ended without an fn-up: the 10-minute cap (which is also the
         // ceiling on a forgotten hands-free latch) or a mic that disappeared.
         // The machine finalizes it exactly as fn-up does, minus the fn-up stamp.
-        // The hotkey monitor is still latched, so the next fn press resyncs it
-        // (a no-op) and the one after starts a new dictation.
         recorder.onEnd = { [weak self] reason in
             guard let self else { return }
             // The generation is read HERE, on the tap thread as the capture ends,
@@ -152,7 +154,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // between would rename this stale end as the new dictation's and
             // finalize a session that just started recording.
             let gen = self.capturingGen.withLock { $0 }
-            DispatchQueue.main.async { self.send(.captureEnded(gen: gen, reason: reason)) }
+            DispatchQueue.main.async {
+                // Unlatch the hotkey monitor with it, or it swallows the user's
+                // next Space/Return/Esc as the stop of a session that is gone.
+                // Only for the capture still in the foreground: a stale end must
+                // not unlatch the press that superseded it.
+                if gen != 0, self.capturingGen.withLock({ $0 }) == gen { self.hotkey.endSession() }
+                self.send(.captureEnded(gen: gen, reason: reason))
+            }
         }
 
         hotkey.onEdge = { [weak self] edge in
@@ -262,7 +271,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // cached on (size, mtime) so the 574 MB hash happens once, not per
         // launch. A model outside Parla's own models dir is the user's and is
         // never checked — see ModelCatalog.verifyInstalled.
-        if let bad = ModelCatalog.verifyInstalled(path: path) {
+        let refusal = ModelCatalog.verifyInstalled(path: path)
+        modelRefused = refusal != nil
+        if let bad = refusal {
             NSLog("%@", "Parla: refusing model — \(bad.description)")
             transcriber = nil
             modelReady = false
@@ -304,7 +315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     func activeTranscriber() -> WhisperTranscriber? {
         lastModelUse = Date()
-        if transcriber == nil, modelReady { loadModel() }
+        // Not gated on modelReady: one failed reload clears it, and gating on it
+        // made that failure permanent — "No whisper model" until relaunch.
+        if transcriber == nil, !modelRefused { loadModel() }
         return transcriber
     }
 
@@ -494,6 +507,27 @@ func claimSingleInstanceLock() -> Bool {
     return flock(fd, LOCK_EX | LOCK_NB) == 0
 }
 
+/// Send NSLog to ~/Library/Logs/Parla.log. NSLog is the app's only diagnostics,
+/// and the unified log stores every line of it as `<private>` — so "it stopped
+/// working overnight" left nothing behind to read. NSLog also writes to stderr
+/// whenever stderr is a file, which makes this one freopen the whole feature:
+/// every existing call site lands in the file, timestamped, with no new API.
+/// Under `swift run` stderr is the terminal and is left alone.
+func logToFile() {
+    guard isatty(STDERR_FILENO) == 0 else { return }
+    let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Logs/Parla.log")
+    // ponytail: one previous file, checked at launch only. whisper prints a
+    // page per model load, so this is weeks, not years; size it if that bites.
+    if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 5_000_000 {
+        let old = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: old)
+        try? FileManager.default.moveItem(at: url, to: old)
+    }
+    guard freopen(url.path, "a", stderr) != nil else { return }
+    chmod(url.path, 0o600) // app names and timings; never a transcript, but still the user's
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 guard claimSingleInstanceLock() else {
@@ -506,6 +540,7 @@ guard claimSingleInstanceLock() else {
     alert.runModal()
     exit(1)
 }
+logToFile()
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

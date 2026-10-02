@@ -278,6 +278,9 @@ public final class HotkeyMonitor {
     /// `session` alone can't tell a latch chord that is the tail of the press
     /// which just stopped a session from the front app's own chord.
     private var triggerHeld = false
+    /// Set once the HID flags have been seen to agree with a trigger-down the
+    /// tap delivered. Until then they are not trusted to report a release.
+    private var hidTracksTrigger = false
     private var downAt: TimeInterval = 0
     private var tap: CFMachPort?
     private let store: SettingsStore
@@ -323,6 +326,26 @@ public final class HotkeyMonitor {
             onEdge?(.up(short: time - downAt < shortTapThreshold))
         }
     }
+
+    /// A release the tap never saw. The tap can be off at the moment the trigger
+    /// comes up — disabled by macOS for a slow callback, deaf under secure input
+    /// — and a push-to-talk session then has nothing left to end it: the mic
+    /// stays open and the room is recorded until the next keystroke or the
+    /// 10-minute cap. Called with the trigger's *physical* state whenever the
+    /// tap is revived and on every watchdog tick; a held trigger is left alone.
+    /// The missed release is replayed through `handle`, so hands-free — which is
+    /// meant to outlive the release — only has its stale `triggerHeld` cleared.
+    func reconcile(triggerDown: Bool, at time: TimeInterval) {
+        guard triggerHeld, !triggerDown else { return }
+        if session == .push { NSLog("Parla: missed the trigger release, ending the capture") }
+        handle(keyCode: bindings.pushToTalk.keyCode, modifiers: [], at: time)
+    }
+
+    /// The capture ended without us: the 10-minute cap or a lost mic finalized
+    /// it. Left latched, the monitor swallows the user's next Space, Return or
+    /// Esc as the "stop" of a session that no longer exists, and the next
+    /// trigger press is a no-op. `triggerHeld` is physical state and stays.
+    public func endSession() { session = .idle }
 
     /// keyDown. Returns true when the event must be swallowed (never reach the
     /// front app). `modifiers` are the key event's own flags; every chord matches
@@ -408,6 +431,7 @@ public final class HotkeyMonitor {
         guard next != loadedBindings else { return }
         loadedBindings = next
         bindings = next.problem() == nil ? next : HotkeyBindings()
+        hidTracksTrigger = false // a different trigger has to earn the trust again
     }
 
     // MARK: - Event tap
@@ -473,6 +497,9 @@ public final class HotkeyMonitor {
     /// itself died. No-op in the normal case (one bool check).
     private func ensureAlive() {
         guard let tap else { return } // never created: start()'s own retry owns that
+        // Every tick, not only after a revive: secure input deafens the tap
+        // without ever disabling it, so "enabled" proves nothing about a release.
+        defer { reconcileWithKeyboard() }
         guard CFMachPortIsValid(tap) else {
             NSLog("Parla: hotkey tap port went invalid, recreating")
             CFMachPortInvalidate(tap) // also drops the dead port's run-loop source
@@ -485,6 +512,22 @@ public final class HotkeyMonitor {
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
+    /// The trigger as the keyboard reports it, not as our bookkeeping remembers
+    /// it — the bookkeeping is the thing under suspicion.
+    private func triggerPhysicallyDown() -> Bool {
+        guard let trigger = KeyChord.modifierKey(bindings.pushToTalk.keyCode) else { return false }
+        return KeyChord.Modifiers(CGEventSource.flagsState(.hidSystemState)).contains(trigger)
+    }
+
+    /// `reconcile` against the real keyboard. Gated on `hidTracksTrigger`: a
+    /// keyboard whose trigger never shows up in the HID flags would otherwise
+    /// have every dictation cut short at the next watchdog tick.
+    private func reconcileWithKeyboard() {
+        guard hidTracksTrigger else { return }
+        // systemUptime shares CGEvent.timestamp's clock (seconds since boot).
+        reconcile(triggerDown: triggerPhysicallyDown(), at: ProcessInfo.processInfo.systemUptime)
+    }
+
     private func process(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let pass = Unmanaged.passUnretained(event)
         switch type {
@@ -495,6 +538,7 @@ public final class HotkeyMonitor {
             NSLog("Parla: hotkey tap disabled by %@, re-enabling",
                   type == .tapDisabledByTimeout ? "timeout" : "user input")
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) } // macOS disables slow taps; revive
+            reconcileWithKeyboard() // a release during the outage went straight past us
             return pass
         case _ where Self.suspended: // the Hub is recording a binding — see `suspended`
             return pass
@@ -503,6 +547,9 @@ public final class HotkeyMonitor {
             handle(keyCode: UInt16(event.getIntegerValueField(.keyboardEventKeycode)),
                    modifiers: KeyChord.Modifiers(event.flags),
                    at: Double(event.timestamp) / 1_000_000_000)
+            // The tap and the HID flags agree the trigger is down: from here on
+            // the HID flags are evidence enough to call a release (see reconcile).
+            if triggerHeld, !hidTracksTrigger { hidTracksTrigger = triggerPhysicallyDown() }
             return pass
         case .keyDown:
             // Skip Parla's OWN synthetic keystrokes (typing/erasing while

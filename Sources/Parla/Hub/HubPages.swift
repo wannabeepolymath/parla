@@ -203,6 +203,14 @@ struct ShortcutRecorder: View {
             }
         }
         .onDisappear(perform: stop)
+        // The local monitor only hears keys while the Hub is key, so "Change"
+        // followed by a click into another app — or closing the window, which
+        // never fires onDisappear (see OnboardingView) — left the global tap
+        // suspended and every hotkey dead until the Hub was reopened. Any
+        // window, on purpose: stop() is idempotent and a stray one is harmless.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            stop()
+        }
     }
 
     private func start() {

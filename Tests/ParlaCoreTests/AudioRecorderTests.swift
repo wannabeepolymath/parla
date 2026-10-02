@@ -114,6 +114,25 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertEqual(ring.take(now: 100 + PreRollRing.maxAge, mediaPlaying: false), [1, 2, 3])
     }
 
+    /// The same signal, read without consuming the ring: start() uses it to
+    /// rebuild a warm engine that claims to be running but has stopped feeding.
+    func testRingThatStoppedBeingFedIsStale() {
+        var ring = PreRollRing()
+        ring.write([1, 2, 3], now: 100)
+        XCTAssertFalse(ring.isStale(now: 100 + PreRollRing.maxAge))
+        XCTAssertTrue(ring.isStale(now: 100 + PreRollRing.maxAge + 0.01))
+    }
+
+    /// Just built or just reset — the first buffer is ~85 ms away. Calling that
+    /// stale would cold-rebuild a healthy engine on every quick re-press.
+    func testRingNotYetWrittenIsNotStale() {
+        var ring = PreRollRing()
+        XCTAssertFalse(ring.isStale(now: 1_000))
+        ring.write([1], now: 100)
+        ring.reset()
+        XCTAssertFalse(ring.isStale(now: 1_000))
+    }
+
     /// Media playing at press time means the ring holds the user's speakers, not
     /// the user — and it is dropped, not trimmed.
     func testPreRollDiscardedWhenMediaWasPlaying() {

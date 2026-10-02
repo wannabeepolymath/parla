@@ -501,8 +501,8 @@ extension AppDelegate {
                 guard self.liveTyping else { return }
                 let typed = self.session.typedLedger
                 let d = LiveTyper.diff(typed: typed, new: text)
-                NSLog("Parla stream: %.1fs audio -> \"%@\" (erase %d, append \"%@\")",
-                      Double(snap.count) / 16_000, text, d.erase, d.append)
+                NSLog("Parla stream: %.1fs audio -> %d chars (erase %d, append %d)",
+                      Double(snap.count) / 16_000, text.count, d.erase, d.append.count)
                 if d.erase == 0 {
                     Inserter.typeUnicode(d.append) // pure append: can't harm foreign text
                 } else if Inserter.canEraseTyped(typed) {
