@@ -96,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // mid-capture when hands-free is latched. Turning the setting off here
             // is what puts the mic indicator out without a relaunch.
             self.recorder.setWarm(s.warmMic)
+            self.transcriber?.language = s.language
             // The Hub's model picker writes whisperModelPath through this same
             // save, so a changed path is the signal to swap the loaded context.
             if (s.whisperModelPath ?? WhisperTranscriber.defaultModelPath()) != self.loadedModelPath {

@@ -40,6 +40,17 @@ struct GeneralPage: View {
                         modelControl(m)
                     }
                 }
+                HubDivider()
+                HubRow("Language", detail: languageDetail) {
+                    Picker("", selection: optBinding($model.settings.language)) {
+                        Text("Auto-detect").tag("")
+                        Divider()
+                        ForEach(WhisperTranscriber.languages, id: \.code) { Text($0.name).tag($0.code) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 210)
+                    .disabled(englishOnlyModel)
+                }
             }
 
             HubSection("App") {
@@ -128,6 +139,19 @@ struct GeneralPage: View {
         HubRow(label, detail: detail) {
             ShortcutRecorder(model: model, path: path, modifierOnly: modifierOnly)
         }
+    }
+
+    /// The catalog's English-only models carry it in their name. A model of the
+    /// user's own is unknown, so the picker stays live for it.
+    private var englishOnlyModel: Bool {
+        ModelCatalog.model(atPath: model.modelPath)?.id.contains(".en") ?? false
+    }
+
+    private var languageDetail: String {
+        englishOnlyModel
+            ? "The selected model only understands English"
+            : "Auto-detect follows whichever language you speak; the first dictation after "
+                + "you switch takes longer. Pick one to always use it"
     }
 
     /// Live input devices, plus the saved device if it's currently unplugged —
