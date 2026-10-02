@@ -30,16 +30,15 @@ AudioRecorder — warm engine, PreRollRing prepends ≤0.45 s of pre-key audio,
 whisper.cpp (Metal + flash attention), initial_prompt = dictionary + confirmed tail
     │  raw transcript
     ▼
-lands immediately as CGEvent Unicode keystrokes — no clipboard, ever
-    │
-    ▼
 cleanup LLM POST (Anthropic, or any OpenAI-compatible /chat/completions
     incl. a keyless local server) — prompt carries dictionary, snippets and a
-    tone hint keyed on the destination's bundle ID
+    fixed formatting hint selected locally from the bundle ID and browser host
     │  cleaned text
     ▼
-diffed against what was typed and swapped in tail-first, and only if the field
-still provably ends with our text; otherwise it stays in history
+inserted once through native paste, if the destination is still current;
+otherwise saved to history. With no cleanup provider, raw text lands directly.
+The temporary clipboard lease restores all original representations unless
+the user has copied something new.
 ```
 
 Local state is JSON in `~/Library/Application Support/Parla/`: `settings.json`,
@@ -65,8 +64,8 @@ Two rules hold it together. Both exist because violating them caused real bugs
 that are on the record:
 
 1. **Effect order is the contract.** The interpreter runs effects in the order
-   they arrive and never reorders. That is what puts the landing keystrokes on
-   screen before the polish POST goes out, and the warm HEAD request ahead of a
+   they arrive and never reorders. That keeps insertion and history effects in
+   order, and the warm HEAD request ahead of a
    possible 574 MB model reload. Effects that dispatch further events
    (`recorder.start()` reporting `.recorderStarted`, the focus probe reporting
    `.focusSampled`) must **append to a drain queue** rather than splice a nested
@@ -105,7 +104,8 @@ load/unload watcher, menu-bar and main-menu construction. `StatusMenu.swift`
 | `Cleanup` | prompt building, the Anthropic client, `CleanupSanitizer`, and `PromptCache` (decides whether a `cache_control` block would actually be honoured for the model in use — an inert block is worse than none) |
 | `CleanupFactory` / `OpenAICompatClient` | provider selection and key resolution per provider; any OpenAI-compatible endpoint, key optional so a local server works |
 | `Pipeline` | the transcript/clean path the app **and** the eval both run, so they can't drift |
-| `Inserter` | Unicode keystrokes, the synthetic-event marker, focus classification; nothing deletes without proving what it deletes |
+| `Inserter` | Native paste, Unicode streaming helpers, destination identity, browser context, focus classification; nothing deletes without proving what it deletes |
+| `ClipboardDelivery` | Temporary pasteboard lease; preserve all representations, restore only while still owning the board |
 | `LiveTyper` | the diff and swap plan behind every tail replacement |
 | `TextRules` | bundle ID → `AppCategory`, terminal/chat newline flattening, the RMS silence guard |
 | `History` | `history.json` plus `PipelineMetrics` (per-dictation timings and token counts, derived from the same `Trace.Stamp` vocabulary) |
@@ -182,7 +182,7 @@ north star is the honest gap. Measured cleanup latency in the same file: p50
    text value, and it carries a hard watchdog because an unresponsive target
    once hung it for ten minutes. It needs Accessibility and a running app, so it
    is a local command, not a CI job. Every transcript is still in local history
-   as the escape hatch, and the clipboard is still never touched.
+   as the escape hatch. Native paste uses a clipboard lease with conditional restoration.
 2. **Nothing landing safely** — the case the original list didn't have a name
    for. No focus, a field that no longer provably ends with our text, focus
    moved into a password field mid-dictation: each has an explicit path in the
@@ -192,8 +192,9 @@ north star is the honest gap. Measured cleanup latency in the same file: p50
 3. **Self-correction handling** — prompt-side, and now measured: three
    `self-correction` cases, 1/3 zero-edit. Not solved, but visible.
 4. **Latency feel** — shadow streaming plus the pre-roll ring covers the capture
-   side; the cleanup POST is the long pole (p95 7.4 s above), which is why the
-   raw transcript lands first and the cleaned text swaps in afterwards.
+   side; the cleanup POST is the long pole (p95 7.4 s in the historical baseline
+   above). Delivery now waits for formatting and inserts once, avoiding unreliable
+   raw-to-cleaned replacement in opaque editors at the cost of waiting for cleanup.
 5. **Dictionary accuracy without retraining** — `initial_prompt` + LLM context,
    plus learned proposals the user approves. `base.en` still mangles
    "Kubernetes" in the eval; that finding is left in the baseline on purpose.

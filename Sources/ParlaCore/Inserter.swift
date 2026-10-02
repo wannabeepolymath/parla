@@ -13,12 +13,27 @@ public enum Inserter {
         event.post(tap: .cghidEventTap)
     }
 
-    /// Land text at the cursor as synthetic Unicode keystrokes; typing into a
-    /// live selection replaces it, same as paste did. The pasteboard is never
-    /// touched — transcripts live only in the app (history), and the sole
-    /// clipboard write left anywhere is the user-initiated Copy in the Hub.
-    public static func insert(_ text: String) {
-        typeUnicode(text)
+    private static let clipboard = ClipboardDelivery()
+
+    /// Deliver one native paste so rich editors receive the whole transcript,
+    /// including paragraph breaks. The user's clipboard is restored afterwards.
+    /// A posted event is not proof that an opaque third-party app accepted it.
+    @discardableResult
+    public static func insert(_ text: String) -> Bool {
+        guard !text.isEmpty, AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              classifyFocus() != .secure else { return false }
+        let src = CGEventSource(stateID: .privateState)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) else { return false }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let remote = ["com.microsoft.rdc.macos", "com.microsoft.windowsapp", "com.citrix.receiver.nomas",
+                      "com.vmware.horizon", "com.anydesk.AnyDesk", "com.teamviewer.TeamViewer"]
+            .contains(bundleID ?? "")
+        return clipboard.paste(text, restoreAfter: remote ? 5 : 0.8) {
+            post(down); post(up)
+        }
     }
 
     /// Split UTF-16 units into chunks of at most `max`, never ending a chunk on an
@@ -110,6 +125,7 @@ public enum Inserter {
         // to touch it as little as possible (never stream, never type, never cloud).
         if result != .editable, result != .secure, let app = NSWorkspace.shared.frontmostApplication {
             let appEl = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(appEl, 1)
             // Only AXManualAccessibility. AXEnhancedUserInterface puts the *target*
             // process into screen-reader mode for the rest of its lifetime — it
             // outlives Parla, survives a restart, permanently blurs the composer in
@@ -118,6 +134,14 @@ public enum Inserter {
             AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             usleep(50_000) // give the app a beat to build its AX tree
             result = classifyFocus()
+            // Opaque browser/editor/terminal bridges can report no focused AX
+            // object even while a caret is visible. Native paste is still useful;
+            // a missing AX object must not silently force history-only delivery.
+            let category = TextRules.category(bundleID: app.bundleIdentifier)
+            if result == .none, AXIsProcessTrusted(),
+               TextRules.isBrowser(bundleID: app.bundleIdentifier) || category != .unknown {
+                result = .unknown
+            }
         }
         return result
     }
@@ -135,7 +159,8 @@ public enum Inserter {
     }
 
     static func secureRefusalMessage(_ passwordField: String, secureInput: Bool, fieldIsSecure: Bool) -> String {
-        secureInput && !fieldIsSecure ? "Secure input is on — typing is blocked" : passwordField
+        secureInput && !fieldIsSecure
+            ? "Secure Input is on — close password prompts or disable Secure Keyboard Entry" : passwordField
     }
 
     /// Focused element via the system-wide query, falling back to asking the
@@ -160,9 +185,73 @@ public enum Inserter {
            let focused { return (focused as! AXUIElement) }
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appEl, 1)
         if AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
            let focused { return (focused as! AXUIElement) }
         return nil
+    }
+
+    /// Page URL from the focused document's AX ancestors, without reading page
+    /// contents or using AppleScript/Automation permission. Never use link URLs
+    /// from the focused element itself to decide what app the user is writing in.
+    public static func focusedBrowserURL(bundleID: String?) -> String? {
+        guard TextRules.isBrowser(bundleID: bundleID), let focused = focusedElement() else { return nil }
+        var element = focused
+        for _ in 0..<20 {
+            let role = axRole(element)
+            if role == "AXWebArea" || role == "AXDocument" {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, "AXURL" as CFString, &value) == .success {
+                    if let url = value as? URL { return url.absoluteString }
+                    if let url = value as? String { return url }
+                }
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID(), !CFEqual(parent, element) else { break }
+            element = parent as! AXUIElement
+        }
+        return nil
+    }
+
+    public static func focusedFieldIsSingleLine() -> Bool {
+        guard let element = focusedElement() else { return false }
+        var multiline: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, "AXMultiline" as CFString, &multiline) == .success,
+           let value = multiline as? Bool { return !value }
+        return ["AXTextField", "AXSearchField", "AXComboBox"].contains(axRole(element) ?? "")
+    }
+
+    /// Locally held destination identity across cleanup. If AX exposes text and
+    /// a selection, also ensure the user hasn't edited or moved the cursor.
+    public struct Destination: @unchecked Sendable {
+        let pid: pid_t?
+        let element: AXUIElement?
+        let text: String?
+        let cursor: Int?
+        let selectionLength: Int?
+
+        public init() {
+            pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            element = Inserter.focusedElement()
+            let state = element.flatMap { Inserter.fieldState(of: $0) }
+            text = state.map { $0.text as String }
+            cursor = state?.cursor; selectionLength = state?.selLength
+        }
+
+        public func isCurrent() -> Bool {
+            guard pid != nil, pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
+            let current = Inserter.focusedElement()
+            switch (element, current) {
+            case (nil, nil): return true // opaque app: process identity is all AX exposes
+            case let (before?, after?):
+                guard CFEqual(before, after) else { return false }
+                guard let text else { return true }
+                guard let state = Inserter.fieldState(of: after) else { return false }
+                return state.text.isEqual(to: text) && state.cursor == cursor && state.selLength == selectionLength
+            default: return false
+            }
+        }
     }
 
     private static func classifyFocus() -> FocusTarget {

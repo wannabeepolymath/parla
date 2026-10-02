@@ -266,7 +266,7 @@ final class HUD: @unchecked Sendable {
         case .polishing:
             dot.isHidden = true
             waveform.isHidden = true
-            label.stringValue = "✓ · polishing…"
+            label.stringValue = "Formatting…"
             panel.orderFrontRegardless() // no scheduleHide — a terminal state follows
         case .done:
             dot.isHidden = true

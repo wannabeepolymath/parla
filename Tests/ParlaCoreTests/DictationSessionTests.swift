@@ -66,6 +66,74 @@ final class DictationSessionTests: XCTestCase {
 
     // MARK: - Happy path
 
+    func pending(_ s: Session, focus: Inserter.FocusTarget = .unknown, singleLine: Bool = false) -> Landed {
+        let probe = LandingProbe(focus: focus, bundleID: "com.google.Chrome", appName: "Chrome",
+                                 deferInsertionUntilClean: true,
+                                 browserURL: "https://mail.google.com/mail/u/0/", singleLine: singleLine)
+        let fx = m.handle(.transcribed(s, raw: "hi Sam thanks best Alex", probe: probe))
+        XCTAssertFalse(fx.contains { if case .insertText = $0 { return true }; return false })
+        guard case .polish(_, let landed)? = fx.first(where: {
+            if case .polish = $0 { return true }; return false
+        }) else { XCTFail("no cleanup request"); fatalError() }
+        XCTAssertEqual(landed.landing, .pending)
+        XCTAssertEqual(landed.browserURL, probe.browserURL)
+        return landed
+    }
+
+    func testOpaqueEmailFieldReceivesCleanedTextOnceWithoutAXReplacement() {
+        let s = startDictation()
+        let landed = pending(s)
+        let email = "Hi Sam,\n\nThanks.\n\nBest,\nAlex"
+        let fx = m.handle(.cleanReady(s, landed, text: email, failure: nil, focus: .unknown))
+        XCTAssertEqual(fx.filter { if case .insertText = $0 { return true }; return false }, [.insertText(email)])
+        XCTAssertFalse(fx.contains { if case .replaceTailIfOurs = $0 { return true }; return false })
+        XCTAssertTrue(fx.contains(.hud(.done)))
+        XCTAssertTrue(fx.contains(.appendHistory(raw: landed.raw, cleaned: email, appName: "Chrome")))
+        XCTAssertEqual(m.state, .idle)
+    }
+
+    func testDeferredCleanupFailureStillDeliversRawWithReason() {
+        let s = startDictation()
+        let landed = pending(s)
+        let fx = m.handle(.cleanReady(s, landed, text: landed.raw, failure: "cleanup timed out", focus: .editable))
+        XCTAssertTrue(fx.contains(.insertText(landed.raw)))
+        XCTAssertTrue(fx.contains(.hud(.rawFallback("cleanup timed out"))))
+    }
+
+    func testDeferredTargetChangeParksInHistoryWithoutTyping() {
+        let s = startDictation()
+        let landed = pending(s)
+        let fx = m.handle(.cleanReady(s, landed, text: "Hi Sam.", failure: nil, focus: .none))
+        XCTAssertFalse(fx.contains { if case .insertText = $0 { return true }; return false })
+        XCTAssertTrue(fx.contains(.hud(.savedToHistory)))
+    }
+
+    func testDeferredSecureTargetDropsTextAndHistory() {
+        let s = startDictation()
+        let landed = pending(s)
+        let fx = m.handle(.cleanReady(s, landed, text: "secret", failure: nil, focus: .secure))
+        XCTAssertFalse(fx.contains { if case .insertText = $0 { return true }; return false })
+        XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
+        XCTAssertTrue(fx.contains(.secureRefusal("Not supported in password fields")))
+    }
+
+    func testDeferredStaleGenerationDoesNotTypeOrChangeNewHUD() {
+        let s = startDictation()
+        let landed = pending(s)
+        _ = startDictation()
+        let fx = m.handle(.cleanReady(s, landed, text: "Hi Sam.", failure: nil, focus: .editable))
+        XCTAssertFalse(fx.contains { if case .insertText = $0 { return true }; return false })
+        XCTAssertFalse(fx.contains { if case .hud = $0 { return true }; return false })
+        XCTAssertTrue(fx.contains(.appendHistory(raw: landed.raw, cleaned: "Hi Sam.", appName: "Chrome")))
+    }
+
+    func testDeferredSingleLineFieldFlattensModelParagraphs() {
+        let s = startDictation()
+        let landed = pending(s, singleLine: true)
+        let fx = m.handle(.cleanReady(s, landed, text: "Project\n\nupdate", failure: nil, focus: .editable))
+        XCTAssertTrue(fx.contains(.insertText("Project update")))
+    }
+
     func testHappyPathNoCleanupLandsRawAndStops() {
         let s = startDictation(cleanup: false)
         XCTAssertEqual(quiet(m.handle(.stopRequested)),
@@ -831,19 +899,9 @@ final class DictationSessionTests: XCTestCase {
 
     // MARK: - Structural invariant (the clipboard)
 
-    /// Parla types its text; it never pastes it. The user's clipboard is theirs,
-    /// and a dictation that quietly overwrote it would destroy something they
-    /// cannot get back — so the Hub's Copy button, which the user pressed on
-    /// purpose, is allowed to write it and nothing else in the app is.
-    ///
-    /// Asserted over the source rather than by behaviour: the writes live in the
-    /// AppKit shell, which the core's test target cannot drive, and a behavioural
-    /// test could only ever cover the paths it thought to call — the risk here is
-    /// exactly the path nobody thought of. The key is the offending line itself,
-    /// with its enclosing `func` for context and no line number anywhere, so a
-    /// new write parked beside `copy()` is a *new* key rather than one the
-    /// sanctioned function absorbs — and edits above it still change nothing.
-    func testTheOnlyPasteboardWriteIsTheHubsCopyButton() throws {
+    /// Keep clipboard access confined to the temporary lease (whose restoration
+    /// behavior is tested in ClipboardDeliveryTests) and explicit Hub Copy.
+    func testClipboardAccessIsConfinedToDeliveryAndExplicitCopy() throws {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // ParlaCoreTests
             .deletingLastPathComponent()   // Tests
@@ -853,6 +911,7 @@ final class DictationSessionTests: XCTestCase {
                                                                 includingPropertiesForKeys: nil))
         var uses: Set<String> = []
         for case let url as URL in walk where url.pathExtension == "swift" {
+            if url.lastPathComponent == "ClipboardDelivery.swift" { continue }
             let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
             for (i, line) in lines.enumerated() where line.contains("NSPasteboard") {
                 let owner = lines[...i].last { $0.contains("func ") }?

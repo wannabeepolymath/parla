@@ -2,10 +2,10 @@ import Foundation
 
 /// What kind of destination the text is landing in. Drives both the cleanup
 /// prompt's tone hint (`PromptBuilder`) and the newline-flatten rule below.
-/// `.unknown` is a real answer, not a fallback failure: browsers and everything
-/// unrecognized get no tone sentence at all, because a vague one is worse.
+/// `.unknown` is a real answer, not a fallback failure: unrecognized apps and
+/// browser hosts get no tone sentence. Recognized email sites get email structure.
 public enum AppCategory {
-    case terminal, code, chat, prose, unknown
+    case terminal, code, chat, email, prose, unknown
 }
 
 /// Pure safety rules for what/where dictated text may land. AppKit wiring
@@ -32,10 +32,12 @@ public enum TextRules {
         "com.todesktop.230313mzl4w4u92": .code,  // Cursor; todesktop is a generic
                                                  // wrapper vendor, so no prefix.
         // Mail and long-form writing.
-        "com.apple.mail": .prose, "com.microsoft.Outlook": .prose,
-        "com.readdle.smartemail-Mac": .prose, "com.apple.Notes": .prose,
+        "com.apple.mail": .email, "com.microsoft.Outlook": .email,
+        "com.readdle.smartemail-Mac": .email, "com.superhuman.desktop": .email,
+        "com.apple.Notes": .prose,
         "com.apple.TextEdit": .prose, "com.apple.iWork.Pages": .prose,
         "com.microsoft.Word": .prose, "notion.id": .prose, "md.obsidian": .prose,
+        "com.openai.chat": .prose, "com.openai.chatgpt": .prose,
     ]
 
     /// Prefixes are allowed ONLY where a vendor namespaces a whole product
@@ -51,8 +53,32 @@ public enum TextRules {
         ("dev.warp.Warp", .terminal),
     ]
 
-    public static func category(bundleID: String?) -> AppCategory {
+    public static func isBrowser(bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return ["com.apple.Safari", "com.apple.SafariTechnologyPreview", "com.google.Chrome",
+                "com.google.Chrome.canary", "com.google.Chrome.beta", "com.google.Chrome.dev",
+                "com.microsoft.edgemac", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Dev",
+                "com.brave.Browser", "com.brave.Browser.beta", "com.brave.Browser.nightly",
+                "company.thebrowser.Browser", "company.thebrowser.dia", "org.mozilla.firefox",
+                "org.mozilla.nightly", "com.vivaldi.Vivaldi", "com.operasoftware.Opera"].contains(bundleID)
+    }
+
+    public static func category(bundleID: String?, browserURL: String? = nil) -> AppCategory {
         guard let bundleID else { return .unknown }
+        // Parse the host, never search arbitrary titles/URLs for "mail". The URL
+        // stays local; only this fixed category reaches the cleanup provider.
+        if isBrowser(bundleID: bundleID), let browserURL,
+           let url = URL(string: browserURL), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+           let host = url.host?.lowercased() {
+            if ["mail.google.com", "outlook.live.com", "outlook.office.com", "outlook.office365.com",
+                "mail.proton.me", "mail.protonmail.com", "app.superhuman.com", "mail.yahoo.com",
+                "app.fastmail.com"].contains(host)
+                || (["www.icloud.com", "icloud.com"].contains(host)
+                    && (url.path == "/mail" || url.path.hasPrefix("/mail/"))) { return .email }
+            if ["app.slack.com", "discord.com", "web.whatsapp.com", "web.telegram.org",
+                "chat.google.com", "teams.microsoft.com", "teams.cloud.microsoft"].contains(host) { return .chat }
+            if ["chatgpt.com", "chat.openai.com", "claude.ai", "gemini.google.com"].contains(host) { return .prose }
+        }
         if let exact = appCategories[bundleID] { return exact }
         for (prefix, category) in appCategoryPrefixes where bundleID.hasPrefix(prefix) {
             return category

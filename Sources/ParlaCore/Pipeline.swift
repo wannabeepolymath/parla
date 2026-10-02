@@ -9,6 +9,8 @@ public struct Pipeline {
     /// does with the destination is pick a tone hint by `AppCategory`, and that
     /// is keyed on the bundle ID (`CleanupContext.appName` reaches nothing).
     public var frontBundleID: () -> String?
+    public var frontBrowserURL: () -> String? = { nil }
+    public var singleLine: Bool = false
 
     public init(transcribe: @escaping ([Float], String?) -> String?,
                 cleanup: @escaping (String, CleanupContext) async throws -> String,
@@ -68,7 +70,8 @@ public struct Pipeline {
             return (expansion, nil)
         }
         let ctx = CleanupContext(dictionary: s.dictionary, snippets: s.snippets,
-                                 appName: nil, bundleID: frontBundleID())
+                                 appName: nil, bundleID: frontBundleID(),
+                                 browserURL: frontBrowserURL(), singleLine: singleLine)
         do {
             let cleaned = CleanupSanitizer.sanitize(try await cleanup(transcript, ctx))
             if cleaned.isEmpty {

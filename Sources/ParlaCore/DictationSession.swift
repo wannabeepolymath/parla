@@ -1,8 +1,8 @@
 import Foundation
 
-/// Where the instant raw finalize landed — decides how the cleaned swap applies.
+/// Delivery status before cleanup finishes. `.pending` inserts once afterwards.
 /// `.history` = nothing safely finalized in a field; history may retain it.
-public enum Landing: Equatable, Sendable { case field, history }
+public enum Landing: Equatable, Sendable { case field, history, pending }
 
 /// The dictation pill's states. Lives here rather than inside `HUD` so the flow
 /// machine can name them without importing AppKit; `HUD.State` is a typealias to
@@ -14,7 +14,7 @@ public enum HUDState: Equatable, Sendable {
     /// own pill: never inserted, never stored, never the transcript.
     case preview(String)
     case transcribing   // fn-up → raw text landing (fast, on-device)
-    case polishing      // raw landed; LLM cleanup in flight — resolves to done/savedToHistory/cleanedInHistory
+    case polishing      // LLM cleanup in flight; final text has not necessarily landed
     case done
     case savedToHistory   // nothing landed in a field; transcript lives in history
     case cleanedInHistory // swap unverifiable; cleaned text only in history
@@ -38,10 +38,18 @@ public struct LandingProbe: Equatable, Sendable {
     public let bundleID: String?             // frontmost app, sampled at landing, NOT at fn-down
     public let appName: String?
     public let typedIsOurs: Bool             // Inserter.canEraseTyped(typedLedger)
+    /// App delivery waits for cleanup, then inserts once. The older streaming
+    /// consumer can still finalize raw and perform a verified tail replacement.
+    public let deferInsertionUntilClean: Bool
+    public let browserURL: String?
+    public let singleLine: Bool
     public init(focus: Inserter.FocusTarget, bundleID: String? = nil, appName: String? = nil,
-                typedIsOurs: Bool = false) {
+                typedIsOurs: Bool = false, deferInsertionUntilClean: Bool = false,
+                browserURL: String? = nil, singleLine: Bool = false) {
         self.focus = focus; self.bundleID = bundleID; self.appName = appName
         self.typedIsOurs = typedIsOurs
+        self.deferInsertionUntilClean = deferInsertionUntilClean
+        self.browserURL = browserURL; self.singleLine = singleLine
     }
 }
 
@@ -109,10 +117,14 @@ public final class DictationSession {
         public let insertText: String   // raw, already flattened for the landing bundle ID
         public let bundleID: String?
         public let appName: String?
+        public let browserURL: String?
+        public let singleLine: Bool
         public init(landing: Landing, raw: String, insertText: String,
-                    bundleID: String?, appName: String?) {
+                    bundleID: String?, appName: String?, browserURL: String? = nil,
+                    singleLine: Bool = false) {
             self.landing = landing; self.raw = raw; self.insertText = insertText
             self.bundleID = bundleID; self.appName = appName
+            self.browserURL = browserURL; self.singleLine = singleLine
         }
     }
 
@@ -123,7 +135,7 @@ public final class DictationSession {
         case starting(Session)      // capture requested; focus not yet sampled
         case recording(Session)     // mic live (fn held or hands-free latched)
         case transcribing(Session)  // audio captured; ASR/LLM leg running, nothing landed
-        case polishing(gen: Int)    // raw landed; cleanup POST in flight
+        case polishing(gen: Int)    // cleanup POST in flight
     }
 
     // MARK: - Events
@@ -166,8 +178,8 @@ public final class DictationSession {
 
     /// Data only — no closures, no Tasks, no AppKit. **The order of the list is
     /// part of the contract**: the interpreter executes in order and never
-    /// reorders. That is what puts the landing keystrokes on screen before the
-    /// polish POST goes out. `send(_:perform:)` is what makes the claim true even
+    /// reorders. Delivery, cleanup and record effects run in the specified order.
+    /// `send(_:perform:)` is what makes the claim true even
     /// when an effect dispatches another event.
     public enum Effect: Equatable, Sendable {
         // capture
@@ -309,8 +321,8 @@ public final class DictationSession {
 
         case let .focusSampled(g, focus):
             guard case .starting(var s) = state, s.gen == g else { return [] }
-            // Password field: with no clipboard hand-off there is nothing safe to
-            // do with the transcript — refuse up front. Not the cancel path: its
+            // Password field: never record, store, or deliver its transcript.
+            // Refuse up front. Not the cancel path: its
             // queued HUD hide would wipe this toast.
             guard focus != .secure else {
                 state = .idle
@@ -464,9 +476,18 @@ public final class DictationSession {
         }
 
         let willPolish = s.cleanupConfigured
+        if willPolish, !s.live, probe.deferInsertionUntilClean {
+            let pending = Landed(landing: probe.focus == .none ? .history : .pending,
+                                 raw: raw, insertText: "", bundleID: probe.bundleID,
+                                 appName: probe.appName, browserURL: probe.browserURL,
+                                 singleLine: probe.singleLine)
+            if s.gen == gen { state = .polishing(gen: s.gen) }
+            return (s.gen == gen ? [.hud(.polishing)] : []) + [.polish(s, pending)]
+        }
         // Flatten against the app the keystrokes actually land in. The cleaned
         // swap reuses this same bundle ID so both sides of its diff agree.
-        let insertText = TextRules.flattensNewlines(bundleID: probe.bundleID)
+        let category = TextRules.category(bundleID: probe.bundleID, browserURL: probe.browserURL)
+        let insertText = probe.singleLine || category == .terminal || category == .chat
             ? TextRules.flattenForTerminal(raw) : raw
         // "polishing…" only when a polish is actually coming; without one the raw
         // transcript IS final, so land the terminal state directly.
@@ -534,7 +555,8 @@ public final class DictationSession {
         // The POST is issued after the landing keystrokes, which is the whole
         // point of the effect list being ordered.
         fx.append(.polish(s, Landed(landing: landing, raw: raw, insertText: insertText,
-                                    bundleID: probe.bundleID, appName: probe.appName)))
+                                    bundleID: probe.bundleID, appName: probe.appName,
+                                    browserURL: probe.browserURL, singleLine: probe.singleLine)))
         fx += sound
         if s.gen == gen { state = .polishing(gen: s.gen) }
         return fx
@@ -545,6 +567,33 @@ public final class DictationSession {
     private func cleanReady(_ s: Session, _ landed: Landed, text: String, failure: String?,
                             focus: Inserter.FocusTarget) -> [Effect] {
         let historyEnabled = s.settings.historyEnabled
+        if landed.landing == .pending {
+            // Nothing has been written yet. Never send late text into a newer
+            // session or a changed target. A secure destination drops the result
+            // entirely, including history, just like the initial landing check.
+            if s.gen == gen, focus == .secure {
+                return [.secureRefusal("Not supported in password fields")] + finishTail(s)
+            }
+            let category = TextRules.category(bundleID: landed.bundleID, browserURL: landed.browserURL)
+            let finalText = landed.singleLine || category == .terminal || category == .chat
+                ? TextRules.flattenForTerminal(text) : text
+            var fx: [Effect] = []
+            if s.gen == gen {
+                if focus == .editable || focus == .unknown {
+                    fx += [.insertText(finalText), .trace(.landed), .playSound(.finish),
+                           .hud(failure.map(HUDState.rawFallback) ?? .done)]
+                } else {
+                    fx.append(.hud(historyEnabled ? .savedToHistory : .error("History off — text discarded")))
+                }
+            }
+            if historyEnabled {
+                fx.append(.appendHistory(raw: landed.raw,
+                                         cleaned: failure == nil && text != landed.raw ? text : nil,
+                                         appName: landed.appName))
+            }
+            fx.append(.trace(.cleanedSwapped))
+            return fx + finishTail(s)
+        }
         // The cleaned text replaces insertText in the field, so it must be
         // flattened too — and diffed flattened-vs-flattened or the erase counts
         // won't match what's on screen.
@@ -565,6 +614,8 @@ public final class DictationSession {
             fx.append(.hud(failureHUD ?? (plan == nil ? .done : unverifiedHUD)))
         } else {
             switch landed.landing {
+            case .pending:
+                break // handled above
             case .history:
                 // Nothing of ours in a field — history is the only durable landing.
                 fx.append(.hud(historyEnabled ? (failureHUD ?? .savedToHistory)

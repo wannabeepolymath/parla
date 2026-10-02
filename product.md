@@ -94,22 +94,21 @@ Parla inverts this:
 
 ## System-wide text insertion (desktop mechanics)
 
-Three standard OS mechanisms exist. Parla uses two of them:
+Three standard OS mechanisms exist:
 
-1. **Simulated keystrokes** (how Parla types) — macOS
+1. **Simulated keystrokes** (retained for streaming helpers) — macOS
    `CGEventCreateKeyboardEvent`/`CGEventKeyboardSetUnicodeString`; Windows
    `SendInput`. Works everywhere; char-by-char, layout-sensitive. Every
-   transcript lands this way.
-2. **Paste injection** (rejected) — set clipboard → synthetic Cmd/Ctrl+V →
-   restore clipboard. Instant, but save/restore is racy and it commandeers the
-   user's clipboard. Parla never reads or writes the pasteboard while
-   dictating; the one clipboard write left in the app is the user's own Copy
-   button in the history view.
+   transcript now lands through paste instead.
+2. **Paste injection** (final delivery) — save all clipboard representations →
+   set temporary text → synthetic Cmd+V → conditionally restore. Cleanup finishes
+   before delivery, so opaque editors such as ChatGPT need no text readback or
+   replacement. A clipboard change made by the user takes precedence over restoration.
 3. **Accessibility APIs** (macOS AX API — the Privacy & Security →
    Accessibility grant; Windows UI Automation) — Parla reads focus, the
    focused field's text and cursor, and the current selection through AX, and
-   uses one atomic AX value write to swap the raw transcript for the polished
-   one (falling back to backspaces + retyping when the app ignores the write).
+   verifies destination identity across cleanup. The older streaming helpers retain
+   an atomic AX value write for tail replacement.
    Nothing is erased unless AX first proves the text at the cursor is Parla's
    own. Cleanest; not all apps expose fields.
 

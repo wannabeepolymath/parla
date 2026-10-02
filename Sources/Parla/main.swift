@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var captured: [Float] = []                   // .stopCapture(discard: false)
     var pendingPolish: DictationSession.Landed?  // .polish
     var pendingInstruction: String?              // .transform
+    var insertionFailure: String?
     /// Confirmed-prefix window for long dictations: written by stream(), consumed
     /// by the finish() queued right after it — the processTask chain serializes.
     var window: StreamWindow?
@@ -182,6 +183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Parla: fn edge %@", "\(edge)")
             switch edge {
             case .down(let command):
+                guard self.axGranted else {
+                    self.hud.show(.error("Enable Parla in System Settings → Privacy & Security → Accessibility"))
+                    return
+                }
                 // Latch the settings for the whole dictation: the streaming loop
                 // and both legs read the latched value instead of stat()ing the
                 // file every ~300ms pass. The re-read-only-if-changed cache lives
@@ -291,7 +296,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        Inserter.insert(TextRules.flattensNewlines(bundleID: bundleID) ? TextRules.flattenForTerminal(text) : text)
+        let category = TextRules.category(bundleID: bundleID,
+                                          browserURL: Inserter.focusedBrowserURL(bundleID: bundleID))
+        let flattened = category == .terminal || category == .chat || Inserter.focusedFieldIsSingleLine()
+        if !Inserter.insert(flattened ? TextRules.flattenForTerminal(text) : text) {
+            hud.show(.error(axGranted ? "Paste failed — copy the transcript from History" : "Enable Accessibility for Parla"))
+        }
     }
 
     func loadModel() {

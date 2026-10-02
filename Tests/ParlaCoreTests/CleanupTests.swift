@@ -68,6 +68,30 @@ final class CleanupTests: XCTestCase {
         }
     }
 
+    func testEmailPromptSeparatesGreetingBodyAndClosingWithoutInventingContent() {
+        let native = CleanupContext(dictionary: [], snippets: [:], appName: "Mail", bundleID: "com.apple.mail")
+        let web = CleanupContext(dictionary: [], snippets: [:], appName: "Chrome",
+                                 bundleID: "com.google.Chrome", browserURL: "https://mail.google.com/mail/u/0/#drafts")
+        for context in [native, web] {
+            let prompt = PromptBuilder.system(context: context)
+            XCTAssertTrue(prompt.contains("greeting on its own line"))
+            XCTAssertTrue(prompt.contains("spoken closing on a separate paragraph"))
+            XCTAssertTrue(prompt.contains("single-paragraph rule"))
+            XCTAssertTrue(prompt.contains("Do not invent"))
+            XCTAssertFalse(prompt.contains("mail.google.com"))
+            XCTAssertFalse(prompt.contains("#drafts"))
+        }
+    }
+
+    func testSubjectFieldOverridesEmailBodyStructure() {
+        let context = CleanupContext(dictionary: [], snippets: [:], appName: "Mail",
+                                     bundleID: "com.apple.mail", singleLine: true)
+        let prompt = PromptBuilder.system(context: context)
+        XCTAssertTrue(prompt.contains("single-line field"))
+        XCTAssertTrue(prompt.hasSuffix("without spaces."))
+        XCTAssertTrue(prompt.contains("Do not add an email greeting, body structure"))
+    }
+
     func testTransformPromptBranch() {
         let ctx = CleanupContext(
             dictionary: ["Kubernetes"],

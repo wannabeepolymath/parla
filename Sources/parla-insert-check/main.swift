@@ -6,6 +6,7 @@ import ParlaCore
 //   swift run parla-insert-check                 # TextEdit
 //   swift run parla-insert-check com.apple.Terminal
 //   swift run parla-insert-check com.tinyspeck.slackmacgap
+//   swift run parla-insert-check --paste        # production native-paste delivery
 //
 // WHY THIS EXISTS. Raising the typing chunk from 20 to 200 UTF-16 units is the
 // one change in the whole backlog whose failure mode unit tests cannot reach:
@@ -71,6 +72,7 @@ let fieldIndex: Int = {
 let bundleID = CommandLine.arguments.dropFirst()
     .filter { $0 != echoFile && $0 != fieldRole && Int($0) == nil }
     .first { !$0.hasPrefix("-") } ?? "com.apple.TextEdit"
+let usePaste = CommandLine.arguments.contains("--paste")
 
 func die(_ msg: String, _ code: Int32) -> Never {
     FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
@@ -248,13 +250,16 @@ func settledText(changingFrom previous: String? = nil, timeout: TimeInterval = 8
         return try? String(contentsOfFile: echoFile, encoding: .utf8)
     }
     let deadline = Date().addingTimeInterval(timeout)
-    Thread.sleep(forTimeInterval: 0.3) // never sample before typing has started
+    // Native paste schedules clipboard restoration on main. Pump the run loop
+    // instead of blocking it, so the smoke test exercises restoration too.
+    func pause(_ seconds: TimeInterval) { RunLoop.current.run(until: Date().addingTimeInterval(seconds)) }
+    pause(0.3) // never sample before typing has started
     if let previous {
-        while Date() < deadline, read() == previous { Thread.sleep(forTimeInterval: 0.15) }
+        while Date() < deadline, read() == previous { pause(0.15) }
     }
     var last = read()
     while Date() < deadline {
-        Thread.sleep(forTimeInterval: 0.15)
+        pause(0.15)
         let now = read()
         if now == last { return now }
         last = now
@@ -298,7 +303,11 @@ for c in cases {
     // Read the field before and after so pre-existing content doesn't count
     // against us; that is also how Inserter itself verifies before erasing.
     let before = settledText() ?? ""
-    Inserter.typeUnicode(c.text)
+    if usePaste {
+        guard Inserter.insert(c.text) else { die("native paste could not preserve the clipboard or post input", 2) }
+    } else {
+        Inserter.typeUnicode(c.text)
+    }
     guard let after = settledText(changingFrom: before) else {
         // Distinguish the two very different reasons, because they need
         // different actions: nothing focused (click into a field) versus a
@@ -362,6 +371,9 @@ for c in cases {
     // positional, so a separator that vanishes changes no verdict.
     Inserter.typeUnicode("\n\n")
 }
+
+// Let the final paste's conditional restoration run before exiting this CLI.
+if usePaste { RunLoop.current.run(until: Date().addingTimeInterval(5.1)) }
 
 if skipped == cases.count {
     print("\nAll cases skipped: nothing was verified. Point this at an app whose "

@@ -191,17 +191,30 @@ transcribes the whole recording and latency still grows with the length of the
 dictation — up to ~15s of audio, which is a few hundred ms of whisper. An
 in-flight pass is aborted the moment you let go.
 
-On release, the whole raw transcript is typed into the focused field as
-synthetic keystrokes (HUD: "Transcribing…", then "✓ · polishing…"); with no
-focused field nothing is typed — the transcript is only saved to history.
-The clipboard is never touched: text lives in the field and in local history,
-and reaches the clipboard only via the Hub's explicit Copy button. The
-LLM-cleaned version swaps in behind the raw text moments later — one atomic
-Accessibility write over the text Parla typed, falling back to backspaces and
-retyping when the app won't accept the write — landing on one of:
-"✓ Pasted", "✓ Saved to history", "✓ cleaned in history" (swap couldn't be
-verified — the cleaned text is in history instead), or "✓ raw (cleanup
-failed)". Cancelling — Esc, or any other keypress while fn is held — shows
+On release, the transcript is transcribed and, when AI Cleanup is configured,
+formatted before it is inserted once (HUD: "Transcribing…", then "Formatting…").
+This works in editors that accept paste but do not expose their text through
+Accessibility, including ChatGPT. Delivery uses a native paste with a temporary
+clipboard lease: all original items and representations are restored after
+0.8 seconds (5 seconds for recognized remote desktop clients), unless you have
+copied something new. Temporary text is marked transient and concealed for
+compatible clipboard managers. If the clipboard cannot be preserved, Parla
+reports a paste failure; with history enabled, use Copy in History to recover.
+
+Gmail, Outlook web, Proton Mail, Superhuman, Yahoo Mail, Fastmail, iCloud Mail,
+and supported desktop mail apps get email formatting: spoken greetings,
+paragraphs, and sign-offs are separated without inventing content. Subject,
+recipient, and other single-line fields stay on one line. Browser detection
+uses the focused document URL locally; the provider receives only a fixed
+category hint. Clearly dictated email structure is also preserved in other
+apps, such as ChatGPT. These formatting improvements require AI Cleanup.
+
+With no cleanup provider, the raw transcript is pasted directly. If cleanup
+fails, raw text is pasted with the reason shown. If the destination changes
+during cleanup (or a newer dictation starts), the result stays in local history
+when enabled. Password fields remain blocked. Final states include "✓ Pasted",
+"✓ Saved to history", and "✓ raw (cleanup failed)".
+Cancelling — Esc, or any other keypress while fn is held — shows
 "✕ Cancelled". If the mic goes away mid-dictation (AirPods disconnecting, a
 hub unplugged) the capture ends by itself and everything heard up to the break
 finalizes exactly as if fn had been released.
@@ -267,7 +280,7 @@ refused outright: dictation into one shows "⚠️ Not supported in password
 fields" — nothing is typed, stored in history, or sent to the cleanup model.
 The same refusal applies while any app has macOS Secure Event Input on (a
 `sudo` prompt, a password manager): synthetic keystrokes are dropped then, so
-the toast reads "⚠️ Secure input is on — typing is blocked" instead, and
+the toast advises closing password prompts or disabling Secure Keyboard Entry instead, and
 `~/Library/Logs/Parla.log` records which app was frontmost.
 
 ## Configuration

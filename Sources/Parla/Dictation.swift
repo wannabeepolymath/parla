@@ -11,7 +11,7 @@ enum Sound {
         s.play()
     }
     static func start()  { play("Tink") }   // record-start
-    static func finish() { play("Glass") }  // raw transcript landed
+    static func finish() { play("Glass") }  // final transcript delivered
     static func cancel() { play("Funk") }   // dictation aborted
     static func latch()  { play("Pop") }    // fn+Space: hands-free engaged
 }
@@ -21,8 +21,7 @@ enum Sound {
 ///
 /// Two rules hold everything together:
 ///  - **Effect order is the contract.** Effects run in the order they arrive and
-///    are never reordered — that is what puts the landing keystrokes on screen
-///    before the polish POST goes out. An effect that dispatches another event
+///    are never reordered. An effect that dispatches another event
 ///    (recorder.start(), the focus probe) appends to the machine's drain queue
 ///    instead of running the nested list inside itself; see
 ///    `DictationSession.send(_:perform:)`.
@@ -128,8 +127,13 @@ extension AppDelegate {
         // MARK: - Insertion. Nothing here deletes without proving what it deletes.
 
         case let .insertText(text):
-            Inserter.insert(text)
-            CorrectionWatcher.shared.arm(inserted: text, dictionary: store.load().dictionary)
+            if Inserter.insert(text) {
+                insertionFailure = nil
+                CorrectionWatcher.shared.arm(inserted: text, dictionary: store.load().dictionary)
+            } else {
+                insertionFailure = store.load().historyEnabled
+                    ? "Paste failed — copy the transcript from History" : "Paste failed"
+            }
 
         case let .eraseTypedIfOurs(expect):
             // Nothing of ours is left in the field — there is nothing to learn from.
@@ -173,7 +177,15 @@ extension AppDelegate {
 
         // MARK: - UI
 
-        case let .hud(state): hud.show(state)
+        case let .hud(state):
+            if let failure = insertionFailure, state == .done || {
+                if case .rawFallback = state { return true }; return false
+            }() {
+                hud.show(.error(failure))
+                insertionFailure = nil
+            } else {
+                hud.show(state)
+            }
         case let .secureRefusal(passwordField): showSecureRefusal(passwordField)
         case .hideHUD: hud.hide()
         case let .menuBar(state):
@@ -297,9 +309,9 @@ extension AppDelegate {
                 .replacingOccurrences(of: "ggml-", with: "")
         }
 
-        // The instant raw finalize, and — when a polish is coming — the values it
-        // must hold across the await.
-        let landed: DictationSession.Landed? = await MainActor.run {
+        // Resolve the destination before cleanup and hold its identity across
+        // the await. The production path inserts only the final result.
+        let delivery = await MainActor.run { () -> (DictationSession.Landed?, Inserter.Destination?) in
             // Re-check focus: it may have moved into a password field since
             // fn-down. Sampled on BOTH paths, not just the landing one: it is
             // also the signal that deletes the stashed WAV below, and the
@@ -317,8 +329,12 @@ extension AppDelegate {
                 probe = LandingProbe(focus: focus, bundleID: app?.bundleIdentifier,
                                      appName: app?.localizedName,
                                      typedIsOurs: s.live && !ledger.isEmpty
-                                         && Inserter.canEraseTyped(ledger))
+                                         && Inserter.canEraseTyped(ledger),
+                                     deferInsertionUntilClean: true,
+                                     browserURL: focus == .secure ? nil : Inserter.focusedBrowserURL(bundleID: app?.bundleIdentifier),
+                                     singleLine: focus == .secure ? false : Inserter.focusedFieldIsSingleLine())
             }
+            let destination = focus == .secure ? nil : Inserter.Destination()
             self.send(.transcribed(s, raw: raw, probe: probe))
             // Behind the landing keystrokes on purpose — a file delete must not
             // sit between the transcript and the screen. `secure` is the same
@@ -328,23 +344,27 @@ extension AppDelegate {
             RecordingStore.shared.resolve(recording, transcript: raw,
                                           secure: probe.focus == .secure || s.focus == .secure)
             defer { self.pendingPolish = nil }
-            return self.pendingPolish
+            return (self.pendingPolish, destination)
         }
-        guard let landed else { return } // dropped, empty, or cleanup unconfigured
+        guard let landed = delivery.0 else { return } // dropped, empty, or cleanup unconfigured
 
         // The bundle ID the text actually landed in — the cleanup prompt's tone
         // hint is keyed on it, and it is the same one the swap's flatten uses,
         // so the prompt and the last mile can't disagree about the destination.
         pipeline.frontBundleID = { landed.bundleID }
-        // The POST goes out behind the landing keystrokes, and the chain stays
-        // held until it resolves so a queued next dictation can't land text
-        // before the swap.
+        pipeline.frontBrowserURL = { landed.browserURL }
+        pipeline.singleLine = landed.singleLine
+        // Keep the processing chain serialized through cleanup. A newer session
+        // invalidates this insertion; the result can still be retained in history.
         let result = await pipeline.clean(transcript: landed.raw)
         await MainActor.run {
             // Only the swap paths that can type consult this, so only they pay
             // for the AX read.
-            let focus = landed.landing == .field && s.gen == self.session.gen
+            var focus = (landed.landing == .field || landed.landing == .pending) && s.gen == self.session.gen
                 ? Inserter.focusTarget() : Inserter.FocusTarget.none
+            if landed.landing == .pending, focus != .secure, delivery.1?.isCurrent() != true {
+                focus = .none
+            }
             self.send(.cleanReady(s, landed, text: result.text, failure: result.failure, focus: focus))
         }
     }

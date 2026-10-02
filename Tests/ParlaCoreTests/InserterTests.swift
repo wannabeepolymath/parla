@@ -64,7 +64,7 @@ final class InserterTests: XCTestCase {
     func testSecureRefusalBlamesAPasswordFieldOnlyWhenThereIsOne() {
         let field = "Not supported in password fields"
         XCTAssertEqual(Inserter.secureRefusalMessage(field, secureInput: true, fieldIsSecure: false),
-                       "Secure input is on — typing is blocked")
+                       "Secure Input is on — close password prompts or disable Secure Keyboard Entry")
         // A real password field turns secure input on itself: still the field's toast.
         XCTAssertEqual(Inserter.secureRefusalMessage(field, secureInput: true, fieldIsSecure: true), field)
         XCTAssertEqual(Inserter.secureRefusalMessage(field, secureInput: false, fieldIsSecure: true), field)

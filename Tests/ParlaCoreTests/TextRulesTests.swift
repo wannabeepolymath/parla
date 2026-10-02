@@ -26,7 +26,10 @@ final class TextRulesTests: XCTestCase {
                    "net.whatsapp.WhatsApp", "ru.keepcoder.Telegram", "org.telegram.desktop"] {
             XCTAssertEqual(TextRules.category(bundleID: id), .chat, id)
         }
-        for id in ["com.apple.mail", "com.microsoft.Outlook", "com.microsoft.Word",
+        for id in ["com.apple.mail", "com.microsoft.Outlook", "com.readdle.smartemail-Mac"] {
+            XCTAssertEqual(TextRules.category(bundleID: id), .email, id)
+        }
+        for id in ["com.microsoft.Word",
                    "com.apple.Notes", "notion.id", "md.obsidian"] {
             XCTAssertEqual(TextRules.category(bundleID: id), .prose, id)
         }
@@ -59,7 +62,7 @@ final class TextRulesTests: XCTestCase {
         XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.VSCode"), .code)
         XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.VSCodeInsiders"), .code)
         XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Word"), .prose)
-        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Outlook"), .prose)
+        XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Outlook"), .email)
         XCTAssertEqual(TextRules.category(bundleID: "com.microsoft.Excel"), .unknown)
         // JetBrains namespaces its whole family, so the vendor prefix is correct there.
         XCTAssertEqual(TextRules.category(bundleID: "com.jetbrains.intellij"), .code)
@@ -77,6 +80,24 @@ final class TextRulesTests: XCTestCase {
         XCTAssertFalse(TextRules.flattensNewlines(bundleID: "com.apple.dt.Xcode"))
         XCTAssertFalse(TextRules.flattensNewlines(bundleID: "com.microsoft.VSCode"))
         XCTAssertFalse(TextRules.flattensNewlines(bundleID: nil))
+    }
+
+    func testBrowserEmailDetectionUsesHostAndBrowserIdentity() {
+        for browser in ["com.google.Chrome", "com.apple.Safari", "company.thebrowser.Browser", "com.microsoft.edgemac"] {
+            for url in ["https://mail.google.com/mail/u/0/#drafts", "https://outlook.office.com/mail/",
+                        "https://outlook.live.com/mail/", "https://mail.proton.me/u/0/inbox",
+                        "https://app.superhuman.com", "https://www.icloud.com/mail/"] {
+                XCTAssertEqual(TextRules.category(bundleID: browser, browserURL: url), .email, url)
+            }
+            for url in ["https://mail.google.com.attacker.test", "https://example.com/?url=mail.google.com",
+                        "https://mail.google.com@attacker.test", "https://www.icloud.com/notes/", "not a URL"] {
+                XCTAssertEqual(TextRules.category(bundleID: browser, browserURL: url), .unknown, url)
+            }
+        }
+        XCTAssertEqual(TextRules.category(bundleID: "com.example.app", browserURL: "https://mail.google.com"), .unknown)
+        XCTAssertEqual(TextRules.category(bundleID: "com.google.Chrome", browserURL: "https://app.slack.com/client"), .chat)
+        XCTAssertEqual(TextRules.category(bundleID: "com.openai.chat"), .prose)
+        XCTAssertEqual(TextRules.category(bundleID: "com.google.Chrome", browserURL: "https://chatgpt.com/c/test"), .prose)
     }
 
     // MARK: flattenForTerminal

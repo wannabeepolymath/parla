@@ -719,14 +719,14 @@ struct PrivacyPage: View {
                 HubRow("Transcription is on-device",
                        detail: "Audio never leaves this Mac — whisper.cpp runs locally") { EmptyView() }
                 HubDivider()
-                HubRow("Clipboard is never touched",
-                       detail: "Text is typed in directly and stored only in history — nothing reaches the clipboard unless you press Copy") { EmptyView() }
+                HubRow("Your clipboard is restored",
+                       detail: "Dictation uses a temporary paste. Your clipboard is restored unless you copy something new; temporary text is marked to exclude it from compatible clipboard history apps.") { EmptyView() }
                 HubDivider()
                 HubRow("Password fields are protected",
                        detail: "Dictation is refused in secure fields — nothing is typed, stored, or sent to the cleanup model") { EmptyView() }
                 HubDivider()
                 HubRow("Cleanup sends text only",
-                       detail: "The transcript, the selected text for voice commands, your dictionary, snippets, and the frontmost app's name — never audio") { EmptyView() }
+                       detail: "The transcript, selected text for voice commands, dictionary, snippets, and a fixed formatting hint — never audio, app names, or browser URLs") { EmptyView() }
             }
         }
         // Prune before summarising, not just for tidiness: the sweep otherwise

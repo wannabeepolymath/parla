@@ -8,15 +8,18 @@ public struct CleanupContext {
     /// prompt, so behaviour would depend on whatever the app calls itself.
     public var appName: String?
     public var category: AppCategory
+    public var singleLine: Bool
     /// Non-nil ⇒ command mode: the user message is a spoken instruction, this is
     /// the selected text to transform. Flips PromptBuilder to a transform prompt.
     public var selection: String?
     public init(dictionary: [String], snippets: [String: String], appName: String?,
-                bundleID: String? = nil, selection: String? = nil) {
+                bundleID: String? = nil, selection: String? = nil,
+                browserURL: String? = nil, singleLine: Bool = false) {
         self.dictionary = dictionary
         self.snippets = snippets
         self.appName = appName
-        self.category = TextRules.category(bundleID: bundleID)
+        self.category = TextRules.category(bundleID: bundleID, browserURL: browserURL)
+        self.singleLine = singleLine
         self.selection = selection
     }
 }
@@ -76,6 +79,11 @@ public enum PromptBuilder {
         "new line" means a line break, "new paragraph" means a blank line, "bullet \
         point" starts a "- " item, and "numbered list" starts "1. " numbering.
         - Plain text only: no Markdown bold, italics, headings, or code fences.
+        - If the speech clearly forms an email (a greeting, body, and/or closing), \
+        separate the spoken greeting, body paragraphs, and spoken closing with \
+        blank lines, even outside an email app. Do not invent missing parts. This \
+        is an exception to the single-paragraph rule, not permission to write an \
+        email in response to a dictated request such as "write an email to Sam".
         """
         if !context.dictionary.isEmpty {
             p += "\n\nUse these exact spellings when the words occur: "
@@ -93,6 +101,11 @@ public enum PromptBuilder {
         // Last block in the prompt on purpose: for terminals and chat it has to
         // override the list rule above, and models weight late instructions most.
         if let hint = toneHint(context.category) { p += "\n\n" + hint }
+        if context.singleLine {
+            p += "\n\nThe destination is a single-line field (such as an email subject, recipient, or search box). "
+                + "Output ONE line. Do not add an email greeting, body structure, sign-off, or a subject label. "
+                + "When an email address is dictated, render the address literally with @ and dots, without spaces."
+        }
         return p
     }
 
@@ -120,9 +133,23 @@ public enum PromptBuilder {
             greetings, sign-offs or emoji the speaker did not say. Output ONE line: \
             never a line break, even for a list; Return sends the message.
             """
+        case .email:
+            return """
+            This will be inserted into an email. Format a spoken greeting on its own \
+            line, followed by a blank line and the body. Split distinct thoughts into \
+            readable paragraphs. Put a spoken closing on a separate paragraph and \
+            a spoken sender name on the next line. Preserve complete sentences, \
+            punctuation, the speaker's wording and formality. Do not invent a \
+            greeting, recipient, sign-off, sender name, subject, or facts. Do not \
+            add a Subject: header unless explicitly dictated. For example, \
+            "hi Sam thanks for the update I'll review it tomorrow best Alex" becomes \
+            "Hi Sam,\\n\\nThanks for the update. I'll review it tomorrow.\\n\\nBest,\\nAlex" \
+            (with real line breaks). Email paragraph structure overrides the \
+            single-paragraph rule above, even without spoken newline commands.
+            """
         case .prose:
             return """
-            This will be inserted into an email or document. Use complete sentences \
+            This will be inserted into a document. Use complete sentences \
             and readable paragraphs. Keep the speaker's formality; do not add a \
             greeting, sign-off or subject that was not spoken.
             """
