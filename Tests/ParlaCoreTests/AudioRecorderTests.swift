@@ -199,6 +199,15 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertEqual(AudioRecorder.rebuildAction(live: true, engineRunning: true, resumes: 0), .none)
     }
 
+    /// `isRunning` alone is not proof: an engine can report running and deliver
+    /// nothing. Under a capture the tap's own heartbeat is the second opinion.
+    func testEngineCountsAsFedOnlyWhileBuffersKeepArriving() {
+        XCTAssertTrue(AudioRecorder.recentlyFed(lastFeed: 10, now: 10.1))
+        XCTAssertFalse(AudioRecorder.recentlyFed(lastFeed: 10, now: 10 + AudioRecorder.feedGap + 0.01))
+        // Just built: its first buffer is still on the way. Not evidence of a stall.
+        XCTAssertTrue(AudioRecorder.recentlyFed(lastFeed: nil, now: 10))
+    }
+
     /// A rebuild can provoke the next route change. Idle, that loop only costs
     /// rebuilds; under a capture each lap is a hole in the dictation, so after a
     /// few the capture ends and what was said is finalized.

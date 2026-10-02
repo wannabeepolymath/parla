@@ -37,6 +37,8 @@ public final class AudioRecorder {
     /// chunk joins the dictation or the pre-roll ring.
     private var capturing = false
     private var preRoll = PreRollRing()
+    /// When the tap last delivered a buffer, live or pre-roll. Under `lock`.
+    private var lastFeed: TimeInterval?
 
     /// Engine-side state. Only ever touched on the main thread: prepare/start/
     /// stop are called from the hotkey handler and the notification observer is
@@ -344,6 +346,15 @@ public final class AudioRecorder {
     /// A rebuild can itself provoke the next change (opening an AirPods mic drops
     /// the link to HFP). Each lap under a capture is a hole in the dictation, so
     /// past `maxResumes` the capture ends and what was said is finalized.
+    /// Tap buffers arrive every ~85 ms; this many seconds without one, by the
+    /// time the debounce fires, means the engine is not feeding whatever
+    /// `isRunning` says. nil = built and not yet fed, which proves nothing.
+    static let feedGap: TimeInterval = 0.3
+    static func recentlyFed(lastFeed: TimeInterval?, now: TimeInterval) -> Bool {
+        guard let lastFeed else { return true }
+        return now - lastFeed <= feedGap
+    }
+
     enum RebuildAction: Equatable { case none, resumeCapture, endCapture, rewarm }
     /// ponytail: a guess with headroom — one real device switch costs one or two
     /// laps. Raise it if `Parla.log` ever shows dictations ending here.
@@ -369,6 +380,7 @@ public final class AudioRecorder {
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw RecorderError.noInputFormat }
         resamplerLock.lock(); resampler.reset(); resamplerLock.unlock()
+        lock.lock(); lastFeed = nil; lock.unlock() // this engine has not fed anything yet
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
             guard let self else { return }
             self.resamplerLock.lock()
@@ -399,9 +411,11 @@ public final class AudioRecorder {
     /// Tap-side fan-out. Returns true when the chunk joined the dictation, false
     /// when it went to the pre-roll ring (warm engine, no capture in flight).
     private func route(_ chunk: [Float]?) -> Bool {
+        let now = AudioRecorder.nowSeconds()
         lock.lock()
         let live = capturing
-        if !live, let chunk { preRoll.write(chunk, now: AudioRecorder.nowSeconds()) }
+        lastFeed = now
+        if !live, let chunk { preRoll.write(chunk, now: now) }
         lock.unlock()
         guard live else { return false }
         append(chunk)
@@ -430,8 +444,9 @@ public final class AudioRecorder {
             guard let self, self.rebuildGeneration == generation else { return }
             self.lock.lock()
             let live = self.capturing
+            let fed = AudioRecorder.recentlyFed(lastFeed: self.lastFeed, now: AudioRecorder.nowSeconds())
             self.lock.unlock()
-            switch AudioRecorder.rebuildAction(live: live, engineRunning: self.engine.isRunning,
+            switch AudioRecorder.rebuildAction(live: live, engineRunning: self.engine.isRunning && fed,
                                                resumes: self.resumes) {
             case .none:
                 break

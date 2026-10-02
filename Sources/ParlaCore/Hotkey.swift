@@ -301,6 +301,8 @@ public final class HotkeyMonitor {
     private var hidTracksTrigger = false
     private var downAt: TimeInterval = 0
     private var tap: CFMachPort?
+    /// The tap thread's run loop, so a dead port's thread can be told to exit.
+    private var tapRunLoop: CFRunLoop?
     private let store: SettingsStore
     private var loadedBindings: HotkeyBindings?
     /// keyCode of the last keyDown we swallowed, so its autorepeats can be
@@ -481,8 +483,12 @@ public final class HotkeyMonitor {
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
             eventsOfInterest: mask,
             callback: { _, type, event, refcon in
-                Unmanaged<HotkeyMonitor>.fromOpaque(refcon!).takeUnretainedValue()
-                    .process(type: type, event: event)
+                // A bare thread's run loop drains no pool, and refreshBindings
+                // makes Foundation objects on every key.
+                autoreleasepool {
+                    Unmanaged<HotkeyMonitor>.fromOpaque(refcon!).takeUnretainedValue()
+                        .process(type: type, event: event)
+                }
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque())
         else {
@@ -503,9 +509,13 @@ public final class HotkeyMonitor {
         // tap and for the release to slip past it. Here the callback runs the
         // state machine and nothing else; `emit` carries the edges to main.
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        let thread = Thread {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            CFRunLoopRun() // returns once the port is invalidated and its source drops out
+        let thread = Thread { [weak self] in
+            let runLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            if let self {
+                self.lock.lock(); self.tapRunLoop = runLoop; self.lock.unlock()
+            }
+            CFRunLoopRun() // until ensureAlive stops it to replace a dead port
         }
         thread.name = "parla.hotkey-tap"
         thread.qualityOfService = .userInteractive
@@ -558,6 +568,10 @@ public final class HotkeyMonitor {
             NSLog("Parla: hotkey tap port went invalid, recreating")
             CFMachPortInvalidate(tap) // also drops the dead port's run-loop source
             self.tap = nil
+            // Dropping its only source does not wake a run loop asleep in
+            // mach_msg — stop it, or each dead port strands a thread.
+            if let tapRunLoop { CFRunLoopStop(tapRunLoop) }
+            tapRunLoop = nil
             start()
             return
         }

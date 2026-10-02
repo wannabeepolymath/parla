@@ -192,10 +192,21 @@ final class HotkeyTests: XCTestCase {
         m.handle(keyCode: 63, modifiers: [], at: 0.5)
         drainMain()
         XCTAssertEqual(out, [.down(command: false), .up(short: false)])
-        m.endSession()                                                     // nothing pending now: it applies
-        m.handle(keyCode: 63, modifiers: [.fn], at: 2)
+    }
+
+    /// …and with nothing queued it applies, exactly as it does off the tap.
+    func testEndSessionAppliesOnceMainHasCaughtUp() {
+        var out: [HotkeyMonitor.Edge] = []
+        let m = monitor(&out)
+        m.deliversOnMain = true
+        m.handle(keyCode: 63, modifiers: [.fn], at: 0)
+        _ = m.keyDown(keyCode: 49, modifiers: [.fn], at: 0.1)              // latch
+        m.handle(keyCode: 63, modifiers: [], at: 0.3)
         drainMain()
-        XCTAssertEqual(out.last, .down(command: false))
+        m.endSession()
+        XCTAssertFalse(m.keyDown(keyCode: 49, at: 700))                    // not swallowed as a stop
+        drainMain()
+        XCTAssertEqual(out, [.down(command: false), .handsFree])
     }
 
     // MARK: hands-free (fn+Space)
