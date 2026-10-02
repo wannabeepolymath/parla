@@ -7,6 +7,9 @@ public struct TranscriberError: Error, CustomStringConvertible {
 
 public final class WhisperTranscriber {
     private let ctx: OpaquePointer
+    /// What whisper is told the speech is: "auto" (detect per pass) or a
+    /// language code. Fixed for the life of the context — see init.
+    private let language: String
 
     /// Where the catalog's default model lives. Kept as the fallback for a
     /// `settings.whisperModelPath` that isn't set — the model *choice* is the
@@ -15,7 +18,8 @@ public final class WhisperTranscriber {
         ModelCatalog.path(for: ModelCatalog.default)
     }
 
-    public init(modelPath: String) throws {
+    /// `language` is `Settings.language`: nil detects, a code ("en", "hi") pins.
+    public init(modelPath: String, language: String? = nil) throws {
         // Metal GPU *and* flash attention are already on: v1.9.1's
         // whisper_context_default_params() returns use_gpu=1, flash_attn=1, and the
         // xcframework embeds the compiled Metal library so init no longer hits the old
@@ -26,6 +30,23 @@ public final class WhisperTranscriber {
             throw TranscriberError(description: "failed to load whisper model at \(modelPath)")
         }
         self.ctx = ctx
+        // A multilingual model told "this is English" doesn't transcribe other
+        // languages, it translates them: Hindi speech came out as an English
+        // sentence. So it detects unless the user pinned a language. Detection
+        // is a second encoder pass — measured on large-v3-turbo, 1.1 s → 2.2 s
+        // per pass — which is what pinning buys back.
+        // An English-only model has one language whatever the setting says, and
+        // asking it to detect fails the whole pass. An unknown code would fail
+        // every pass too, so it falls back to detecting.
+        // ponytail: detects on every pass, streaming windows included. Detect
+        // once per dictation and reuse it if long dictations feel slow.
+        if whisper_is_multilingual(ctx) == 0 {
+            self.language = "en"
+        } else if let language, whisper_lang_id(language) >= 0 {
+            self.language = language
+        } else {
+            self.language = "auto"
+        }
     }
 
     deinit { whisper_free(ctx) }
@@ -66,21 +87,14 @@ public final class WhisperTranscriber {
 
         let result: Int32 = withExtendedLifetime(abortBox) {
             samples.withUnsafeBufferPointer { buf in
-                // Pin the decode to English instead of inheriting whisper's compiled default
-                // (which happens to be "en" today — don't let a model swap decide it). With an
-                // unpinned decoder, the English initial_prompt below (dictionary + cross-cut
-                // context) drags the decoder into *translating* non-English speech: voxtype #233
-                // logged "auto-detected: pt (p=1.00)" and typed English anyway.
-                //
-                // The other half of that fix — suppress the English prompt when the speaker
-                // isn't English — is deliberately absent: whisper only reports the language
-                // after the fact (whisper_full_lang_id), and learning it up front costs a whole
-                // extra encode (whisper_pcm_to_mel + whisper_lang_auto_detect), more than the
-                // prompt is worth. If Parla ever unpins language, do it as a conditional
-                // re-decode instead: check whisper_full_lang_id, and only when it isn't English
-                // run the pass again promptless — then only non-English speakers pay.
+                // Always set, never whisper's compiled default (see init for the choice).
+                // The English initial_prompt below (dictionary + cross-cut context) stays
+                // on for every language: voxtype #233 saw one drag a detected-Portuguese
+                // decode into English, but Hindi and Spanish clips on large-v3-turbo kept
+                // their language with it here. If that report reproduces, drop the prompt
+                // when whisper_full_lang_id isn't English and decode again.
                 // language is borrowed for the whisper_full call, so it needs withCString too.
-                return "en".withCString { lang -> Int32 in
+                return language.withCString { lang -> Int32 in
                     params.language = lang
                     if let prompt = initialPrompt, !prompt.isEmpty {
                         // initial_prompt must stay alive through whisper_full → nested withCString.

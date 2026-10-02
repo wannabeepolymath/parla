@@ -15,6 +15,29 @@ final class TranscriberTests: XCTestCase {
         XCTAssertNotNil(t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil))
     }
 
+    /// The decode used to be pinned to English, and a multilingual model told
+    /// "this is English" translates: Hindi speech came out as an English
+    /// sentence. Local only — it needs the multilingual model and macOS's
+    /// Hindi voice, and CI has neither.
+    func testMultilingualModelKeepsTheSpokenLanguage() throws {
+        let model = ModelCatalog.path(for: ModelCatalog.all.first { $0.id.hasPrefix("large") }!)
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: model), "no multilingual model installed")
+        let wav = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: wav) }
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-v", "Lekha", "-o", wav.path, "--data-format=LEI16@16000", "--channels=1",
+                         "कल सुबह दस बजे मेरी टीम के साथ बैठक है।"]
+        try say.run()
+        say.waitUntilExit()
+        try XCTSkipUnless(say.terminationStatus == 0, "no Hindi system voice")
+
+        let out = try WhisperTranscriber(modelPath: model)
+            .transcribe(try Eval.loadSamples(url: wav), initialPrompt: nil)
+        let devanagari = out?.unicodeScalars.contains { (0x0900...0x097F).contains($0.value) }
+        XCTAssertEqual(devanagari, true, "got: \(out ?? "nil")")
+    }
+
     func testMissingModelThrows() {
         XCTAssertThrowsError(try WhisperTranscriber(modelPath: "/nonexistent.bin"))
     }

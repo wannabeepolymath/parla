@@ -294,7 +294,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func loadModel() {
-        let path = store.load().whisperModelPath ?? WhisperTranscriber.defaultModelPath()
+        let settings = store.load()
+        let path = settings.whisperModelPath ?? WhisperTranscriber.defaultModelPath()
         // Re-check what we downloaded before handing it to whisper: the corrupt
         // payload can predate the validator (vibe #353), and the verdict is
         // cached on (size, mtime) so the 574 MB hash happens once, not per
@@ -311,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showIdle()
             return
         }
-        transcriber = try? WhisperTranscriber(modelPath: path)
+        transcriber = try? WhisperTranscriber(modelPath: path, language: settings.language)
         modelReady = transcriber != nil
         loadedModelPath = modelReady ? path : nil
         if modelReady { lastGoodModelPath = path }
