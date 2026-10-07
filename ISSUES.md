@@ -1,6 +1,6 @@
 # Parla — Reported Issues Log
 
-User-reported issues, their root causes, and current status. (2026-07-05, updated 2026-08-07)
+User-reported issues, their root causes, and current status. (2026-07-05, updated 2026-10-08)
 
 ## 1. "I am not able to use the app. I wrote the key in .env" — FIXED
 The app never reads `.env`, and GUI apps don't inherit shell env vars.
@@ -21,6 +21,10 @@ screen.
 invalidated Mic/Accessibility grants each time we shipped anything.
 Now signs with a stable designated requirement (`identifier "com.parla.app"`);
 verified identical across rebuilds. Grants survive rebuilds from now on.
+Since 0.5.0 the identifier is `io.github.wannabeepolymath.parla`, and that
+custom requirement applies to local builds only: release DMGs are Developer
+ID-signed, whose default requirement (identifier + team) is already stable and
+doesn't trust any app that merely claims the identifier.
 
 ## 5. Text not streaming in real time into the focused textbox — FIXED
 - Works: streaming appends in real time (~1 word/second cadence, verified in

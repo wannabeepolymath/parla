@@ -19,4 +19,4 @@ fi
 scripts/make-dmg.sh
 git push origin "$TAG"
 gh release create "$TAG" "Parla-${TAG#v}.dmg" --draft --generate-notes --verify-tag
-echo "Draft $TAG created. Test the DMG, then: gh release edit $TAG --draft=false"
+echo "Draft $TAG created. Write its notes, test the DMG, then: gh release edit $TAG --draft=false"

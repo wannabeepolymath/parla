@@ -38,7 +38,9 @@ active by default; `make-app.sh` bundles `whisper.framework` into
 `Parla.app/Contents/Frameworks` (macOS 13.3+ required to match it). After code
 changes, quit Parla (menu > Quit), re-run `scripts/make-app.sh`, and `open
 Parla.app` again; permission grants survive rebuilds (the bundle is signed with
-a stable identifier).
+a stable identifier). A source build and the release DMG share a bundle ID but
+not a signature, so macOS keeps separate grants for each: switching between them
+means granting again, and only one can run at a time.
 
 Cleanup is optional and off until you configure it — until then Parla inserts
 the raw transcript. Set it up in the Hub's **AI Cleanup** page, or from the
@@ -253,6 +255,11 @@ Parla needs:
 - **Microphone** — Parla opens it while you dictate; only what you dictate is transcribed. What reaches disk is below.
 - **Accessibility** — to listen for the global hotkey and type text into the frontmost app (System Settings > Privacy & Security > Accessibility).
 
+Upgrading from 0.4.0 or earlier: 0.5.0 changed the bundle ID to
+`io.github.wannabeepolymath.parla` and is Developer ID-signed, so macOS asks for
+both permissions again, once. Remove the old Parla entry from the Accessibility
+list so the stale one isn't mistaken for the live one.
+
 By default the mic is opened per dictation and handed back at the end, so
 macOS's orange mic indicator is lit only while you are dictating. The cost is
 that each press pays the audio-engine start — 240–700 ms depending on the
@@ -408,9 +415,12 @@ scripts/setup-notary.sh   # saves Apple notary credentials as "parla-notary"
 Then, from a clean, committed tree:
 
 ```sh
-scripts/release.sh v0.5.0               # tag, notarized universal DMG, draft GitHub release
-gh release edit v0.5.0 --draft=false    # after installing from the DMG and dictating once
+scripts/release.sh v0.5.1               # tag, notarized universal DMG, draft GitHub release
+gh release edit v0.5.1 --draft=false    # after installing from the DMG and dictating once
 ```
+
+The draft's notes are only GitHub's changelog link; write real ones (install,
+upgrade caveats, what changed) before publishing.
 
 `scripts/make-dmg.sh` is the build-and-notarize half on its own; the app's
 version always comes from the tag.
