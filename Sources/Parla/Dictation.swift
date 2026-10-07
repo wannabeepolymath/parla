@@ -365,6 +365,7 @@ extension AppDelegate {
             var focus = (landed.landing == .field || landed.landing == .pending) && s.gen == self.session.gen
                 ? Inserter.focusTarget() : Inserter.FocusTarget.none
             if landed.landing == .pending, focus != .secure, delivery.1?.isCurrent() != true {
+                NSLog("Parla delivery: destination or selection changed, or identity unavailable; insertion withheld")
                 focus = .none
             }
             self.send(.cleanReady(s, landed, text: result.text, failure: result.failure, focus: focus))

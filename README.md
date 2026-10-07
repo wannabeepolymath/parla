@@ -210,7 +210,12 @@ category hint. Clearly dictated email structure is also preserved in other
 apps, such as ChatGPT. These formatting improvements require AI Cleanup.
 
 With no cleanup provider, the raw transcript is pasted directly. If cleanup
-fails, raw text is pasted with the reason shown. If the destination changes
+fails, raw text is pasted with the reason shown. Destination validation tracks
+the app, window, and focused field, not their text: background terminal output
+(including Claude Code status updates) does not cancel the paste. Apps without
+accessible text fields use native paste without requiring an app allowlist;
+window identity is checked when available. A newly selected range of text is
+protected from being overwritten by a late paste. If the destination changes
 during cleanup (or a newer dictation starts), the result stays in local history
 when enabled. Password fields remain blocked. Final states include "✓ Pasted",
 "✓ Saved to history", and "✓ raw (cleanup failed)".

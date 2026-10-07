@@ -101,8 +101,8 @@ public enum Inserter {
     /// What Parla can do with the current keyboard focus.
     public enum FocusTarget: Sendable {
         case editable   // confirmed text field: safe to live-type into
-        case unknown    // something is focused but AX can't confirm it's a field: paste, don't stream
-        case none       // no focused element at all: history only, nothing typed
+        case unknown    // app may accept paste but AX can't confirm a field: paste, don't stream
+        case none       // no usable destination: history only, nothing typed
         case secure     // password field (AXSecureTextField) or secure event input: refuse the dictation entirely
     }
 
@@ -134,16 +134,17 @@ public enum Inserter {
             AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             usleep(50_000) // give the app a beat to build its AX tree
             result = classifyFocus()
-            // Opaque browser/editor/terminal bridges can report no focused AX
-            // object even while a caret is visible. Native paste is still useful;
-            // a missing AX object must not silently force history-only delivery.
-            let category = TextRules.category(bundleID: app.bundleIdentifier)
-            if result == .none, AXIsProcessTrusted(),
-               TextRules.isBrowser(bundleID: app.bundleIdentifier) || category != .unknown {
-                result = .unknown
-            }
         }
-        return result
+        return pasteFocus(result, trusted: AXIsProcessTrusted(),
+                          hasFrontmostApplication: NSWorkspace.shared.frontmostApplication != nil)
+    }
+
+    /// Missing AX focus does not mean the app cannot accept a native paste.
+    /// This is a delivery capability, independent of the app's tone category.
+    static func pasteFocus(_ focus: FocusTarget, trusted: Bool,
+                           hasFrontmostApplication: Bool) -> FocusTarget {
+        if focus == .none, trusted, hasFrontmostApplication { return .unknown }
+        return focus
     }
 
     /// The toast for a `.secure` refusal. `.secure` is two signals, and only one
@@ -222,35 +223,58 @@ public enum Inserter {
         return ["AXTextField", "AXSearchField", "AXComboBox"].contains(axRole(element) ?? "")
     }
 
-    /// Locally held destination identity across cleanup. If AX exposes text and
-    /// a selection, also ensure the user hasn't edited or moved the cursor.
+    /// Locally held destination identity across cleanup. A native paste goes to
+    /// the current caret in the same field; changes to that field's text are not
+    /// focus changes (a terminal's AX value can be its entire visible screen).
     public struct Destination: @unchecked Sendable {
-        let pid: pid_t?
-        let element: AXUIElement?
-        let text: String?
-        let cursor: Int?
-        let selectionLength: Int?
+        private struct AXIdentity: Equatable {
+            let element: AXUIElement
+            static func == (lhs: Self, rhs: Self) -> Bool { CFEqual(lhs.element, rhs.element) }
+        }
+        private let original: InsertionDestination<AXIdentity>
 
         public init() {
-            pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            element = Inserter.focusedElement()
-            let state = element.flatMap { Inserter.fieldState(of: $0) }
-            text = state.map { $0.text as String }
-            cursor = state?.cursor; selectionLength = state?.selLength
+            original = Self.capture()
         }
 
         public func isCurrent() -> Bool {
-            guard pid != nil, pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
-            let current = Inserter.focusedElement()
-            switch (element, current) {
-            case (nil, nil): return true // opaque app: process identity is all AX exposes
-            case let (before?, after?):
-                guard CFEqual(before, after) else { return false }
-                guard let text else { return true }
-                guard let state = Inserter.fieldState(of: after) else { return false }
-                return state.text.isEqual(to: text) && state.cursor == cursor && state.selLength == selectionLength
-            default: return false
+            original.matches(Self.capture())
+        }
+
+        private static func capture() -> InsertionDestination<AXIdentity> {
+            let app = NSWorkspace.shared.frontmostApplication
+            let element = Inserter.focusedElement()
+            func windowAttribute(_ owner: AXUIElement, _ attribute: CFString) -> AXUIElement? {
+                AXUIElementSetMessagingTimeout(owner, 1)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(owner, attribute, &value) == .success,
+                      let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+                return (value as! AXUIElement)
             }
+            let window = element.flatMap { windowAttribute($0, kAXWindowAttribute as CFString) }
+                ?? app.flatMap { windowAttribute(AXUIElementCreateApplication($0.processIdentifier),
+                                                kAXFocusedWindowAttribute as CFString) }
+            // CG lists windows front-to-back. Only normal application windows
+            // count; menus and the dictation pill must not change the target.
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] ?? []
+            let number = app.flatMap { app in
+                windows.first {
+                    ($0[kCGWindowOwnerPID as String] as? pid_t) == app.processIdentifier
+                        && ($0[kCGWindowLayer as String] as? Int) == 0
+                }?[kCGWindowNumber as String] as? UInt32
+            }
+            let selection: String? = element.flatMap { element in
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString,
+                                                    &value) == .success else { return nil }
+                return value as? String
+            }
+            return InsertionDestination(process: app?.processIdentifier,
+                                        window: window.map { AXIdentity(element: $0) },
+                                        windowNumber: number,
+                                        element: element.map { AXIdentity(element: $0) },
+                                        selection: selection)
         }
     }
 

@@ -583,8 +583,11 @@ public final class DictationSession {
                     fx += [.insertText(finalText), .trace(.landed), .playSound(.finish),
                            .hud(failure.map(HUDState.rawFallback) ?? .done)]
                 } else {
+                    fx.append(.log("Parla delivery: no current destination, insertion withheld"))
                     fx.append(.hud(historyEnabled ? .savedToHistory : .error("History off — text discarded")))
                 }
+            } else {
+                fx.append(.log("Parla delivery: newer dictation started, insertion withheld"))
             }
             if historyEnabled {
                 fx.append(.appendHistory(raw: landed.raw,

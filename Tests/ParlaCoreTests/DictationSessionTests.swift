@@ -108,6 +108,29 @@ final class DictationSessionTests: XCTestCase {
         XCTAssertTrue(fx.contains(.hud(.savedToHistory)))
     }
 
+    func testDeferredTerminalPasteSurvivesOutputAndOpaqueFocus() {
+        let s = startDictation(focus: .unknown)
+        let probe = LandingProbe(focus: .unknown, bundleID: "com.mitchellh.ghostty",
+                                 appName: "Ghostty", deferInsertionUntilClean: true)
+        let fx = m.handle(.transcribed(s, raw: "review this code", probe: probe))
+        guard case .polish(_, let landed)? = fx.first(where: {
+            if case .polish = $0 { return true }; return false
+        }) else { return XCTFail("no cleanup request") }
+        let before = InsertionDestination(process: 42, window: "terminal-window",
+                                          windowNumber: 7, element: "terminal-screen")
+        // The terminal has emitted output and temporarily stopped exposing AX
+        // focus while cleanup was pending, but its window is still the target.
+        let after = InsertionDestination<String>(process: 42, window: nil,
+                                                  windowNumber: 7, element: nil)
+        let currentFocus = Inserter.pasteFocus(.none, trusted: true, hasFrontmostApplication: true)
+        let result = m.handle(.cleanReady(s, landed, text: "Review this code.", failure: nil,
+                                         focus: before.matches(after) ? currentFocus : .none))
+        XCTAssertEqual(result.filter { if case .insertText = $0 { return true }; return false },
+                       [.insertText("Review this code.")])
+        XCTAssertTrue(result.contains(.hud(.done)))
+        XCTAssertFalse(result.contains(.hud(.savedToHistory)))
+    }
+
     func testDeferredSecureTargetDropsTextAndHistory() {
         let s = startDictation()
         let landed = pending(s)
