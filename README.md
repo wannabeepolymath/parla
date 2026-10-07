@@ -14,9 +14,13 @@ see [`linux/README.md`](linux/README.md) to build it and
 
 ## Running it
 
-Prerequisites: macOS 13.3+ and Xcode (or the Command Line Tools) with Swift
-5.9+. There's no Homebrew formula/cask or prebuilt binary — clone and build
-from source:
+Download `Parla-<version>.dmg` from the
+[latest release](https://github.com/wannabeepolymath/parla/releases/latest),
+open it, and drag Parla into Applications. It's signed and notarized, and runs
+on Apple silicon and Intel Macs with macOS 13.3+.
+
+To build from source instead you need Xcode (or the Command Line Tools) with
+Swift 5.9+:
 
 ```sh
 git clone https://github.com/wannabeepolymath/parla.git && cd parla
@@ -392,6 +396,24 @@ The `cleanup.model`/`cleanup.apiKeyEnvVar`/`cleanup.apiKey` fields apply to `ope
 swift build
 swift test
 ```
+
+### Releasing
+
+Needs a "Developer ID Application" certificate in the keychain. Once per Mac:
+
+```sh
+scripts/setup-notary.sh   # saves Apple notary credentials as "parla-notary"
+```
+
+Then, from a clean, committed tree:
+
+```sh
+scripts/release.sh v0.5.0               # tag, notarized universal DMG, draft GitHub release
+gh release edit v0.5.0 --draft=false    # after installing from the DMG and dictating once
+```
+
+`scripts/make-dmg.sh` is the build-and-notarize half on its own; the app's
+version always comes from the tag.
 
 ## Developer tooling
 

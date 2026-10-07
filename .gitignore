@@ -7,3 +7,4 @@ models/
 .env
 
 .parla-debug.log
+*.dmg
