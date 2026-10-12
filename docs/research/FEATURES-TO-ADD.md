@@ -98,7 +98,7 @@ Parla leads the entire corpus on insertion: it is the only project of 24 that ty
 
 **Live insertion into the target app.** Not never — but not before the fn-merge bug is understood (`main.swift:172-178`), the state machine is extracted, and the retype-byte metrics exist. pindrop's stop condition is the right bar and Parla cannot currently measure against it: *"If a streaming partial is ever pasted and then revised in a user's app → stop; fall back to insert-at-stop."* Parla's Linux never-send-BackSpace rule additionally makes commit-only typing mandatory rather than optional, which narrows the design further.
 
-**Sparkle, or any bundled auto-updater.** VoiceInk #760: updater processes still alive 10 days later, with `launchservicesd` growing +22 MB/hour. Parla's daily GitHub Releases check with a menu-bar link (already shipped) is the correct amount of updater for a menu-bar app.
+**Sparkle, or any bundled auto-updater.** VoiceInk #760: updater processes still alive 10 days later, with `launchservicesd` growing +22 MB/hour. Parla's daily GitHub Releases check with a menu-bar link (already shipped) is the correct amount of updater for a menu-bar app. *Superseded 2026-10-13: a one-click custom updater shipped instead of Sparkle — nothing installs without the click, it never interrupts a dictation, and nothing stays running after the relaunch (`docs/superpowers/specs/2026-10-13-in-app-updater-design.md`).*
 
 **Meetings, diarization, note-taking, a wiki, a "second brain."** The corpus is littered with dictation apps that grew these and got worse at dictation. Nothing in the audit suggests the users of any of them wanted this from a push-to-talk tool.
 
