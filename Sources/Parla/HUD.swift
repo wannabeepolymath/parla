@@ -91,7 +91,9 @@ final class HUD: @unchecked Sendable {
         // Borderless + clear background: macOS routes clicks straight through
         // fully transparent window pixels, so only the opaque pill (alpha 0.97)
         // catches them — the panel accepts events without stealing clicks nearby.
-        panel.ignoresMouseEvents = false
+        // Leave ignoresMouseEvents unset: that alpha pass-through only applies
+        // while it was never assigned. Setting it to false (or true) makes the
+        // whole 284×68 panel catch (or drop) every click regardless of alpha.
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
@@ -182,17 +184,20 @@ final class HUD: @unchecked Sendable {
         label.isHidden = true
         let target = (screen ?? currentScreen()).map { dockOrigin(idle: true, on: $0) }
         let frame = idlePillFrame(for: dockEdge)
+        let radius = min(idleBarSize.width, idleBarSize.height) / 2
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true // so cornerRadius morphs with the frame
                 pill.animator().frame = frame
+                pill.layer?.cornerRadius = radius
                 if let target { panel.animator().setFrame(NSRect(origin: target, size: panel.frame.size), display: true) }
             }
         } else {
             pill.frame = frame
+            pill.layer?.cornerRadius = radius
             if let target { panel.setFrameOrigin(target) }
         }
-        pill.layer?.cornerRadius = min(idleBarSize.width, idleBarSize.height) / 2
     }
 
     /// Expand to the full active pill. Animates (pill + panel origin) only when
@@ -207,14 +212,16 @@ final class HUD: @unchecked Sendable {
         if wasIdle {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.18
+                ctx.allowsImplicitAnimation = true // so cornerRadius morphs with the frame
                 pill.animator().frame = HUD.activePillFrame
+                pill.layer?.cornerRadius = 22
                 if let target { panel.animator().setFrame(NSRect(origin: target, size: panel.frame.size), display: true) }
             }
         } else {
             pill.frame = HUD.activePillFrame
+            pill.layer?.cornerRadius = 22
             if let target { panel.setFrameOrigin(target) }
         }
-        pill.layer?.cornerRadius = 22
     }
 
     /// Settle after a dictation: collapse to idle when always-on, else order out.
@@ -381,9 +388,10 @@ final class HUD: @unchecked Sendable {
         appIcon.isHidden = false
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
+            ctx.allowsImplicitAnimation = true // so cornerRadius morphs with the frame
             pill.animator().frame = chip
+            pill.layer?.cornerRadius = chipSide * 0.3
         }
-        pill.layer?.cornerRadius = chipSide * 0.3
     }
 
     /// Drop-target of a drag: pick the nearest edge, remember it + the offset,
@@ -412,10 +420,13 @@ final class HUD: @unchecked Sendable {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.45
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            if isIdle { pill.animator().frame = idlePillFrame(for: dockEdge) }
+            ctx.allowsImplicitAnimation = true // so cornerRadius morphs with the frame
+            if isIdle {
+                pill.animator().frame = idlePillFrame(for: dockEdge)
+                pill.layer?.cornerRadius = min(idleBarSize.width, idleBarSize.height) / 2
+            }
             panel.animator().setFrame(NSRect(origin: target, size: panel.frame.size), display: true)
         }
-        if isIdle { pill.layer?.cornerRadius = min(idleBarSize.width, idleBarSize.height) / 2 }
     }
 
     /// Screen the panel currently occupies (by its center), else the active
