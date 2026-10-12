@@ -80,14 +80,14 @@ final class HUD: @unchecked Sendable {
     }
 
     init() {
-        // Panel is larger than the pill so the lavender glow has room to render.
+        // Panel leaves a margin around the active pill; its clear pixels pass clicks through.
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 284, height: 68),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false // the pill's own glow is the only shadow
+        panel.hasShadow = false // flat: the ring is the pill's only edge
         // Borderless + clear background: macOS routes clicks straight through
         // fully transparent window pixels, so only the opaque pill (alpha 0.97)
         // catches them — the panel accepts events without stealing clicks nearby.
@@ -98,7 +98,7 @@ final class HUD: @unchecked Sendable {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         // Flow-bar look (docs/plan.md §Flow Bar): near-black capsule with a thin
-        // purple ring and soft lavender glow. Static colors in both appearances.
+        // purple ring. Static colors in both appearances.
         let container = NSView(frame: panel.contentView!.bounds)
         container.autoresizingMask = [.width, .height]
         pill.autoresizingMask = [.width, .height]
@@ -107,10 +107,6 @@ final class HUD: @unchecked Sendable {
         pill.layer?.cornerRadius = 22
         pill.layer?.borderWidth = 1
         pill.layer?.borderColor = NSColor(srgbRed: 0.635, green: 0.431, blue: 0.757, alpha: 0.6).cgColor // brand-700
-        pill.layer?.shadowColor = NSColor(srgbRed: 0.941, green: 0.843, blue: 1.0, alpha: 1).cgColor // brand-500 glow
-        pill.layer?.shadowOpacity = 0.45
-        pill.layer?.shadowRadius = 9
-        pill.layer?.shadowOffset = .zero
         container.addSubview(pill)
         panel.contentView = container
 
