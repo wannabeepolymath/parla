@@ -7,6 +7,8 @@ final class ClipboardDelivery {
     private let board: NSPasteboard
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private var pending: (snapshot: Snapshot, changeCount: Int)?
+    /// A restore is still owed. At most one: a second paste settles the first.
+    var isRestorePending: Bool { pending != nil }
 
     init(board: NSPasteboard = .general,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, action in

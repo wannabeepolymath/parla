@@ -64,9 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastModelUse = Date()
     var unloadTimer: Timer?
     let unloadPolicy = ModelUnloadPolicy.default
-    // Set by the once-a-day GitHub Releases check; nil until a newer release is
-    // found, then menuNeedsUpdate surfaces an "Update available" item.
-    var availableUpdate: UpdateCheck.Update?
+    // Discovery, the menu's update line and the install transaction.
+    lazy var updater = UpdateController(hud: hud, claimRestart: { [weak self] in
+        await self?.claimRestartIfSafe() ?? false
+    })
 
     // Hub: hubModel is cheap and touched at every launch (loadModel() sets
     // its modelLoaded below) — hubController, the window, is what's built
@@ -121,8 +122,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        updater.shouldTerminate()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         scratchpad.save() // flush a pending debounced edit
+        hubModel.flushPendingSave() // and a Hub edit still inside its debounce
+    }
+
+    /// Safe-to-restart, decided and claimed in one main-actor turn: no session,
+    /// the processTask chain drained (transcription, polish, delivery), and no
+    /// clipboard restore still owed. `isCapturing` alone is false through all
+    /// of those. On true, new dictations are refused until the relaunch.
+    @MainActor func claimRestartIfSafe() async -> Bool {
+        let chain = processTask
+        await chain?.value
+        guard processTask == chain, session.state == .idle, !Inserter.clipboardRestorePending,
+              hubModel.downloadingModel == nil else { return false } // a restart would kill the model download
+        updater.committing = true
+        return true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -183,6 +202,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("Parla: fn edge %@", "\(edge)")
             switch edge {
             case .down(let command):
+                // The app is being swapped out: the relaunch would cut this off.
+                guard !self.updater.committing else {
+                    self.hud.show(.notice("Updating Parla…"))
+                    return
+                }
                 guard self.axGranted else {
                     self.hud.show(.error("Enable Parla in System Settings → Privacy & Security → Accessibility"))
                     return
@@ -233,13 +257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkey.start()
 
-        // Convenience update check: once a day, off the main thread. nil version
-        // under `swift run` skips it. Never nags — just lights up a menu item.
-        Task {
-            if let update = await UpdateCheck.check(currentVersion: Self.appVersion) {
-                await MainActor.run { self.availableUpdate = update }
-            }
-        }
+        // Once a day, off the main thread. Never nags — it lights up a menu item.
+        updater.start()
     }
 
     /// The launch Apple event marks an SMAppService login-item start. Only
@@ -251,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// App version from the bundle's Info.plist (CFBundleShortVersionString).
-    /// nil under `swift run` (no bundle) so the update check skips.
+    /// nil under `swift run` (no bundle), which the update check reads as a failure.
     static var appVersion: String? {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
     }
@@ -287,6 +306,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// then flatten newlines where Return would fire: terminals run commands,
     /// chat apps (Slack, Discord, etc.) send the message.
     func insertStoredText(_ text: String) {
+        // Mid-swap: the relaunch would exit before this paste's clipboard restore.
+        guard !updater.committing else { return hud.show(.notice("Updating Parla…")) }
         // The ONE insertion path with no secure-field check otherwise: ⌃⌘V and
         // the history menu would type a stored transcript straight into a
         // password field — the single invariant the rest of the app never
@@ -522,10 +543,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(store.url)
     }
 
-    @objc func openUpdate() {
-        guard let update = availableUpdate else { return }
-        NSWorkspace.shared.open(update.url)
-    }
+    @objc func updateClicked() { updater.menuItemClicked() }
+    @objc func checkForUpdates() { updater.check(manual: true) }
 
     @objc func reportIssue() {
         NSWorkspace.shared.open(URL(string: "https://github.com/wannabeepolymath/parla/issues/new")!)

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build a signed, notarized, stapled Parla-<version>.dmg for a GitHub release.
+# Build a signed, notarized, stapled Parla-<version>.dmg (holding a notarized,
+# stapled Parla.app) for a GitHub release.
 # One-time setup: a "Developer ID Application" certificate in the keychain, and
 # scripts/setup-notary.sh. Usually run via scripts/release.sh, which tags first.
 set -euo pipefail
@@ -15,6 +16,13 @@ scripts/make-app.sh
 DMG="Parla-${TAG#v}.dmg"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
+# Notarize and staple the app itself first: the in-app updater mounts the DMG
+# programmatically, which never ingests the DMG's ticket, so the app copied out
+# of it must carry its own to launch cleanly offline. Same rejection rule as below.
+ditto -c -k --keepParent Parla.app "$STAGE/Parla.zip"
+xcrun notarytool submit "$STAGE/Parla.zip" --keychain-profile "$PROFILE" --wait
+xcrun stapler staple Parla.app
+rm "$STAGE/Parla.zip"
 cp -R Parla.app "$STAGE/"
 ln -s /Applications "$STAGE/Applications" # drag-to-install target
 rm -f "$DMG"

@@ -14,6 +14,8 @@ public enum Inserter {
     }
 
     private static let clipboard = ClipboardDelivery()
+    /// The last paste's clipboard restore hasn't run yet — not safe to restart.
+    public static var clipboardRestorePending: Bool { clipboard.isRestorePending }
 
     /// Deliver one native paste so rich editors receive the whole transcript,
     /// including paragraph breaks. The user's clipboard is restored afterwards.

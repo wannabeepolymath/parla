@@ -1,24 +1,48 @@
 import Foundation
 
 /// GitHub Releases update check. Pure version logic + a throttled fetch; the
-/// menu wiring in main.swift stays thin. Fails silently on any error (network,
-/// rate limit, no releases) — a convenience, never a nag or a crash.
+/// menu wiring in Updater.swift stays thin. A failure (network, rate limit, no
+/// releases) is an outcome, never a nag or a crash.
 public enum UpdateCheck {
     static let latestURL = URL(string: "https://api.github.com/repos/wannabeepolymath/parla/releases/latest")!
     static let releasesPage = URL(string: "https://github.com/wannabeepolymath/parla/releases/latest")!
     static let throttleKey = "Parla.updateCheck.lastDate"
 
+    /// Hidden override for the releases/latest URL, so two locally signed
+    /// builds can be tested against each other before anything is published.
+    static let feedURLKey = "Parla.updateCheck.feedURL"
+
     /// The subset of the releases/latest payload we care about.
     struct Release: Decodable {
         let tagName: String
         let htmlURL: String?
-        enum CodingKeys: String, CodingKey { case tagName = "tag_name", htmlURL = "html_url" }
+        let assets: [Asset]?
+        enum CodingKeys: String, CodingKey { case tagName = "tag_name", htmlURL = "html_url", assets }
+        struct Asset: Decodable {
+            let name: String
+            let downloadURL: String
+            enum CodingKeys: String, CodingKey { case name, downloadURL = "browser_download_url" }
+        }
     }
 
     /// A newer release to point the user at.
-    public struct Update: Sendable {
+    public struct Update: Equatable, Sendable {
         public let version: String // display form, e.g. "v0.2.0"
         public let url: URL
+        /// The release's `Parla-<version>.dmg`; nil ⇒ only the browser can update.
+        public let dmgURL: URL?
+    }
+
+    /// Only the manual check shows `.upToDate` and `.failed`; the scheduled one
+    /// stays silent on both.
+    public enum Outcome: Equatable, Sendable { case available(Update), upToDate, throttled, failed }
+
+    static func bare(_ tag: String) -> String { tag.hasPrefix("v") ? String(tag.dropFirst()) : tag }
+
+    /// The asset named exactly `Parla-<version>.dmg` — make-dmg.sh's name.
+    static func dmgURL(in release: Release) -> URL? {
+        let name = "Parla-\(bare(release.tagName)).dmg"
+        return release.assets?.first { $0.name == name }.flatMap { URL(string: $0.downloadURL) }
     }
 
     /// Numeric, component-wise: "0.10.0" > "0.9.0", "0.1" == "0.1.0". A leading
@@ -41,23 +65,28 @@ public enum UpdateCheck {
     }
 
     /// Fetch the latest release and decide if it's newer than `currentVersion`.
-    /// Throttled to once per 24h via UserDefaults; only a successful fetch
-    /// stamps the timestamp. Returns nil when up-to-date, unbundled (no version),
-    /// throttled, or on any failure.
-    public static func check(currentVersion: String?,
+    /// Throttled to once per 24h via UserDefaults unless `force` (the manual
+    /// check); only a successful fetch stamps the timestamp. Unbundled
+    /// (`swift run`, no version) reads as `.failed`.
+    public static func check(currentVersion: String?, force: Bool = false,
                              defaults: UserDefaults = .standard,
-                             now: Date = Date()) async -> Update? {
-        guard let currentVersion else { return nil } // unbundled `swift run`: skip
-        if let last = defaults.object(forKey: throttleKey) as? Date,
-           now.timeIntervalSince(last) < 24 * 60 * 60 { return nil }
-        var request = URLRequest(url: latestURL)
+                             now: Date = Date(),
+                             fetch: (URLRequest) async throws -> (Data, URLResponse) = {
+                                 try await URLSession.shared.data(for: $0)
+                             }) async -> Outcome {
+        guard let currentVersion else { return .failed }
+        if !force, let last = defaults.object(forKey: throttleKey) as? Date,
+           now.timeIntervalSince(last) < 24 * 60 * 60 { return .throttled }
+        let feed = defaults.string(forKey: feedURLKey).flatMap(URL.init(string:)) ?? latestURL
+        var request = URLRequest(url: feed)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await fetch(request),
               (response as? HTTPURLResponse)?.statusCode == 200,
-              let release = try? JSONDecoder().decode(Release.self, from: data) else { return nil }
+              let release = try? JSONDecoder().decode(Release.self, from: data) else { return .failed }
         defaults.set(now, forKey: throttleKey)
-        guard isNewer(remote: release.tagName, current: currentVersion) else { return nil }
-        let display = "v" + (release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName)
-        return Update(version: display, url: release.htmlURL.flatMap(URL.init(string:)) ?? releasesPage)
+        guard isNewer(remote: release.tagName, current: currentVersion) else { return .upToDate }
+        return .available(Update(version: "v" + bare(release.tagName),
+                                 url: release.htmlURL.flatMap(URL.init(string:)) ?? releasesPage,
+                                 dmgURL: dmgURL(in: release)))
     }
 }
