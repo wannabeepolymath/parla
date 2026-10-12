@@ -1,0 +1,7 @@
+{
+  "name": "parla",
+  "private": true,
+  "scripts": {
+    "release": "scripts/release.sh"
+  }
+}

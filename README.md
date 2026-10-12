@@ -406,21 +406,26 @@ swift test
 
 ### Releasing
 
-Needs a "Developer ID Application" certificate in the keychain. Once per Mac:
+Needs a "Developer ID Application" certificate in the keychain and `gh`
+logged in. Write the release notes as `release-notes/vX.Y.Z.md` (they become
+the release body; a changelog link is appended) and commit them on `main`.
+Then export the notary credentials and release:
 
 ```sh
-scripts/setup-notary.sh   # saves Apple notary credentials as "parla-notary"
+export APPLE_ID=you@example.com
+export APPLE_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx   # app-specific password from account.apple.com
+export APPLE_TEAM_ID=XXXXXXXXXX
+pnpm release check   # every check, nothing built or pushed
+pnpm release yes     # build, notarize, push, publish
+pnpm release         # same, but stop at a draft to test the DMG first
 ```
 
-Then, from a clean, committed tree:
-
-```sh
-scripts/release.sh v0.5.1               # tag, notarized universal DMG, draft GitHub release
-gh release edit v0.5.1 --draft=false    # after installing from the DMG and dictating once
-```
-
-The draft's notes are only GitHub's changelog link; write real ones (install,
-upgrade caveats, what changed) before publishing.
+The version is the one notes file newer than the last published release; pass
+it (`pnpm release 0.6.1 yes`) when there are several, or the script asks. A
+failed run can be re-run: a tag already on `HEAD` and a draft release are
+picked up where they stopped, and a stale tag or draft elsewhere is refused
+with the command that clears it. Without the exports, `scripts/make-dmg.sh`
+falls back to the keychain profile `scripts/setup-notary.sh` saves.
 
 `scripts/make-dmg.sh` is the build-and-notarize half on its own; the app's
 version always comes from the tag.
