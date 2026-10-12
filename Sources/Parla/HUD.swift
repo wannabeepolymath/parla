@@ -329,6 +329,12 @@ final class HUD: @unchecked Sendable {
             label.stringValue = "⚠️ \(msg)"
             panel.orderFrontRegardless()
             scheduleHide()
+        case .notice(let msg):
+            dot.isHidden = true
+            waveform.isHidden = true
+            label.stringValue = msg
+            panel.orderFrontRegardless()
+            scheduleHide()
         }
     }
 

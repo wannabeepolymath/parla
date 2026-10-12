@@ -17,10 +17,12 @@ extension AppDelegate: NSMenuDelegate {
         menu.addItem(scratchItem)
         menu.addItem(.separator())
 
-        if let update = availableUpdate {
-            let item = NSMenuItem(title: "Update available (\(update.version))…",
-                                   action: #selector(openUpdate), keyEquivalent: "")
+        // Install, the browser fallback, or the live progress line (disabled).
+        if let title = updater.menuTitle {
+            let item = NSMenuItem(title: title, action: updater.isBusy ? nil : #selector(updateClicked),
+                                   keyEquivalent: "")
             item.target = self
+            updater.liveItem = item
             menu.addItem(item)
             menu.addItem(.separator())
         }
@@ -67,6 +69,9 @@ extension AppDelegate: NSMenuDelegate {
         menu.addItem(launch)
         menu.addItem(.separator())
 
+        let check = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        check.target = self
+        menu.addItem(check)
         let report = NSMenuItem(title: "Report a Bug or Feature…", action: #selector(reportIssue), keyEquivalent: "")
         report.target = self
         menu.addItem(report)

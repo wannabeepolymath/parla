@@ -129,13 +129,13 @@ it; Parla stays menu-bar-only.
 from scratch every time it opens, so it only ever shows what is currently true:
 
 - **Open Scratchpad** (⌃⌘S).
-- **Update available (vX.Y.Z)…** — from a once-a-day GitHub Releases check. It lights up a menu item and nothing else; it never nags, and it fails silently offline.
+- **Install Update vX.Y.Z** — from a once-a-day GitHub Releases check. One click downloads the release, verifies its signature, waits for any dictation in flight to finish, swaps the app in place and relaunches; **Updating… 42%** and **Waiting for dictation to finish…** show where it is. Nothing downloads until you click. It never nags, and it fails silently offline. A build that can't update itself (a local build, or one run from the DMG or a read-only folder) shows **Update available (vX.Y.Z)…** instead, which opens the release page — as does any failed install.
 - **Download model (Base (English), 148 MB)** when no model is loaded, or a disabled **Downloading…** while one is in flight.
 - **⚠️ settings.json invalid** when the config fails to parse — click to open the file, hover for the decode error.
 - **Paste Last Dictation** (⌃⌘V) and a **Recent** submenu (last 8 dictations, backed by a local 50-entry history) with **Clear History** — see `historyEnabled` below.
 - Missing **Microphone**/**Accessibility** permissions, each a click away from the right System Settings pane. A permission that has been granted is not listed at all.
 - **Microphone** — pick the input device, or System Default.
-- **Launch at Login**, **Report a Bug or Feature…**, **Quit Parla**.
+- **Launch at Login**, **Check for Updates…** (checks now, and says so if you're up to date), **Report a Bug or Feature…**, **Quit Parla**.
 
 ### The Hub
 

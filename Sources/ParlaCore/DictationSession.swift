@@ -21,6 +21,7 @@ public enum HUDState: Equatable, Sendable {
     case rawFallback(String) // cleanup failed; raw transcript is final, with a safe reason
     case cancelled      // dictation aborted (key pressed while fn held)
     case error(String)
+    case notice(String) // informational, no ⚠️ ("You're up to date")
 }
 
 public enum MenuBarState: Equatable, Sendable { case idle, recording, busy, warning }
