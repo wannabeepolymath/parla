@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parla: say it messy, get it right. Dictation for the Mac.</title>
+  <meta name="description" content="Parla is dictation for your Mac. Hold fn, talk the way you talk, and the sentence you meant is typed into the app you're in. Transcribed on your Mac, free and open source.">
+  <meta property="og:title" content="Parla: say it messy, get it right">
+  <meta property="og:description" content="Hold fn, talk the way you talk, and the sentence you meant is typed into the app you're in.">
+  <meta name="theme-color" content="#1a1a1a">
+  <link rel="icon" href="assets/app-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Stack+Sans+Headline:wght@300;400&family=Stack+Sans+Text:wght@400;500&family=Caveat:wght@700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script>document.documentElement.classList.add('js')</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="hero" id="top">
+  <nav class="bar wrap" aria-label="Main">
+    <a class="wordmark" href="#top"><img src="assets/parla-mark.svg" alt="" width="18" height="20">Parla</a>
+    <ul class="bar-links">
+      <li><a class="link" href="#how">How it works</a></li>
+      <li><a class="link" href="#privacy">Privacy</a></li>
+      <li><a class="link nav-price" href="#price" aria-label="Price: free forever"><span aria-hidden="true">Price</span><svg class="nav-strike" viewBox="0 0 60 24" preserveAspectRatio="none" aria-hidden="true"><path d="M2 18 Q 26 3, 58 4"/></svg><span class="nav-free" aria-hidden="true">Free forever</span></a></li>
+      <li><a class="link" href="https://github.com/wannabeepolymath/parla">GitHub</a></li>
+    </ul>
+    <a class="button button-small" href="https://github.com/wannabeepolymath/parla/releases/latest">Download</a>
+  </nav>
+
+  <div class="hero-stage wrap" id="main">
+    <div class="hero-core">
+      <h1 class="hero-title lines">
+        <span class="line"><span data-line style="--i:0">Say it messy.</span></span>
+        <span class="line"><span data-line style="--i:1">Get it right.</span></span>
+      </h1>
+
+      <!-- The live thing: Parla's own pill. Hold it (or hold Space) to dictate. -->
+      <div class="chip chip-pill" data-ui data-rise style="--i:3">
+        <button class="pill" id="hero-pill" type="button" aria-describedby="pill-hint">
+          <span class="pill-dot" aria-hidden="true"></span>
+          <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="pill-label" id="pill-label">Hold to talk</span>
+        </button>
+        <p class="chip-said" id="pill-hint"><span class="hint-key">Press and hold, or hold <span class="key">Space</span></span><span class="hint-touch">Press and hold the pill</span></p>
+      </div>
+
+      <div class="chip chip-field" data-ui data-rise style="--i:4">
+        <p class="field-head"><span>#launch</span><span class="field-app">Slack</span></p>
+        <p class="field-text" id="hero-out" aria-live="polite">Can we move the review to six?</p>
+        <p class="field-said" id="hero-said">You said: “so um can we move the review to five, actually make it six”</p>
+      </div>
+
+      <div class="chip chip-switch" data-ui data-rise style="--i:5">
+        <span class="switch-name" id="cleanup-name">AI cleanup</span>
+        <button class="switch" id="hero-cleanup" type="button" role="switch" aria-checked="true" aria-labelledby="cleanup-name"><span></span></button>
+        <span class="switch-read" id="cleanup-read">On</span>
+      </div>
+    </div>
+
+    <div class="hero-foot">
+      <p class="hero-lead" data-rise style="--i:2">Parla is dictation for your Mac. Hold fn, talk the way you talk, and the sentence you meant is typed into the app you’re in.</p>
+      <p class="hero-actions" data-rise style="--i:3">
+        <a class="button" href="https://github.com/wannabeepolymath/parla/releases/latest">Download for Mac</a>
+        <span class="hero-note">Free and open source · macOS 13.3 or later</span>
+      </p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- Showcase: the headline is an input -->
+  <section class="section showcase wrap" id="try" aria-labelledby="try-title">
+    <h2 class="head" id="try-title" data-reveal>Type how you talk</h2>
+    <label class="sr-only" for="said">What you would say</label>
+    <div class="said-line" data-ui data-reveal>
+      <input id="said" class="said" type="text" autocomplete="off" spellcheck="false" value="so um let's meet at five, actually six">
+    </div>
+    <div class="answer" data-ui data-reveal>
+      <p class="answer-label">Parla types</p>
+      <p class="answer-text" id="answer" aria-live="polite">Let's meet at six.</p>
+    </div>
+    <div class="examples" data-reveal>
+      <p class="examples-label">Try one:</p>
+      <button type="button" class="example" data-say="okay three things first fix the login bug second update the docs third ship it">A list</button>
+      <button type="button" class="example" data-say="uh tell priya the build is green and um the notes are in the doc">Fillers</button>
+      <button type="button" class="example" data-say="can you send it on tuesday no wait wednesday">Second thoughts</button>
+    </div>
+    <p class="showcase-note small">This box runs a few simple rules in your browser. Parla itself hears you on your Mac and tidies the words with the AI model you choose.</p>
+  </section>
+
+  <!-- How it works -->
+  <section class="section how wrap" id="how" aria-labelledby="how-title">
+    <div class="how-col">
+      <h2 class="h-small" id="how-title" data-reveal>Hold, speak, let go</h2>
+
+      <div class="exchange" data-reveal>
+        <p class="ex-say">First, hold fn.</p>
+        <div class="call" data-ui><span class="keycap"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/><ellipse cx="8" cy="8" rx="2.8" ry="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M1.5 8h13" stroke="currentColor" stroke-width="1.3"/></svg>fn</span><span class="call-text">The Globe key, bottom left. Or any shortcut you set.</span></div>
+        <div class="response" data-ui>
+          <span class="pill pill-static is-live"><span class="pill-dot"></span><span class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="pill-label">Listening</span></span>
+        </div>
+      </div>
+
+      <div class="exchange" data-reveal>
+        <p class="ex-say">Then talk, ums and all.</p>
+        <div class="call" data-ui><p class="call-text">“hey sam um quick one, the deck for thursday is done, it's in the shared folder, uh let me know if the numbers on slide four look off”</p></div>
+        <div class="response" data-ui>
+          <span class="pill pill-static"><span class="pill-dot pill-dot-idle"></span><span class="pill-label pill-label-wide">Formatting…</span></span>
+        </div>
+      </div>
+
+      <div class="exchange exchange-last" data-reveal>
+        <p class="ex-say">Let go. It’s typed where you were.</p>
+        <div class="mail" data-ui>
+          <div class="mail-row"><span>To</span>Sam Okafor</div>
+          <div class="mail-row"><span>Subject</span>Thursday deck</div>
+          <div class="mail-body">
+            <p>Hi Sam,</p>
+            <p>Quick one: the deck for Thursday is done. It’s in the shared folder.</p>
+            <p>Let me know if the numbers on slide four look off.</p>
+          </div>
+          <p class="mail-toast"><span class="pill-dot pill-dot-ok"></span>Pasted · your clipboard is back as it was</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features: pinned output, live controls -->
+  <section class="features" id="features" aria-labelledby="features-title">
+    <div class="feat-stage">
+      <div class="feat-out" data-ui>
+        <div class="out-head">
+          <span class="out-app" id="out-app">Mail</span>
+          <span class="out-to" id="out-to">To: Priya Raman</span>
+        </div>
+        <div class="out-body" id="out-body" aria-live="polite"></div>
+        <p class="out-pill" id="out-pill"><span class="pill-dot pill-dot-ok"></span><span id="out-pill-text">Pasted</span></p>
+      </div>
+    </div>
+
+    <div class="feat-read wrap">
+      <h2 class="head-mid" id="features-title" data-reveal>Then make it yours</h2>
+
+      <div class="feat-block" data-reveal>
+        <h3 class="feat-say">Mail gets an email. Slack gets a message.</h3>
+        <p>Parla notices which app you’re in and shapes the text to fit: greetings and paragraphs in Mail and Gmail, a single line in a chat box. The app’s name never leaves your Mac.</p>
+        <div class="seg" role="radiogroup" aria-label="App you’re dictating into" data-ui data-control="app">
+          <button type="button" role="radio" aria-checked="true" data-value="mail">Mail</button>
+          <button type="button" role="radio" aria-checked="false" data-value="slack">Slack</button>
+        </div>
+      </div>
+
+      <div class="feat-block" data-reveal>
+        <h3 class="feat-say">Select it. Say what to change.</h3>
+        <p>Highlight any text, hold ⇧ and fn, and say what you want: shorter, friendlier, in Spanish. Parla rewrites the selection in place.</p>
+        <div class="seg seg-wrap" role="radiogroup" aria-label="Spoken instruction" data-ui data-control="command">
+          <button type="button" role="radio" aria-checked="true" data-value="none">As spoken</button>
+          <button type="button" role="radio" aria-checked="false" data-value="short">“Make it shorter”</button>
+          <button type="button" role="radio" aria-checked="false" data-value="warm">“Friendlier”</button>
+          <button type="button" role="radio" aria-checked="false" data-value="es">“In Spanish”</button>
+        </div>
+      </div>
+
+      <div class="feat-block" data-reveal>
+        <h3 class="feat-say">Names spelled your way.</h3>
+        <p>Add the words you say that a dictionary doesn’t know. When you fix one by hand right after Parla types it, Parla suggests adding it for you.</p>
+        <div class="toggle-row" data-ui>
+          <span id="dict-name">Dictionary: Priya, Kubernetes</span>
+          <button class="switch switch-light" type="button" role="switch" aria-checked="true" aria-labelledby="dict-name" data-control="dict"><span></span></button>
+        </div>
+      </div>
+
+      <div class="feat-block" data-reveal>
+        <h3 class="feat-say">Say a phrase, get the paragraph.</h3>
+        <p>Snippets turn a spoken trigger into the text you’d otherwise paste for the hundredth time.</p>
+        <div class="toggle-row" data-ui>
+          <span id="snip-name">Snippet: “my calendar link”</span>
+          <button class="switch switch-light" type="button" role="switch" aria-checked="true" aria-labelledby="snip-name" data-control="snip"><span></span></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Works in -->
+  <section class="section apps wrap" aria-labelledby="apps-title">
+    <h2 class="apps-title" id="apps-title">Types into</h2>
+    <ul class="apps-list" role="list">
+      <li>Mail</li><li>Slack</li><li>Notion</li><li>Cursor</li><li>VS Code</li><li>ChatGPT</li><li>Terminal</li>
+    </ul>
+  </section>
+
+  <!-- History: the subject's own world -->
+  <section class="section history wrap" id="history" aria-labelledby="history-title">
+    <div class="hist-top">
+      <div class="hist-text">
+        <h2 class="head" id="history-title" data-reveal>Dictation took two people</h2>
+        <p data-reveal>For most of a century, one person spoke into a machine and another put on headphones and typed it up, ums and all, then tidied it by hand.</p>
+        <p data-reveal>Parla does both jobs on your Mac, the moment you let go of the key.</p>
+      </div>
+      <figure class="hist-fig hist-fig-a" data-reveal>
+        <img src="assets/thomas-edison-watching-a-demonstration-of-the.jpg" width="1920" height="1555" alt="A typist with earphones transcribes from a wax-cylinder dictating machine while Thomas Edison watches, 1914." loading="lazy" decoding="async">
+        <figcaption>A typist transcribes from an Edison dictating machine, West Orange, 1914.</figcaption>
+      </figure>
+    </div>
+    <figure class="hist-band" data-reveal>
+      <div class="band-frame"><img src="assets/dictaphone-co-by-the-hudson-studio-397.jpg" width="1920" height="1492" alt="A long office of desks with typewriters and dictating machines, the Dictaphone Company in Brockton, Massachusetts." loading="lazy" decoding="async"></div>
+      <figcaption>A floor of typists and dictating machines, Dictaphone Co., Brockton, Massachusetts, early 1900s.</figcaption>
+    </figure>
+    <div class="hist-bottom">
+      <figure class="hist-fig hist-fig-b" data-reveal>
+        <img src="assets/cbs-listening-post-transcription-1941.jpg" width="1920" height="1236" alt="A woman wearing headphones types at a typewriter beside a bank of recording machines at the CBS listening post, 1941." loading="lazy" decoding="async">
+        <figcaption>Transcribing broadcasts from recordings, CBS listening post, 1941.</figcaption>
+      </figure>
+      <p class="hist-close" data-reveal>The typist now lives on your Mac, and it never tires of “um”.</p>
+    </div>
+  </section>
+
+  <!-- Privacy -->
+  <section class="section privacy" id="privacy" aria-labelledby="privacy-title">
+    <div class="wrap grid">
+      <div class="privacy-text">
+        <h2 class="head" id="privacy-title" data-reveal>Your voice stays here</h2>
+        <p data-reveal>Parla turns speech into text on your Mac. No account, no server of ours, no sync. The only thing that can leave is the text, and only if you turn on AI cleanup, to the provider you pick, on your own key.</p>
+        <p data-reveal>The AI is yours too. You can bring a key from Anthropic, OpenAI, Groq, Gemini or any OpenAI-compatible service, pick any model it offers, and switch whenever you like. The request goes straight from your Mac to them, with no middleman and no markup.</p>
+        <p data-reveal>Or run the model on your Mac with Ollama or LM Studio, and nothing leaves at all.</p>
+      </div>
+
+      <div class="ledger" data-ui data-reveal>
+        <div class="ledger-head">
+          <p class="ledger-title">What leaves your Mac</p>
+          <div class="seg seg-dark" role="radiogroup" aria-label="Cleanup provider">
+            <button type="button" role="radio" aria-checked="true" data-value="cloud">Anthropic</button>
+            <button type="button" role="radio" aria-checked="false" data-value="local">Ollama, on this Mac</button>
+          </div>
+        </div>
+        <table>
+          <caption class="sr-only">What leaves your Mac for each kind of data</caption>
+          <tbody>
+            <tr><th scope="row">Your voice</th><td class="no">Never</td><td>Transcribed on this Mac. The recording is deleted once the text is back.</td></tr>
+            <tr><th scope="row">The words</th><td class="yes" data-cloud="To Anthropic" data-local="Never">To Anthropic</td><td data-cloud="One request per dictation, on your key, for cleanup." data-local="Cleaned up by a model running on this Mac.">One request per dictation, on your key, for cleanup.</td></tr>
+            <tr><th scope="row">Which app you’re in</th><td class="no">Never</td><td>Turned into a tone hint on your Mac.</td></tr>
+            <tr><th scope="row">Password fields</th><td class="no">Never</td><td>Parla refuses to listen into them.</td></tr>
+            <tr><th scope="row">The AI and its key</th><td class="no">Yours</td><td>Any provider, any model, your own key. Change it any time.</td></tr>
+            <tr><th scope="row">An account</th><td class="no">None</td><td>There’s nothing to sign up for.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Price -->
+  <section class="section price wrap" id="price" aria-labelledby="price-title">
+    <div class="price-text">
+      <h2 class="head-mid" id="price-title" data-reveal>Free, and yours to read</h2>
+      <p data-reveal>Parla is open source under the AGPL. Transcription costs nothing because your Mac does it. AI cleanup is optional; your provider bills you for it directly, and Parla shows an estimate from your history.</p>
+    </div>
+    <div class="price-figure" data-reveal>
+      <p class="figure" aria-label="Zero dollars"><span class="figure-cur">$</span>0</p>
+      <span class="pill pill-static figure-pill" data-ui aria-hidden="true"><span class="pill-dot"></span><span class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="pill-label">Listening</span></span>
+      <ul class="included" role="list">
+        <li>Speech to text on your Mac, in English or, with the large model, 98 more languages</li>
+        <li>Command mode, dictionary and snippets</li>
+        <li>No account, no word limit</li>
+        <li>Signed and notarized, for Apple silicon and Intel</li>
+      </ul>
+      <a class="button" href="https://github.com/wannabeepolymath/parla/releases/latest">Download for Mac</a>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section faq wrap" id="faq" aria-labelledby="faq-title">
+    <div class="faq-list">
+      <h2 class="faq-title" id="faq-title">Fair questions</h2>
+      <ul class="qs" role="list">
+        <li><button type="button" class="q" aria-expanded="true" aria-controls="a1" id="q1">Does my audio leave my Mac?</button>
+          <div class="a" id="a1" role="region" aria-labelledby="q1"><p>No. Whisper runs on your Mac. A recording is kept on disk only until its transcript comes back, so a crash can’t lose what you said, then it’s deleted.</p></div></li>
+        <li><button type="button" class="q" aria-expanded="false" aria-controls="a2" id="q2">Do I need an AI key?</button>
+          <div class="a" id="a2" role="region" aria-labelledby="q2" hidden><p>No. Without one, Parla types exactly what Whisper heard. Add an Anthropic, OpenAI, Groq or Gemini key, or point it at Ollama or LM Studio, to get the cleaned-up sentence.</p></div></li>
+        <li><button type="button" class="q" aria-expanded="false" aria-controls="a3" id="q3">Which apps does it type into?</button>
+          <div class="a" id="a3" role="region" aria-labelledby="q3" hidden><p>Any text field you can paste into: mail, chat, docs, editors, terminals, ChatGPT. Parla checks you’re still in the same field before it types.</p></div></li>
+        <li><button type="button" class="q" aria-expanded="false" aria-controls="a4" id="q4">What about my clipboard?</button>
+          <div class="a" id="a4" role="region" aria-labelledby="q4" hidden><p>Parla borrows it for a moment to paste, then puts back everything that was there. If you copy something new in between, yours wins.</p></div></li>
+        <li><button type="button" class="q" aria-expanded="false" aria-controls="a5" id="q5">Which Macs does it run on?</button>
+          <div class="a" id="a5" role="region" aria-labelledby="q5" hidden><p>Apple silicon and Intel Macs on macOS 13.3 or later. It needs Microphone and Accessibility permission; the first launch walks you through both.</p></div></li>
+        <li><button type="button" class="q" aria-expanded="false" aria-controls="a6" id="q6">Windows, Linux, phones?</button>
+          <div class="a" id="a6" role="region" aria-labelledby="q6" hidden><p>The Mac app is the one to use today. Linux and Android versions are in the repository and still being tested on real hardware.</p></div></li>
+      </ul>
+    </div>
+    <div class="faq-pane" aria-hidden="true"><p id="faq-pane-text">No. Whisper runs on your Mac. A recording is kept on disk only until its transcript comes back, so a crash can’t lose what you said, then it’s deleted.</p></div>
+  </section>
+</main>
+
+<footer class="foot" aria-labelledby="foot-title">
+  <h2 class="sr-only" id="foot-title">About Parla</h2>
+  <div class="tiles">
+    <div class="tile tile-statement">
+      <p>Built in the open by Daksh. Read every line before you trust it with your voice.</p>
+      <p class="small">AGPL-3.0 · ParlaCore under MIT · © 2026. Archive photographs, public domain via Wikimedia Commons: <a class="link-plain" href="https://commons.wikimedia.org/wiki/File:Thomas_Edison_watching_a_demonstration_of_the_Edison_dictating_machine_and_Transophone._(3b7bafe0df9a4ab0baaa37a3f43cca5a).jpg">Edison dictating machine, 1914</a>, <a class="link-plain" href="https://commons.wikimedia.org/wiki/File:Dictaphone_Co.,_by_the_Hudson_Studio,_397_Copeland_Street,_Brockton,_Mass,_c._1880%E2%80%931910s,_from_the_Digital_Commonwealth_-_commonwealth_s1784s08b.jpg">Dictaphone Co. by Hudson Studio</a>, <a class="link-plain" href="https://commons.wikimedia.org/wiki/File:CBS-Listening-Post-Transcription-1941.jpg">CBS listening post, 1941</a>.</p>
+    </div>
+    <nav class="tile tile-nav" aria-label="Footer">
+      <ul role="list">
+        <li><a class="link" href="https://github.com/wannabeepolymath/parla">Source on GitHub</a></li>
+        <li><a class="link" href="https://github.com/wannabeepolymath/parla/releases">Release notes</a></li>
+        <li><a class="link" href="https://github.com/wannabeepolymath/parla/issues/new">Report a bug</a></li>
+        <li><a class="link" href="https://github.com/wannabeepolymath/parla/blob/main/LICENSE-COMMERCIAL.md">Commercial licence</a></li>
+      </ul>
+    </nav>
+    <div class="tile tile-release">
+      <p class="small">Latest release</p>
+      <p class="release" id="release">On GitHub</p>
+    </div>
+    <div class="tile tile-mail">
+      <p class="small">Write to</p>
+      <a class="link-plain mail-link" href="mailto:dakshjainn2004@gmail.com">dakshjainn2004@gmail.com</a>
+    </div>
+    <div class="tile tile-word"><p class="big-word" aria-hidden="true">Parla</p></div>
+    <a class="tile tile-go" href="https://github.com/wannabeepolymath/parla/releases/latest">
+      <span>Download for Mac</span>
+      <svg viewBox="0 0 48 48" width="56" height="56" aria-hidden="true"><path d="M10 38 38 10M16 10h22v22" fill="none" stroke="currentColor" stroke-width="4"/></svg>
+    </a>
+  </div>
+</footer>
+
+<script src="main.js" defer></script>
+</body>
+</html>
