@@ -14,8 +14,12 @@ private struct Atom {
     var type: String
     var prefix: Data = Data()
     var children: [Atom] = []
+    var extended = false
     var body: Data { children.reduce(prefix) { $0 + $1.bytes } }
-    var bytes: Data { be(UInt64(body.count + 8)) + Data(type.utf8) + body }
+    var bytes: Data {
+        extended ? be(1) + Data(type.utf8) + be(UInt64(body.count + 16), 8) + body
+                 : be(UInt64(body.count + 8)) + Data(type.utf8) + body
+    }
     var boxCount: Int { 1 + children.reduce(0) { $0 + $1.boxCount } }
 
     init(_ type: String, _ body: Data = Data(), _ children: [Atom] = []) {
@@ -33,6 +37,12 @@ private struct Atom {
     }
 }
 
+// Independently authored fixed bodies, not derived from production field readers.
+private func rollPair(packets: UInt64) -> [Atom] {
+    [Atom("sgpd", words(0x01000000) + Data("roll".utf8) + words(2, 1) + be(0xffff, 2)),
+     Atom("sbgp", words(0) + Data("roll".utf8) + words(1, packets, 1))]
+}
+
 private struct MovieOracle {
     var rate: UInt64 = 48_000
     var channels: UInt64 = 1
@@ -44,6 +54,7 @@ private struct MovieOracle {
     var movieExtra: [Atom] = []
     var extraPayload = 0
     var quickTime = false
+    var explicitRoll = false
     var audioEdit: ((inout Atom) -> Void)?
     var videoEdit: ((inout Atom) -> Void)?
     var movieEdit: ((inout Atom) -> Void)?
@@ -101,7 +112,7 @@ private struct MovieOracle {
                 Atom("stsc", words(0, 1, 1, count, 1)),
                 Atom("stsz", words(0, audio ? 2 : 1, count)),
                 Atom("stco", words(0, 1, audio ? payloadStart : videoStart))
-            ])
+            ] + (audio && explicitRoll ? rollPair(packets: packets) : []))
             let header = audio ? Atom("smhd", words(0, 0)) : Atom("vmhd", words(1, 0, 0))
             let mdia = Atom("mdia", Data(), [mdhd, hdlr, Atom("minf", Data(), [header, dinf, table])])
             var result = Atom("trak", Data(), [tkhd, mdia])
@@ -140,6 +151,7 @@ final class VideoImportStructureTests: XCTestCase {
         XCTAssertEqual(facts.audio.rate, 48_000)
         XCTAssertEqual(facts.audio.channels, 1)
         XCTAssertEqual(facts.audio.packetCount, 20)
+        XCTAssertEqual(facts.audio.delayDeclaration, .legacyUngrouped)
         XCTAssertEqual(facts.audio.packetDomainFrames, 20_480)
         XCTAssertEqual(facts.audio.declaredLeadingFrames, 1024)
         XCTAssertEqual(facts.audio.declaredTrailingFrames, 256)
@@ -454,6 +466,7 @@ final class VideoImportStructureTests: XCTestCase {
             oracle.audioEdit = { track in track.change(["mdia", "minf", "stbl", "stts"]) { $0.put(12, delta) } }
             refuses(oracle.bytes, .timing)
         }
+        // Empty/partial sgpd and sbgp still refuse; the exact paired roll form is tested below.
         for type in ["ctts", "cslg", "sbgp", "sgpd", "stz2", "saiz", "saio", "senc"] {
             var oracle = MovieOracle()
             oracle.audioEdit = { track in track.change(["mdia", "minf", "stbl"]) { $0.children.append(Atom(type)) } }
@@ -535,5 +548,313 @@ final class VideoImportStructureTests: XCTestCase {
             track.change(["mdia", "minf", "stbl"]) { $0.children.append(Atom("stss", words(0, 1, 1))) }
         }
         _ = try VideoImportStructure.inspect(leaf.bytes)
+    }
+
+    private func explicitOracle() -> MovieOracle {
+        var oracle = MovieOracle(); oracle.explicitRoll = true; return oracle
+    }
+
+    func testCanonicalExplicitRollCellsRemainDeclarations() throws {
+        for quickTime in [false, true] {
+            for rate in [UInt64(44_100), 48_000] {
+                for channels in [UInt64(1), 2] {
+                    var oracle = explicitOracle()
+                    oracle.quickTime = quickTime; oracle.rate = rate; oracle.channels = channels
+                    oracle.presentation = rate * 2 / 5
+                    let result = try VideoImportStructure.inspect(oracle.bytes)
+                    XCTAssertEqual(result.container, quickTime ? .quickTime : .mp4)
+                    XCTAssertEqual(result.audio.rate, Int(rate)); XCTAssertEqual(result.audio.channels, Int(channels))
+                    XCTAssertEqual(result.audio.delayDeclaration, .explicitConstantRollMinusOne)
+                    XCTAssertEqual(result.audio.packetDomainFrames, 20_480)
+                    XCTAssertEqual(result.audio.declaredLeadingFrames, 1024)
+                    XCTAssertEqual(result.audio.declaredPresentationFrames, Int64(rate * 2 / 5))
+                    XCTAssertEqual(result.audio.declaredTrailingFrames, Int64(19_456 - rate * 2 / 5))
+                    XCTAssertEqual(result.nativeEligibility, .notAdmittedAACDelayAndNativeTrimUnproven)
+                }
+            }
+        }
+    }
+
+    func testCanonicalScalarTupleSplitChunksAndIdentityVideo() throws {
+        var oracle = explicitOracle(); oracle.packets = 49; oracle.videoSamples = 30
+        oracle.leading = 2112; oracle.presentation = 48_000
+        let start = UInt64(oracle.atoms[0].bytes.count + 8)
+        oracle.audioEdit = { track in
+            track.change(["mdia", "minf", "stbl", "stsc"]) { $0.prefix = words(0, 2, 1, 46, 1, 2, 3, 1) }
+            track.change(["mdia", "minf", "stbl", "stco"]) { $0.prefix = words(0, 2, start, start + 92) }
+            track.change(["mdia", "minf", "stbl", "stsz"]) { box in
+                box.prefix = words(0, 0, 49) + (0..<49).reduce(Data()) { data, _ in data + be(2) }
+            }
+        }
+        oracle.videoEdit = { track in
+            track.change(["mdia", "mdhd"]) { $0.put(12, 600); $0.put(16, 600) }
+            track.change(["mdia", "minf", "stbl", "stts"]) { $0.put(12, 20) }
+            track.change(["mdia", "minf", "stbl", "stco"]) { $0.type = "co64"; $0.prefix = words(0, 1) + be(start + 98, 8) }
+            track.children.append(Atom("edts", Data(), [Atom("elst", words(0, 1, 48_000, 0, 0x10000))]))
+        }
+        var bytes = oracle.bytes
+        for i in 0..<128 { bytes[Int(start) + i] = UInt8(i + 1) }
+        let result = try VideoImportStructure.inspect(bytes)
+        XCTAssertEqual(result.audio.delayDeclaration, .explicitConstantRollMinusOne)
+        XCTAssertEqual(result.audio.packetCount, 49)
+        XCTAssertEqual(result.audio.packetDomainFrames, 50_176)
+        XCTAssertEqual(result.audio.declaredLeadingFrames, 2112)
+        XCTAssertEqual(result.audio.declaredPresentationFrames, 48_000)
+        XCTAssertEqual(result.audio.declaredTrailingFrames, 64)
+        XCTAssertEqual(result.audio.packets, (0..<49).map { (Int(start) + 2 * $0)..<(Int(start) + 2 * $0 + 2) })
+        XCTAssertEqual(result.video.samples, (0..<30).map { (Int(start) + 98 + $0)..<(Int(start) + 99 + $0) })
+        XCTAssertEqual(result.video.mediaInterval.start, 0)
+        XCTAssertEqual(result.video.mediaInterval.duration, 600)
+        XCTAssertEqual(result.video.mediaInterval.timescale, 600)
+        XCTAssertEqual(result.nativeEligibility, .notAdmittedAACDelayAndNativeTrimUnproven)
+        // These are canonical authored headers with the scalar tuple, never the retained real file.
+    }
+
+    func testExplicitRollNonzeroOriginsTrackIdentityAndOrdering() throws {
+        var oracle = explicitOracle()
+        oracle.movieEdit = { movie in
+            movie.children[1].change(["tkhd"]) { $0.put(12, 7) }
+            movie.children[2].change(["tkhd"]) { $0.put(12, 42) }
+            movie.children.swapAt(1, 2)
+        }
+        let original = oracle.bytes, start = oracle.atoms[0].bytes.count + 8
+        for prefix in [0, 1, 128] {
+            var backing = zeros(prefix) + original
+            let result = try VideoImportStructure.inspect(backing.dropFirst(prefix))
+            XCTAssertEqual(result.sourceBytes.startIndex, 0); XCTAssertEqual(result.sourceBytes, original)
+            XCTAssertEqual(result.audio.trackID, 7); XCTAssertEqual(result.video.trackID, 42)
+            XCTAssertEqual(result.audio.delayDeclaration, .explicitConstantRollMinusOne)
+            let audio = (0..<20).map { (start + 2 * $0)..<(start + 2 * $0 + 2) }
+            XCTAssertEqual(result.audio.packets, audio)
+            XCTAssertEqual(result.video.samples, [(start + 40)..<(start + 41)])
+            for range in result.mediaData + audio + result.video.samples {
+                XCTAssertEqual(Data(result.sourceBytes[range]), Data(original[range]))
+            }
+            backing[prefix + start] ^= 1; XCTAssertEqual(result.sourceBytes, original)
+        }
+    }
+
+    func testExplicitGroupExtendedHeadersAndUnsupportedBodies() throws {
+        var wide = explicitOracle()
+        wide.audioEdit = { track in
+            for type in ["sgpd", "sbgp"] {
+                track.change(["mdia", "minf", "stbl", type]) { $0.extended = true }
+            }
+        }
+        XCTAssertEqual(try VideoImportStructure.inspect(wide.bytes).audio.delayDeclaration, .explicitConstantRollMinusOne)
+        // The former blanket sgpd refusal now distinguishes the admitted known body from
+        // unsupported groups, rather than deleting the deliberate unsupported-group coverage.
+        let mutations: [(Int, UInt64, Int)] = [
+            (0, 0, 4), (0, 0x02000000, 4), (0, 0x01000001, 4), (4, 0x70726f6c, 4),
+            (8, 0, 4), (8, 1, 4), (8, 3, 4), (12, 0, 4), (12, 2, 4),
+            (16, 0, 2), (16, 1, 2), (16, 0xfffe, 2), (16, 0x8000, 2)
+        ]
+        for (offset, value, width) in mutations {
+            var oracle = explicitOracle()
+            oracle.audioEdit = { track in track.change(["mdia", "minf", "stbl", "sgpd"]) { $0.put(offset, value, width: width) } }
+            refuses(oracle.bytes, .unsupported)
+        }
+        for type in ["sgpd", "sbgp"] {
+            for extra in [false, true] {
+                var oracle = explicitOracle()
+                oracle.audioEdit = { track in track.change(["mdia", "minf", "stbl", type]) { box in
+                    if extra { box.prefix.append(0) } else { box.prefix.removeLast() }
+                } }
+                refuses(oracle.bytes, .malformed)
+            }
+        }
+    }
+
+    func testExplicitMembershipVersionsCountsAndReferencesRefuse() {
+        let mutations: [(Int, UInt64)] = [
+            (0, 0x01000000), (0, 1), (4, 0x70726f6c), (8, 0), (8, 2),
+            (12, 0), (12, 19), (12, 21), (12, UInt64(UInt32.max)),
+            (16, 0), (16, 2), (16, 0x10001)
+        ]
+        for (offset, value) in mutations {
+            var oracle = explicitOracle()
+            oracle.audioEdit = { track in track.change(["mdia", "minf", "stbl", "sbgp"]) { $0.put(offset, value) } }
+            refuses(oracle.bytes, .unsupported)
+        }
+        var split = explicitOracle()
+        split.audioEdit = { track in track.change(["mdia", "minf", "stbl", "sbgp"]) {
+            $0.prefix = words(0) + Data("roll".utf8) + words(2, 10, 1, 10, 1)
+        } }
+        refuses(split.bytes, .malformed)
+    }
+
+    func testExplicitPairsAreRequiredSingletonsAndAudioOnly() {
+        for type in ["sgpd", "sbgp"] {
+            var missing = explicitOracle()
+            missing.audioEdit = { track in track.change(["mdia", "minf", "stbl"]) { $0.children.removeAll { $0.type == type } } }
+            refuses(missing.bytes, .unsupported) // no legacy fallback
+            var duplicate = explicitOracle()
+            duplicate.audioEdit = { track in track.change(["mdia", "minf", "stbl"]) { table in
+                table.children.append(rollPair(packets: 20)[type == "sgpd" ? 0 : 1])
+            } }
+            refuses(duplicate.bytes, .malformed)
+        }
+        for location in [0, 1, 2] {
+            var wrong = MovieOracle()
+            let pair = rollPair(packets: 20)
+            if location == 0 { wrong.audioExtra = pair }
+            if location == 1 {
+                wrong.videoEdit = { track in track.change(["mdia", "minf", "stbl"]) { $0.children += pair } }
+            }
+            if location == 2 {
+                wrong.audioEdit = { track in track.change(["mdia", "minf", "stbl", "stsd", "mp4a"]) { $0.children += pair } }
+            }
+            refuses(wrong.bytes, .unsupported)
+        }
+    }
+
+    func testExplicitPredecessorSignednessAndLeadingBounds() throws {
+        for raw in [UInt64(0xffffffff), 0x80000000, 0, 1023, 16_385] {
+            var oracle = explicitOracle(); oracle.packets = raw == 16_385 ? 36 : 20; oracle.leading = raw
+            refuses(oracle.bytes, .timing)
+        }
+        for (packets, leading, trailing) in [(UInt64(20), UInt64(1024), Int64(256)), (35, 16_384, 256)] {
+            var oracle = explicitOracle(); oracle.packets = packets; oracle.leading = leading
+            let audio = try VideoImportStructure.inspect(oracle.bytes).audio
+            XCTAssertEqual(audio.declaredLeadingFrames, Int64(leading))
+            XCTAssertEqual(audio.declaredTrailingFrames, trailing)
+        }
+        var legacy = MovieOracle(); legacy.leading = 0
+        XCTAssertEqual(try VideoImportStructure.inspect(legacy.bytes).audio.delayDeclaration, .legacyUngrouped)
+        legacy.explicitRoll = true; refuses(legacy.bytes, .timing)
+    }
+
+    func testExplicitTrailingPresentationAndUsedBoundaries() throws {
+        // Equations are authored independently: P*1024=L+N+T.
+        let positives: [(UInt64, UInt64, UInt64, Int64)] = [
+            (20, 1280, 19_200, 0), (36, 1280, 19_200, 16_384),
+            (28_126, 1024, 28_800_000, 0)
+        ]
+        for (packets, leading, presentation, trailing) in positives {
+            var oracle = explicitOracle(); oracle.packets = packets; oracle.leading = leading
+            oracle.presentation = presentation
+            let audio = try VideoImportStructure.inspect(oracle.bytes).audio
+            XCTAssertEqual(audio.declaredPresentationFrames, Int64(presentation))
+            XCTAssertEqual(audio.declaredTrailingFrames, trailing)
+        }
+        let negatives: [(UInt64, UInt64, UInt64)] = [
+            (36, 1279, 19_200), (20, 1281, 19_200), // T=16385, used=U+1
+            (20, 1024, 19_199), (28_127, 1024, 28_800_001)
+        ]
+        for (packets, leading, presentation) in negatives {
+            var oracle = explicitOracle(); oracle.packets = packets; oracle.leading = leading
+            oracle.presentation = presentation; refuses(oracle.bytes, .timing)
+        }
+    }
+
+    func testExplicitRationalMovieConversionAndIdentityEdit() throws {
+        var exact = explicitOracle()
+        // Movie 400/1000 s, audio 19200/48000 s, video 240/600 s.
+        exact.movieEdit = { movie in
+            movie.change(["mvhd"]) { $0.put(12, 1000); $0.put(16, 400) }
+            movie.children[1].change(["tkhd"]) { $0.put(20, 400) }
+            movie.children[1].change(["edts", "elst"]) { $0.put(8, 400) }
+            movie.children[2].change(["tkhd"]) { $0.put(20, 400) }
+            movie.children[2].change(["mdia", "mdhd"]) { $0.put(12, 600); $0.put(16, 240) }
+            movie.children[2].change(["mdia", "minf", "stbl", "stts"]) { $0.put(12, 240) }
+            movie.children[2].children.append(Atom("edts", Data(), [Atom("elst", words(0, 1, 400, 0, 0x10000))]))
+        }
+        let result = try VideoImportStructure.inspect(exact.bytes)
+        XCTAssertEqual(result.audio.declaredPresentationFrames, 19_200)
+        XCTAssertEqual(result.video.mediaInterval.timescale, 600)
+        for scale in [UInt64(1001), UInt64(UInt32.max)] {
+            var mismatch = exact
+            let previous = exact.movieEdit
+            mismatch.movieEdit = { movie in previous?(&movie); movie.change(["mvhd"]) { $0.put(12, scale) } }
+            refuses(mismatch.bytes, .timing)
+        }
+    }
+
+    func testVideoIdentityOnlyAndAudioEditShapeRefuse() throws {
+        var identity = explicitOracle()
+        identity.videoEdit = { $0.children.append(Atom("edts", Data(), [Atom("elst", words(0, 1, 19_200, 0, 0x10000))])) }
+        let absent = try VideoImportStructure.inspect(explicitOracle().bytes)
+        let present = try VideoImportStructure.inspect(identity.bytes)
+        XCTAssertEqual(absent.video, present.video)
+        for (offset, value) in [(0, UInt64(0x01000000)), (4, 0), (4, 2), (8, 19_199),
+                                (12, 1), (12, 0xffffffff), (12, 0x80000000), (16, 0), (16, 0x20000), (16, 0xffff0000)] {
+            var oracle = identity
+            oracle.videoEdit = { track in
+                track.children.append(Atom("edts", Data(), [Atom("elst", words(0, 1, 19_200, 0, 0x10000))]))
+                track.change(["edts", "elst"]) { $0.put(offset, value) }
+            }
+            refuses(oracle.bytes)
+        }
+        for extra in [Atom("elst", words(0, 1, 19_200, 0, 0x10000)), Atom("zzzz")] {
+            var oracle = identity
+            oracle.videoEdit = { $0.children.append(Atom("edts", Data(), [Atom("elst", words(0, 1, 19_200, 0, 0x10000)), extra])) }
+            refuses(oracle.bytes)
+        }
+        for (offset, value) in [(0, UInt64(0x01000000)), (4, 0), (4, 2), (8, 19_199), (16, 0), (16, 0x20000), (16, 0xffff0000)] {
+            var oracle = explicitOracle()
+            oracle.audioEdit = { track in track.change(["edts", "elst"]) { $0.put(offset, value) } }
+            refuses(oracle.bytes)
+        }
+        var missing = explicitOracle(); missing.audioEdit = { $0.children.removeAll { $0.type == "edts" } }
+        refuses(missing.bytes, .timing)
+    }
+
+    func testExplicitWorkIncludesScalarCoverageAndNewBoxes() throws {
+        var oracle = explicitOracle(); oracle.videoSamples = 65_502
+        // Audio 3*20+5=65; video 2*65502+3=131007; sum=131072.
+        _ = try VideoImportStructure.inspect(oracle.bytes)
+        oracle.videoEdit = { track in track.change(["mdia", "minf", "stbl"]) { $0.children.append(Atom("stss", words(0, 1, 1))) } }
+        refuses(oracle.bytes, .workLimit)
+        var extraSample = explicitOracle(); extraSample.videoSamples = 65_503
+        refuses(extraSample.bytes, .workLimit)
+        var boxes = explicitOracle()
+        boxes.videoEdit = { $0.children.append(Atom("edts", Data(), [Atom("elst", words(0, 1, 19_200, 0, 0x10000))])) }
+        let atoms = boxes.atoms, bytes = boxes.bytes
+        let count = atoms.reduce(0) { $0 + $1.boxCount }
+        let padding = (0..<(4096 - count)).reduce(Data()) { data, _ in data + Atom("free").bytes }
+        _ = try VideoImportStructure.inspect(bytes + padding)
+        refuses(bytes + padding + Atom("free").bytes, .boxLimit)
+    }
+
+    func testExplicitGroupsCannotRepairContradictoryTables() {
+        let changes: [([String], Int, UInt64)] = [
+            (["stsz"], 8, 19), (["stts"], 8, 19), (["stsc"], 12, 19), (["stco"], 8, 0)
+        ]
+        for (path, offset, value) in changes {
+            var oracle = explicitOracle()
+            oracle.audioEdit = { track in track.change(["mdia", "minf", "stbl"] + path) { $0.put(offset, value) } }
+            refuses(oracle.bytes)
+        }
+    }
+
+    func testQ5CompatibilityFormsRemainRefusedWithValidRoll() {
+        for flags in [UInt64(1), 7] {
+            var oracle = explicitOracle()
+            oracle.audioEdit = { track in track.change(["tkhd"]) { $0.put(0, flags) } }
+            refuses(oracle.bytes, .unsupported)
+        }
+        let esds = ["mdia", "minf", "stbl", "stsd", "mp4a", "esds"]
+        // Authored descriptor byte offsets: ES_ID at 6, ES flags at 8, stream byte at 12.
+        for (offset, value, width) in [(6, UInt64(0), 2), (12, 0x14, 1), (8, 0x80, 1), (8, 0x40, 1), (8, 0x20, 1)] {
+            var oracle = explicitOracle()
+            oracle.audioEdit = { track in track.change(esds) { $0.put(offset, value, width: width) } }
+            refuses(oracle.bytes)
+        }
+        var channels = explicitOracle()
+        channels.audioEdit = { track in track.change(["mdia", "minf", "stbl", "stsd", "mp4a"]) { $0.put(16, 2, width: 2) } }
+        refuses(channels.bytes, .format)
+        for leaf in [Atom("fiel", Data([1, 0])), Atom("pasp", words(1, 1)), Atom("chrm", Data([0, 0])), Atom("zzzz")] {
+            var oracle = explicitOracle()
+            oracle.videoEdit = { track in track.change(["mdia", "minf", "stbl", "stsd", "avc1"]) { $0.children.append(leaf) } }
+            refuses(oracle.bytes, .unsupported)
+        }
+        for leaf in [Atom("sdtp", words(0) + Data([0x20])), Atom("ctts"), Atom("cslg")] {
+            var oracle = explicitOracle()
+            oracle.videoEdit = { track in track.change(["mdia", "minf", "stbl"]) { $0.children.append(leaf) } }
+            refuses(oracle.bytes, .unsupported)
+        }
+        var descriptor = explicitOracle()
+        descriptor.audioEdit = { track in track.change(esds) { $0.prefix += Data([0x14, 0]) } }
+        refuses(descriptor.bytes, .malformed)
     }
 }

@@ -22,12 +22,19 @@ public enum VideoImportStructure {
         }
     }
 
+    /// Closed container declarations only; neither case proves encoder delay or native trimming.
+    public enum AACDelayDeclaration: Equatable, Sendable {
+        case legacyUngrouped
+        case explicitConstantRollMinusOne
+    }
+
     public struct Audio: Equatable, Sendable {
         public let trackID: UInt32
         public let rate: Int
         public let channels: Int
         public let packetCount: Int
         public let packetDomainFrames: Int64
+        public let delayDeclaration: AACDelayDeclaration
         /// Container-declared edit arithmetic, NOT verified encoder priming or decoded PCM counts.
         public let declaredLeadingFrames: Int64
         public let declaredTrailingFrames: Int64
@@ -37,11 +44,11 @@ public enum VideoImportStructure {
         public let packets: [Range<Int>]
         fileprivate init(trackID: UInt32, rate: Int, channels: Int, packetCount: Int, packetDomainFrames: Int64,
                          declaredLeadingFrames: Int64, declaredTrailingFrames: Int64, declaredPresentationFrames: Int64,
-                         mediaInterval: Interval, packets: [Range<Int>]) {
+                         mediaInterval: Interval, packets: [Range<Int>], delayDeclaration: AACDelayDeclaration) {
             self.trackID = trackID; self.rate = rate; self.channels = channels; self.packetCount = packetCount
             self.packetDomainFrames = packetDomainFrames; self.declaredLeadingFrames = declaredLeadingFrames
             self.declaredTrailingFrames = declaredTrailingFrames; self.declaredPresentationFrames = declaredPresentationFrames
-            self.mediaInterval = mediaInterval; self.packets = packets
+            self.mediaInterval = mediaInterval; self.packets = packets; self.delayDeclaration = delayDeclaration
         }
     }
 
@@ -104,6 +111,7 @@ public enum VideoImportStructure {
         let presentation: Int64
         let leading: Int64
         let trailing: Int64
+        let delayDeclaration: AACDelayDeclaration
         let samples: [Range<Int>]
     }
 
@@ -236,7 +244,7 @@ public enum VideoImportStructure {
                               declaredLeadingFrames: audio.leading, declaredTrailingFrames: audio.trailing,
                               declaredPresentationFrames: audio.presentation,
                               mediaInterval: Interval(start: audio.leading, duration: audio.presentation, timescale: audio.scale),
-                              packets: audio.samples)
+                              packets: audio.samples, delayDeclaration: audio.delayDeclaration)
             return Projection(sourceBytes: source, container: container, mediaData: mdats, audio: facts,
                               video: Video(trackID: video.id, mediaInterval: Interval(start: 0, duration: video.duration,
                                                                                     timescale: video.scale), samples: video.samples),
@@ -297,11 +305,15 @@ public enum VideoImportStructure {
             }
             try references(try only(minf, "dinf"))
             let stbl = try children(try only(minf, "stbl"), depth: 6,
-                                    required: ["stsd", "stts", "stsc", "stsz"], optional: ["stco", "co64", "stss"])
+                                    required: ["stsd", "stts", "stsc", "stsz"],
+                                    optional: audio ? ["stco", "co64", "stss", "sgpd", "sbgp"] : ["stco", "co64", "stss"])
             let (rate, channels) = try description(try only(stbl, "stsd"), audio: audio)
             guard !audio || scale == Int64(rate) else { throw Failure.timing }
             if !audio {
-                guard c["edts"] == nil, try exactScale(duration, from: scale, to: movieScale) == movieDuration else {
+                guard try exactScale(duration, from: scale, to: movieScale) == movieDuration else {
+                    throw Failure.timing
+                }
+                if let edit = c["edts"], try editStart(edit, movieDuration: movieDuration) != 0 {
                     throw Failure.timing
                 }
             }
@@ -315,6 +327,8 @@ public enum VideoImportStructure {
             sampleCount += count
             try timing(try only(stbl, "stts"), count: count, duration: duration, audio: audio)
             let ranges = try extents(stbl, sizes: s, fixed: fixed, count: count)
+            // stsz, stts and stsc/extent totals independently agree before group coverage.
+            let declaration = try audioGroups(stbl, count: count)
             if let sync = stbl["stss"] {
                 guard !audio else { throw Failure.unsupported }
                 let entries = try table(sync, width: 4)
@@ -330,11 +344,9 @@ public enum VideoImportStructure {
                 // An explicit single edit is required even for a zero declared trim. Missing delay
                 // structures are never converted into an assertion that priming is zero.
                 guard let edit = c["edts"] else { throw Failure.timing }
-                let edits = try children(edit, depth: 4, required: ["elst"])
-                let elst = try only(edits, "elst"), e = try full(elst, length: 20)
-                guard u32(e + 4) == 1, Int64(u32(e + 8)) == movieDuration,
-                      u32(e + 12) <= 16_384, u32(e + 16) == 0x10000 else { throw Failure.timing }
-                leading = Int64(u32(e + 12))
+                leading = try editStart(edit, movieDuration: movieDuration)
+                guard leading <= 16_384,
+                      declaration != .explicitConstantRollMinusOne || leading >= 1024 else { throw Failure.timing }
                 presentation = try exactScale(movieDuration, from: movieScale, to: scale)
                 let used = try add(leading, presentation)
                 guard used <= duration else { throw Failure.timing }; trailing = duration - used
@@ -342,7 +354,31 @@ public enum VideoImportStructure {
                       presentation <= Int64(rate) * 600 else { throw Failure.timing }
             }
             return Track(id: id, audio: audio, rate: rate, channels: channels, scale: scale, duration: duration,
-                         presentation: presentation, leading: leading, trailing: trailing, samples: ranges)
+                         presentation: presentation, leading: leading, trailing: trailing, delayDeclaration: declaration, samples: ranges)
+        }
+
+        func editStart(_ box: Box, movieDuration: Int64) throws -> Int64 {
+            let edits = try children(box, depth: 4, required: ["elst"])
+            let elst = try only(edits, "elst"), e = try full(elst, length: 20)
+            let start = Int64(Int32(bitPattern: u32(e + 12)))
+            guard u32(e + 4) == 1, Int64(u32(e + 8)) == movieDuration,
+                  start >= 0, u32(e + 16) == 0x10000 else { throw Failure.timing }
+            return start
+        }
+
+        func audioGroups(_ c: [String: Box], count: Int) throws -> AACDelayDeclaration {
+            guard c["sgpd"] != nil || c["sbgp"] != nil else { return .legacyUngrouped }
+            // Presence of either half commits to the explicit grammar; never fall back.
+            guard let description = c["sgpd"], let membership = c["sbgp"] else { throw Failure.unsupported }
+            let d = try full(description, length: 18, flags: 0x01000000)
+            let m = try full(membership, length: 20)
+            guard tag(d + 4) == "roll", u32(d + 8) == 2, u32(d + 12) == 1,
+                  Int16(bitPattern: UInt16(u16(d + 16))) == -1,
+                  tag(m + 4) == "roll", u32(m + 8) == 1,
+                  Int(u32(m + 12)) == count, u32(m + 16) == 1 else { throw Failure.unsupported }
+            try charge(2) // one description and one membership row
+            try charge(count) // logical membership coverage, even though no array is needed
+            return .explicitConstantRollMinusOne
         }
 
         func references(_ box: Box) throws {

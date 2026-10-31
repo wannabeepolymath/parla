@@ -31,23 +31,70 @@ the movie duration and convert to a whole number of audio frames. If packet coun
 P, the declared packet domain is U=P*1024. The edit's nonnegative media start is L,
 its exact mapped duration is N, and T=U-L-N. Require L and T each <=16,384, N between
 rate*2/5 and rate*600, and no negative/empty/repeated/scaled edit, rounding or
-composition offsets. Video has no edit, and its entire positive decode timeline must
-map exactly to the same movie duration. Track header durations must agree too.
+composition offsets. Video permits an absent edit or exactly one version-zero, flags-zero, unit-rate
+identity edit with signed media start zero and duration equal to the movie and track
+header durations. Its entire positive decode timeline must map exactly to that movie
+duration. No clipping or composition offsets are admitted.
 
 These are **container-declared** trims and frame counts. They are not verified encoder
 delay, original recording length, accepted decoded presentation frames, or instructions
 to discard samples. Even an explicit zero trim does not prove zero encoder delay.
 All successful projections carry only
 `notAdmittedAACDelayAndNativeTrimUnproven`; there is no eligible case or caller-supplied
-metadata enum that can authorize native decoding. Complete explicit AAC encoder-delay
-sample groups and the selected reader's exact trim/count/timestamp equivalence remain
-unproved. Sample-group variants refuse rather than being partially interpreted.
+metadata enum that can authorize native decoding. The selected reader's exact trim/count/timestamp and waveform equivalence remain
+unproved, including for the explicit declaration below. Unsupported sample-group
+variants refuse rather than being partially interpreted.
 
 A future reader must separately establish that missing proof, agree with the raw
 track/config/extent/timing declarations, validate the actual packets and all returned
 formats/PCM, and verify full EOF/cardinality and native lifetime. Snapshot ownership,
 storage migration, async admission and cancellation barriers require separate work.
 This API has no downstream native hook and supplies no permission to construct one.
+
+## Explicit constant-roll declarations
+
+`audio.delayDeclaration` is a closed fact: `legacyUngrouped` when both group atoms
+are absent, or `explicitConstantRollMinusOne` for the exact form below. Existing
+`inspect(Data)` calls and byte/range conventions are unchanged. Legacy success
+retains its existing L>=0 arithmetic; it does not infer zero priming or a missing
+roll description. Presence of either group commits to the explicit form. A partial,
+invalid, duplicate or unsupported pair refuses without falling back to legacy.
+
+Only the audio `stbl` may contain singleton `sgpd` and `sbgp` atoms:
+
+- `sgpd`: body exactly 18 bytes; version 1, flags 0; ASCII `roll`;
+  default_length 2; entry_count 1; signed big-endian Int16 roll_distance -1.
+- `sbgp`: body exactly 20 bytes; version 0, flags 0; ASCII `roll`;
+  entry_count 1; one row `(sample_count=P, group_description_index=1)`.
+  Version 0 has no grouping_type_parameter or default_length field.
+
+P must independently agree with `stsz`, expanded `stts` and `stsc`/extent totals.
+Coverage includes all stored packets, even those before the presentation start.
+For this explicit form require 1024<=L<=16384, 0<=T<=16384 and
+rate*2/5<=N<=rate*600, with U=P*1024, U=L+N+T and exact reduced rational mapping
+from the movie duration to N. Signed negative edit times refuse before range checks.
+The first selected one-based packet is floor(L/1024)+1; L>=1024 supplies its stored
+predecessor. L may lie inside a packet. Roll is a dependency measured in packets,
+not a PCM trim, a proof of encoder delay, or an instruction to drop a packet.
+
+This deliberately restricted representation draws on Apple's
+[explicit encoder-delay description](https://developer.apple.com/documentation/quicktime-file-format/using_track_structures_to_represent_encode_delay_explictly),
+[sample-group description](https://developer.apple.com/documentation/quicktime-file-format/sample_group_description_atom),
+[sample-to-group atom](https://developer.apple.com/documentation/quicktime-file-format/sample-to-group_atom)
+and [complete roll/edit summary](https://developer.apple.com/documentation/quicktime-file-format/summary_using_track_structures_to_represent_encoder_delay).
+The retained design review also pins the version-zero membership layout against the
+[FFmpeg 7 writer](https://github.com/FFmpeg/FFmpeg/blob/n7.0/libavformat/movenc.c#L2798);
+the general membership documentation's default-length row is not used to insert an
+extra field. These are retained design inputs, not a new normative review or decoder
+qualification. L>=1024 and the finite trim/duration bounds are product constraints.
+
+Only Q1–Q4 of the adopted design are represented here. Q5 is expressly excluded:
+flags 1, sample-entry/ASC channel mismatch, ES_ID 0, decoder stream byte 0x14,
+extra descriptors and `fiel`/`pasp`/`chrm`/`sdtp` remain refused. Other unknown atoms,
+versions, flags, grouping types/distances, split membership and configurations still
+refuse. The retained observed public file remains outside the whole-file grammar.
+The canonical synthetic P49/L2112/N48000/T64 test does not admit that real file or
+establish decoder-safe audio, MOV support, or native eligibility.
 
 ## Closed grammar
 
@@ -59,10 +106,11 @@ name are inert leaf fields, never references. Accepted nesting is:
 ```text
 file: ftyp, moov, one or more nonempty mdat, optional free/skip
 moov: mvhd, exactly two trak (one soun, one vide)
-trak: tkhd, mdia, audio-only edts/elst
+trak: tkhd, mdia, required audio edts/elst, optional identity-only video edts/elst
 mdia: mdhd, hdlr, minf
 minf: smhd or vmhd, dinf/dref/url , stbl
 stbl: stsd, stts, stsc, stsz, exactly one stco or co64, video-only optional stss
+      audio-only optional exact paired sgpd/sbgp (both or neither)
 stsd: exactly one mp4a/esds (audio) or avc1/avcC (video)
 ```
 
@@ -101,11 +149,14 @@ LC configuration are checked. No LPCM fallback is substituted.
 | All non-mdat-payload bytes, including padding and headers | 2 MiB |
 | Each audio/video configuration box body | 4096 bytes |
 | Declared samples summed across both tracks | 131,072 |
-| Table rows plus logical timing/sample extent expansion | 131,072 |
+| Table rows plus logical timing/sample extent/group membership expansion | 131,072 |
 | AAC packets | 32,768 |
 
 The work charge is raw `stts`/`stsc`/offset/optional `stss` rows, variable `stsz`
 entries, logical `stts` repetitions and one operation per expanded sample extent.
+The explicit group form adds one `sgpd` entry, one `sbgp` row and P logical membership
+units, even though coverage uses a scalar comparison. All new group/edit boxes and
+bytes count toward the same box/metadata/encoded limits. No cap is relaxed.
 Thus another limit can refuse before a nominal sample/packet ceiling is reached.
 The 600-second/trim rules make the AAC packet ceiling conservative. Closed nesting
 refuses unknown deep containers at their first unrecognized level; it need not reach
@@ -137,11 +188,21 @@ encryption, disabled/extra tracks, nested configs, edit ambiguity and video/audi
 alias/extent failures. Refusal checks count a downstream structural handoff as zero;
 they do not assert any production routing or native reader has been integrated.
 
-The pure component has completed source review and the range-contract correction
-review. An isolated component harness passed 19 checks, including a root slice
-control. The actual package then passed 32 focused tests: 18
-`VideoImportStructureTests`, 4 `ImportedWAVTests` and 10 `ImportedAudioTests`, with
-zero failures. These overlapping runs establish the stated component and compatibility
-checks, not native video decoding or complete import. Native AAC delay/trim proof,
-reader ownership, staging, storage migration and real file-import integration remain
-open. No tracker or completion count is changed.
+The declaration extension passed **31 focused package tests** after independent
+source review and a one-line test compiler correction. The process exited normally,
+and checkout preservation checks passed. These pure checks cover eight container/rate/channel cells, the canonical scalar tuple with
+split chunks and identity video, nonzero Data origins and reordered IDs, extended
+group headers, unsupported signed/group/version/membership forms, pair completeness,
+wrong parents, exact trim/presentation/rational boundaries, identity-only edits,
+scalar work and box caps, contradictory tables and continued Q5 refusal. Old range,
+extent, unknown-form and legacy tests remain, including empty/partial group refusal;
+unsupported complete group forms are checked separately from the newly known pair.
+
+Earlier qualification applied to the predecessor component only: the prior isolated
+harness reported 19 checks and the package reported 32 focused tests (18 structural,
+4 ImportedWAV, 10 ImportedAudio). Those historical results do not validate this
+extension. The current focused run covers the 31 structural tests only; it does not
+repeat those earlier WAV/audio checks or establish a full-package pass. No media or
+native decoding ran. Native delay/trim/waveform proof, reader ownership, staging,
+storage migration and
+real file-import integration remain open. B40 and canonical status 23/43 are unchanged.
