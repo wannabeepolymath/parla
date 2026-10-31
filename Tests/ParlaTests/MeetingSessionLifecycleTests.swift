@@ -35,6 +35,8 @@ final class LifecycleMeetingBottom: MeetingStorageBottom {
     var descriptors: [Int32:Descriptor] = [:], rootNode: Node?
     var tick: TimeInterval = 0, space = Int64.max, ancestorACL = 0, writeLimit = Int.max, interruptWrites = false
     var closeFailureAt: Int?, closeCount = 0, closes: [Int32] = [], payloadReads = 0, writes = 0, calls = 0
+    // Opt-in for stream byte oracles. Existing foundation fixtures keep their compact zero-source default.
+    var retainSourceBytes = false
     var observe: ((String,String?) -> Void)?
     var events: [(String,String?)] = [], cut: Int?, advanceAtWrite = false
     init(depth: Int = 12) {
@@ -58,7 +60,7 @@ final class LifecycleMeetingBottom: MeetingStorageBottom {
             if mode == .exclusive {
                 guard p.children[name] == nil else { throw MeetingStorageFault.io }; nextInode += 1
                 let child = Node(name:name,inode:nextInode,directory:false)
-                if name.hasSuffix(".source.pending") { child.body = .source(Data(),0) }
+                if name.hasSuffix(".source.pending"),!retainSourceBytes { child.body = .source(Data(),0) }
                 if name.hasSuffix(".result.pending") { child.body = .raw(81,0) }
                 p.children[name] = child; node = child
             } else { guard let existing = p.children[name] else { throw MeetingStorageFault.missing }; node = existing }
@@ -464,5 +466,327 @@ final class MeetingSessionOwnershipRegressionTests: XCTestCase {
         // Finish any wrongly admitted RED-control work without hiding the failed assertions.
         if rig.owner.state == .recording { try await rig.stop() }
         rig.owner.reserveQuit(); if rig.owner.shutdownReady { try await rig.owner.committedDetach() }
+    }
+}
+
+@MainActor private final class StreamOperation {
+    let done = XCTestExpectation(description:"stream operation actually returned")
+    private(set) var result: Result<Void,Error>?
+    private(set) var task: Task<Void,Never>?
+    init(_ operation: @escaping @MainActor () async throws -> Void) {
+        task = Task {
+            do { try await operation(); result = .success(()) } catch { result = .failure(error) }
+            done.fulfill()
+        }
+    }
+}
+@MainActor private final class StreamingMeetingRig {
+    let bottom = LifecycleMeetingBottom(), clock = LifecycleClock()
+    let stopRequested = MeetingDeadlineGate(), allowExit = MeetingDeadlineGate()
+    let store: MeetingSessionStore
+    var owner: MeetingSessionOwner!, stream: MeetingAudioIngress?
+    var starts = 0, recognitions = 0, stopRequests = 0, producerExited = false, gateTimedOut = false
+    var initialSlots = 0, initialOpen = false, initialFrames: [Float] = [], tail: [Float] = [], notStarted = false
+    var earlyEndFrames: Int?, earlyAccepted = 0
+    var validation: (() async -> Bool)?, sourceReturned: XCTestExpectation?
+    var sourceError: Error?
+    init() {
+        bottom.retainSourceBytes = true
+        let clock = clock
+        store = .init(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{clock.value})
+        owner = .init(store:store,microphone:.init(validate:{ [unowned self] _ in
+            if let validation { return await validation() }; return true
+        },start:{ [unowned self] selection,ingress in
+            starts += 1; stream = ingress; initialSlots = ingress.facts.slots; initialOpen = ingress.facts.open
+            if !initialFrames.isEmpty { do { _ = try input(initialFrames) } catch { sourceError = error } }
+            if notStarted { return .init(source:selection.instance,exit:.notStarted) }
+            if let frames = earlyEndFrames {
+                do {
+                    for offset in stride(from:0,to:frames,by:8_192) {
+                        earlyAccepted += try input(Array(repeating:0,count:min(8_192,frames-offset)))
+                    }
+                    _ = try ingress.end(ingress.fence(),tail:UnsafeBufferPointer<Float>(start:nil,count:0))
+                } catch { sourceError = error; ingress.revoke() }
+                return .init(source:selection.instance,exit:.actual(Task { [self] in
+                    producerExited = true; sourceReturned?.fulfill()
+                }))
+            }
+            return .init(source:selection.instance,exit:.actual(Task { [self] in
+                let requested = await stopRequested.wait(), permitted = await allowExit.wait()
+                gateTimedOut = !requested || !permitted
+                if gateTimedOut { ingress.revoke() }
+                do { _ = try tail.withUnsafeBufferPointer { try ingress.end(ingress.fence(),tail:$0) } }
+                catch { sourceError = error }
+                producerExited = true; sourceReturned?.fulfill()
+            }))
+        },requestStop:{ [unowned self] in stopRequests += 1; await stopRequested.open() }),recognition:.init(run:{ [unowned self] _,_ in
+            recognitions += 1; return Task { .failure(LifecycleConsumerFailure.expected) }
+        },requestCancel:{}),wallClock:{clock.value},holdEpoch:1)
+    }
+    func start() async throws {
+        let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:lifecycleID(200),mapping:.unknown)
+        try await owner.startMicrophone(owner:lifecycleID(1),session:lifecycleID(2),selection:.init(instance:lifecycleID(3),kind:.microphone,label:"",generation:7),
+            segment:.init(id:lifecycleID(100),track:0,generation:7,timing:timing,canonicalStart:0))
+    }
+    @discardableResult func input(_ samples: [Float]) throws -> Int {
+        let ingress = try XCTUnwrap(stream), body = try ingress.enter()
+        defer { try? ingress.leave(body) }
+        return try samples.withUnsafeBufferPointer { try ingress.receive(body,canonical:$0,input:.init(rate:16_000,channels:1,frames:samples.count)) }
+    }
+    func fill(_ frames: Int) throws {
+        for offset in stride(from:0,to:frames,by:8_192) { let n = min(8_192,frames-offset); XCTAssertEqual(try input(Array(repeating:0,count:n)),n) }
+    }
+    func release() async { await allowExit.open() }
+    var saved: [Data] {
+        (bottom.rootNode?.children.values.filter { $0.name.hasSuffix(".wav") }.sorted { $0.name < $1.name } ?? []).map { $0.bytes(0,$0.length) }
+    }
+}
+
+final class MeetingStreamingIngressLifecycleTests: XCTestCase {
+    @MainActor private func completed(_ operation: StreamOperation) async -> Result<Void,Error>? {
+        await fulfillment(of:[operation.done],timeout:4)
+        guard let result = operation.result else { XCTFail("Operation held; not joining an unobserved exit"); return nil }
+        if let task = operation.task { await task.value }
+        return result
+    }
+    @MainActor private func detach(_ rig: StreamingMeetingRig) async throws {
+        rig.owner.reserveQuit(); XCTAssertTrue(rig.owner.shutdownReady); try await rig.owner.committedDetach()
+        XCTAssertTrue(rig.bottom.descriptors.isEmpty); XCTAssertEqual(rig.recognitions,0); XCTAssertFalse(rig.gateTimedOut)
+    }
+    @MainActor func testSynchronousFirstPCMHasPrechargedSlotsAndStopSavesIndependentBytes() async throws {
+        let rig = StreamingMeetingRig(); rig.initialFrames = [-1,0,0.5,1]; rig.tail = [-0.5]
+        XCTAssertEqual(rig.bottom.calls,0); XCTAssertNil(rig.stream); XCTAssertEqual(rig.starts,0)
+        try await rig.start(); XCTAssertEqual(rig.initialSlots,2); XCTAssertTrue(rig.initialOpen)
+        XCTAssertEqual(rig.stream?.facts.allocated,2); XCTAssertThrowsError(try rig.owner.reserveInput(id:lifecycleID(800),track:0))
+        await rig.release(); let stop = StreamOperation { try await rig.owner.stop() }
+        guard let result = await completed(stop) else { return }; try result.get()
+        XCTAssertNil(rig.sourceError); XCTAssertTrue(rig.producerExited); XCTAssertEqual(rig.owner.projection.acknowledgedChunks,1)
+        let file = try XCTUnwrap(rig.saved.first)
+        let expected: [UInt8] = [82,73,70,70,46,0,0,0,87,65,86,69,102,109,116,32,16,0,0,0,1,0,1,0,
+                                128,62,0,0,0,125,0,0,2,0,16,0,100,97,116,97,10,0,0,0,0,128,0,0,0,64,255,127,0,192]
+        XCTAssertEqual(file,Data(expected)); XCTAssertEqual(rig.owner.projection.state,.stopped)
+        XCTAssertEqual(rig.stream?.facts.slots,0); try await detach(rig)
+    }
+    @MainActor func testStopBeforePCMRetiresEmptySlotsWithoutUnknownOrPayload() async throws {
+        let rig = StreamingMeetingRig(); try await rig.start(); await rig.release()
+        let stopping = StreamOperation { try await rig.owner.stop() }
+        guard let result = await completed(stopping) else { return }; try result.get()
+        XCTAssertTrue(rig.saved.isEmpty); XCTAssertEqual(rig.owner.projection.acknowledgedChunks,0)
+        XCTAssertEqual(rig.owner.projection.state,.stopped); XCTAssertFalse(try XCTUnwrap(rig.stream).facts.unknown)
+        XCTAssertEqual(rig.stream?.facts.allocated,2); XCTAssertEqual(rig.stream?.facts.copies,0); try await detach(rig)
+    }
+    @MainActor func testHeldWriterQuitCancelPreservesOnlySnapshottedDrainAndActualExits() async throws {
+        let rig = StreamingMeetingRig(); try await rig.start()
+        let entered = XCTestExpectation(description:"stream writer held"), returned = XCTestExpectation(description:"producer actually exited")
+        let held = LifecycleHeldOperation(entered); rig.sourceReturned = returned
+        rig.bottom.observe = { operation,name in if operation == "write",name?.hasSuffix(".source.pending") == true { held.holdOnce() } }
+        defer { held.open(); Task { await rig.release() } }
+        try rig.fill(480_000); await fulfillment(of:[entered],timeout:3)
+        let stream = try XCTUnwrap(rig.stream), lateBody = try stream.enter()
+        // A second precharged slot is active while the writer owns the first; no third slot exists.
+        let accepted = try [Float(0.5),-0.5].withUnsafeBufferPointer { try stream.receive(lateBody,canonical:$0,input:.init(rate:16_000,channels:1,frames:2)) }
+        XCTAssertEqual(accepted,2); rig.owner.reserveQuit(); XCTAssertFalse(rig.owner.shutdownReady)
+        let refused = try [Float(1)].withUnsafeBufferPointer { try stream.receive(lateBody,canonical:$0,input:.init(rate:16_000,channels:1,frames:1)) }
+        XCTAssertEqual(refused,0); XCTAssertThrowsError(try stream.enter()); XCTAssertThrowsError(try stream.reserve(id:lifecycleID(900),slot:3))
+        rig.owner.cancelQuit(); XCTAssertFalse(stream.facts.open); XCTAssertFalse(rig.owner.shutdownReady)
+        let stopping = StreamOperation { try await rig.owner.stop() }
+        XCTAssertFalse(rig.producerExited); try stream.leave(lateBody); await rig.release()
+        await fulfillment(of:[returned],timeout:3)
+        XCTAssertTrue(rig.producerExited); XCTAssertFalse(rig.owner.shutdownReady)
+        held.open(); guard let result = await completed(stopping) else { return }; try result.get()
+        rig.bottom.observe = nil
+        XCTAssertFalse(held.didTimeOut); XCTAssertNil(rig.sourceError); XCTAssertEqual(rig.stopRequests,1)
+        XCTAssertEqual(rig.owner.projection.acknowledgedChunks,2); XCTAssertEqual(rig.owner.projection.state,.stopped)
+        let payloads = rig.saved.map { Data($0.dropFirst(44)) }
+        XCTAssertTrue(payloads.contains(Data(repeating:0,count:960_000))); XCTAssertTrue(payloads.contains(Data([0,64,0,192])))
+        XCTAssertEqual(stream.facts.allocated,2); XCTAssertEqual(stream.facts.copies,2); try await detach(rig)
+    }
+    @MainActor func testHeldWriterNormalStopAndCommittedQuitJoinActualBodies() async throws {
+        for quit in [false,true] {
+            let rig = StreamingMeetingRig(); try await rig.start()
+            let entered = XCTestExpectation(description:"normal or quit writer held"), returned = XCTestExpectation(description:"source callback ownership actually exited")
+            let held = LifecycleHeldOperation(entered); rig.sourceReturned = returned
+            rig.bottom.observe = { operation,name in if operation == "write",name?.hasSuffix(".source.pending") == true { held.holdOnce() } }
+            defer { held.open(); Task { await rig.release() } }
+            try rig.fill(480_000); await fulfillment(of:[entered],timeout:3)
+            XCTAssertEqual(try rig.input([0.5]),1)
+            let stream = try XCTUnwrap(rig.stream), body = try stream.enter()
+            let operation = StreamOperation {
+                if quit { let ready = await rig.owner.beginShutdown(); XCTAssertTrue(ready) }
+                else { try await rig.owner.stop() }
+            }
+            let requested = await rig.stopRequested.wait(); XCTAssertTrue(requested)
+            XCTAssertFalse(stream.facts.open); XCTAssertFalse(rig.producerExited); XCTAssertFalse(rig.owner.shutdownReady)
+            XCTAssertThrowsError(try stream.enter())
+            // An already entered body has to leave before EOS/producer exit; acknowledgment alone cannot retire it.
+            try stream.leave(body); await rig.release(); await fulfillment(of:[returned],timeout:3)
+            XCTAssertFalse(rig.owner.shutdownReady); held.open()
+            guard let result = await completed(operation) else { return }; try result.get(); rig.bottom.observe = nil
+            XCTAssertNil(rig.sourceError); XCTAssertFalse(held.didTimeOut); XCTAssertEqual(rig.owner.projection.acknowledgedChunks,2)
+            XCTAssertEqual(stream.facts.allocated,2); XCTAssertTrue(rig.store.actualHoldsDrained)
+            if quit {
+                XCTAssertTrue(rig.owner.shutdownReady); try await rig.owner.committedDetach(); XCTAssertTrue(rig.bottom.descriptors.isEmpty)
+            } else { try await detach(rig) }
+        }
+    }
+    @MainActor func testHeldWriterPressureStopsWithoutThirdSlotAndRetainsPrefixUnknownCoverage() async throws {
+        let rig = StreamingMeetingRig(); try await rig.start()
+        let entered = XCTestExpectation(description:"pressure writer held"), held = LifecycleHeldOperation(entered)
+        rig.bottom.observe = { operation,name in if operation == "write",name?.hasSuffix(".source.pending") == true { held.holdOnce() } }
+        defer { held.open(); Task { await rig.release() } }
+        try rig.fill(480_000); await fulfillment(of:[entered],timeout:3); try rig.fill(479_999)
+        XCTAssertEqual(try rig.input([0.5,1]),1)
+        let stream = try XCTUnwrap(rig.stream); XCTAssertTrue(stream.facts.unknown); XCTAssertFalse(stream.facts.open)
+        let requested = await rig.stopRequested.wait(); XCTAssertTrue(requested); XCTAssertEqual(rig.stopRequests,1)
+        XCTAssertEqual(stream.facts.allocated,2); XCTAssertEqual(stream.facts.rawBytes,1_920_088)
+        await rig.release(); let stopping = StreamOperation { try await rig.owner.stop() }; held.open()
+        guard let result = await completed(stopping) else { return }; try result.get(); rig.bottom.observe = nil
+        XCTAssertFalse(held.didTimeOut); XCTAssertEqual(rig.owner.projection.acknowledgedChunks,2); XCTAssertEqual(rig.owner.projection.state,.interrupted)
+        XCTAssertEqual(rig.saved.reduce(0) { $0+max(0,$1.count-44) },1_920_000); try await detach(rig)
+    }
+    @MainActor func testDeleteAndExpiryRevokeUnsubmittedPositiveTailBeforePublication() async throws {
+        for expiry in [false,true] {
+            let rig = StreamingMeetingRig(); try await rig.start(); XCTAssertEqual(try rig.input([0.5]),1)
+            if expiry { rig.clock.value += MeetingSession.lifetime }
+            let deleting = StreamOperation {
+                if expiry { try await rig.owner.evaluateExpiry(deleteID:lifecycleID(90_000)) }
+                else { try await rig.owner.delete(id:lifecycleID(90_000)) }
+            }
+            defer { Task { await rig.release() } }
+            let requested = await rig.stopRequested.wait(); XCTAssertTrue(requested)
+            XCTAssertFalse(try XCTUnwrap(rig.stream).facts.open); XCTAssertFalse(rig.owner.shutdownReady)
+            XCTAssertThrowsError(try rig.input([1])); XCTAssertFalse(rig.producerExited)
+            await rig.release(); guard let result = await completed(deleting) else { return }; try result.get()
+            XCTAssertEqual(rig.owner.state,.idle); XCTAssertTrue(rig.bottom.descriptors.isEmpty); XCTAssertTrue(rig.saved.isEmpty)
+            XCTAssertFalse(rig.bottom.events.contains(where:{$0.0 == "exclusive-create" && $0.1?.hasSuffix(".source.pending") == true}))
+            XCTAssertEqual(rig.recognitions,0); XCTAssertFalse(rig.gateTimedOut)
+        }
+    }
+    @MainActor func testDeleteDuringHeldStreamWriteRemainsNonpositiveOnStoreUncertainty() async throws {
+        let rig = StreamingMeetingRig(); try await rig.start()
+        let entered = XCTestExpectation(description:"delete holds existing stream write"), held = LifecycleHeldOperation(entered)
+        let returned = XCTestExpectation(description:"revoked producer actually returned"); rig.sourceReturned = returned
+        rig.bottom.observe = { operation,name in if operation == "write",name?.hasSuffix(".source.pending") == true { held.holdOnce() } }
+        defer { held.open(); Task { await rig.release() } }
+        try rig.fill(480_000); await fulfillment(of:[entered],timeout:3); XCTAssertEqual(try rig.input([0.5]),1)
+        let deleting = StreamOperation { try await rig.owner.delete(id:lifecycleID(90_000)) }
+        let requested = await rig.stopRequested.wait(); XCTAssertTrue(requested)
+        XCTAssertFalse(try XCTUnwrap(rig.stream).facts.open); XCTAssertFalse(rig.owner.shutdownReady)
+        await rig.release(); await fulfillment(of:[returned],timeout:3)
+        XCTAssertTrue(rig.producerExited); held.open()
+        guard let result = await completed(deleting) else { return }; XCTAssertThrowsError(try result.get())
+        // Revocation inside the existing physical phase is charged uncertainty, never a fabricated successful Delete.
+        XCTAssertFalse(held.didTimeOut); XCTAssertEqual(rig.owner.state,.unavailable); XCTAssertEqual(rig.owner.concern,.firstIntentFailure)
+        XCTAssertEqual(rig.owner.projection.acknowledgedChunks,0); rig.owner.reserveQuit(); XCTAssertFalse(rig.owner.shutdownReady)
+        do { try await rig.owner.committedDetach(); XCTFail("Uncertain writer cannot detach") } catch { }
+        XCTAssertEqual(rig.recognitions,0)
+    }
+    @MainActor func testQuitDuringValidationNeverStartsOrCollectsAfterCancellation() async throws {
+        let rig = StreamingMeetingRig(), gate = MeetingDeadlineGate(), entered = XCTestExpectation(description:"stream validation entered")
+        rig.validation = { entered.fulfill(); return await gate.wait() }
+        let starting = StreamOperation { try await rig.start() }; defer { Task { await gate.open(); await rig.release() } }
+        await fulfillment(of:[entered],timeout:2); rig.owner.reserveQuit(); XCTAssertFalse(rig.owner.shutdownReady)
+        rig.owner.cancelQuit(); await gate.open()
+        guard let result = await completed(starting) else { return }; XCTAssertThrowsError(try result.get())
+        XCTAssertEqual(rig.starts,0); XCTAssertNil(rig.stream); XCTAssertEqual(rig.bottom.calls,0)
+        try await detach(rig)
+    }
+    @MainActor func testDurableEdgesKeepExistingTooShortRuleAndUnknownTiming() async throws {
+        for frames in [0,1,6_399,6_400,479_999,480_000] {
+            let rig = StreamingMeetingRig(); try await rig.start(); try rig.fill(frames); await rig.release()
+            let stopping = StreamOperation { try await rig.owner.stop() }
+            guard let result = await completed(stopping) else { return }; try result.get()
+            let ledger = try MeetingSession.Ledger.decode(rig.bottom.metadata)
+            XCTAssertEqual(ledger.chunks.count,frames == 0 ? 0 : 1)
+            if let chunk = ledger.chunks.first {
+                XCTAssertEqual(chunk.stage,frames < 6_400 ? .tooShort : .sealed); XCTAssertEqual(chunk.frames,UInt64(frames))
+                XCTAssertEqual(chunk.timing.mapping,.unknown); XCTAssertEqual(chunk.timing.pts,0); XCTAssertEqual(chunk.timing.sample,0)
+                XCTAssertEqual(chunk.timing.denominator,1); XCTAssertEqual(chunk.start,0)
+            }
+            try await detach(rig)
+        }
+    }
+    @MainActor func testLegacyReservedInputCannotBorrowStreamDrainAfterQuitCancellation() async throws {
+        let rig = MeetingLifecycleRig(); try await rig.start()
+        let ticket = try rig.owner.reserveInput(id:lifecycleID(700),track:0), input = try rig.input()
+        rig.owner.reserveQuit(); rig.owner.cancelQuit()
+        let writing = StreamOperation { try await rig.owner.submit(ticket,input:input) }
+        guard let result = await completed(writing) else { return }; XCTAssertThrowsError(try result.get())
+        XCTAssertEqual(rig.owner.projection.acknowledgedChunks,0)
+        await rig.releaseStop(); let stopping = StreamOperation { try await rig.owner.stop() }
+        guard let stopped = await completed(stopping) else { return }; try stopped.get()
+        XCTAssertEqual(rig.owner.projection.state,.interrupted); XCTAssertEqual(rig.recognitions,0)
+        rig.owner.reserveQuit(); XCTAssertTrue(rig.owner.shutdownReady); try await rig.owner.committedDetach()
+    }
+    @MainActor func testNotStartedOutcomeRetiresPrechargesAndCannotReviveSource() async throws {
+        let rig = StreamingMeetingRig(); rig.notStarted = true
+        let starting = StreamOperation { try await rig.start() }
+        guard let result = await completed(starting) else { return }; XCTAssertThrowsError(try result.get())
+        let stream = try XCTUnwrap(rig.stream); XCTAssertTrue(stream.facts.settled); XCTAssertFalse(stream.facts.open)
+        XCTAssertThrowsError(try stream.enter()); XCTAssertTrue(rig.store.actualHoldsDrained); XCTAssertFalse(rig.owner.shutdownReady)
+        // A deliberate Delete, rather than readiness or automatic restart, releases this retained failed session.
+        let deleting = StreamOperation { try await rig.owner.delete(id:lifecycleID(90_000)) }
+        guard let deleted = await completed(deleting) else { return }; try deleted.get()
+        XCTAssertTrue(rig.bottom.descriptors.isEmpty); XCTAssertEqual(rig.starts,1)
+    }
+
+    @MainActor func testNonexpiredEvaluationWaitsAcrossHeldChunkPhasesWithoutRevokingCapture() async throws {
+        let rig = StreamingMeetingRig(); try await rig.start()
+        let entered = XCTestExpectation(description:"chunk B held before expiry evaluation")
+        let held = LifecycleHeldOperation(entered)
+        rig.bottom.observe = { operation,name in
+            if operation == "write",name?.hasSuffix(".source.pending") == true { held.holdOnce() }
+        }
+        defer { held.open(); Task { await rig.release() } }
+        try rig.fill(480_000); await fulfillment(of:[entered],timeout:3)
+        let evaluating = XCTestExpectation(description:"normal evaluator entered while chunk B is held")
+        let evaluation = StreamOperation {
+            evaluating.fulfill()
+            try await rig.owner.evaluateExpiry(deleteID:lifecycleID(90_000))
+        }
+        await fulfillment(of:[evaluating],timeout:2)
+        held.open()
+        guard let result = await completed(evaluation) else { return }
+        do { try result.get() } catch { XCTFail("Non-expired evaluation refused: \(error)") }
+        XCTAssertFalse(held.didTimeOut); XCTAssertEqual(rig.owner.state,.recording); XCTAssertNil(rig.owner.concern)
+        let stream = try XCTUnwrap(rig.stream)
+        XCTAssertTrue(stream.facts.open); XCTAssertFalse(stream.facts.unknown)
+        if stream.facts.open { XCTAssertEqual(try rig.input([0.5]),1) }
+        await rig.release()
+        let stopping = StreamOperation { try await rig.owner.stop() }
+        guard let stopped = await completed(stopping) else { return }
+        do { try stopped.get() } catch { XCTFail("Stop after normal evaluation refused: \(error)") }
+        rig.bottom.observe = nil
+        if rig.owner.state == .stopped {
+            XCTAssertEqual(rig.owner.projection.acknowledgedChunks,2)
+            let payloads = rig.saved.map { Data($0.dropFirst(44)) }
+            XCTAssertTrue(payloads.contains(Data(repeating:0,count:960_000)))
+            XCTAssertTrue(payloads.contains(Data([0,64])))
+            XCTAssertFalse(stream.facts.unknown); XCTAssertTrue(rig.store.actualHoldsDrained)
+            try await detach(rig)
+        }
+    }
+    @MainActor func testEndedBeforeObservationNeverReportsRecordingAndKeepsActualExitHold() async throws {
+        for frames in [0,960_001] {
+            let rig = StreamingMeetingRig(); rig.earlyEndFrames = frames
+            let returned = XCTestExpectation(description:"early actual source task returned"); rig.sourceReturned = returned
+            try await rig.start(); await fulfillment(of:[returned],timeout:2)
+            let stream = try XCTUnwrap(rig.stream)
+            XCTAssertTrue(stream.facts.ended); XCTAssertFalse(stream.facts.open); XCTAssertTrue(rig.producerExited)
+            // Bounded convergence gives the coalesced observer an opportunity; it cannot create the missing state transition.
+            for _ in 0..<100 {
+                if rig.owner.state != .recording { break }
+                try await Task.sleep(nanoseconds:1_000_000)
+            }
+            XCTAssertEqual(rig.owner.state,.stopping); XCTAssertEqual(rig.stopRequests,0)
+            XCTAssertEqual(rig.earlyAccepted,min(frames,960_000)); XCTAssertThrowsError(try stream.enter())
+            XCTAssertFalse(rig.owner.shutdownReady)
+            let stopping = StreamOperation { try await rig.owner.stop() }
+            guard let result = await completed(stopping) else { return }; try result.get()
+            XCTAssertNil(rig.sourceError); XCTAssertEqual(rig.owner.projection.acknowledgedChunks,frames == 0 ? 0 : 2)
+            XCTAssertEqual(rig.owner.projection.state,frames == 0 ? .stopped : .interrupted)
+            XCTAssertEqual(rig.saved.reduce(0) { $0+max(0,$1.count-44) },min(frames,960_000)*2)
+            XCTAssertTrue(rig.store.actualHoldsDrained); try await detach(rig)
+        }
     }
 }
