@@ -171,4 +171,32 @@ final class MeetingAudioIngressTests: XCTestCase {
         XCTAssertEqual(ingress.facts.reason,.frameCeiling); XCTAssertFalse(ingress.facts.unknown)
         XCTAssertTrue(try end(ingress)); XCTAssertTrue(ingress.facts.settled)
     }
+    func testExplicitUnknownEmptyClosureSealsLiteralPrefixWithoutInventingTail() throws {
+        let ingress = try make()
+        XCTAssertEqual(try receive(ingress,[-1,0.5]),2)
+        XCTAssertTrue(try ingress.end(ingress.fence(),tail:.init(start:nil,count:0),closure:.unknown(.unknownCoverage)))
+        XCTAssertTrue(ingress.facts.ended); XCTAssertTrue(ingress.facts.unknown)
+        XCTAssertEqual(ingress.facts.reason,.unknownCoverage)
+        let delivery = try ingress.take(XCTUnwrap(ingress.readyPermit))
+        XCTAssertEqual(delivery.bytes,wav([0,128,0,64])); try ingress.retire(delivery.permit)
+        XCTAssertTrue(ingress.facts.settled)
+        XCTAssertThrowsError(try ingress.end(ingress.fence(),tail:.init(start:nil,count:0),closure:.complete))
+    }
+    func testExplicitClosureChecksForeignTokenBodyOneShotAndRevokedWriter() throws {
+        let a = try make(), b = try make(), body = try a.enter(), token = a.fence()
+        XCTAssertThrowsError(try a.end(b.fence(),tail:.init(start:nil,count:0),closure:.unknown(.invalidTail)))
+        XCTAssertThrowsError(try a.end(token,tail:.init(start:nil,count:0),closure:.unknown(.invalidTail)))
+        XCTAssertFalse(a.facts.ended); XCTAssertFalse(a.facts.unknown); XCTAssertNil(a.facts.reason)
+        try a.leave(body)
+        XCTAssertTrue(try a.end(token,tail:.init(start:nil,count:0),closure:.complete))
+        XCTAssertThrowsError(try a.end(token,tail:.init(start:nil,count:0),closure:.unknown(.invalidTail)))
+        XCTAssertFalse(a.facts.unknown); XCTAssertNil(a.facts.reason)
+        let revoked = try make(); try feed(revoked,frames:480_000)
+        let writing = try revoked.take(XCTUnwrap(revoked.readyPermit)); revoked.revoke()
+        XCTAssertFalse(try revoked.end(revoked.fence(),tail:.init(start:nil,count:0),closure:.unknown(.unknownCoverage)))
+        XCTAssertFalse(revoked.permitAllowed(writing.permit)); XCTAssertEqual(revoked.facts.slots,1)
+        XCTAssertTrue(revoked.facts.unknown); try revoked.retire(writing.permit)
+        XCTAssertTrue(revoked.facts.settled); XCTAssertTrue(try end(b))
+    }
+
 }

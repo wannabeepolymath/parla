@@ -31,6 +31,8 @@ public final class AudioRecorder {
     private let testEngine: MicrophoneCaptureEngine?
     public let admission: CaptureAdmission
     private var captureLease: CaptureAdmission.Lease?
+    private var meetingID: UUID? // control-side exclusion; callback reads only under lock
+    private let meetingConverter: ((AVAudioFormat) -> MeetingPCMConverting?)?
     private enum UnsavedPurpose: Equatable { case microphoneTest(UUID), guidedTemplate(session: UUID, capture: UUID) }
     private var unsavedPurpose: UnsavedPurpose?
     private var diagnosticID: UUID? {
@@ -76,9 +78,9 @@ public final class AudioRecorder {
         lock.withLock { captureDiagnostics?.operationID == operationID ? captureDiagnostics : nil }
     }
 
-    /// Engine-side state. Only ever touched on the main thread: prepare/start/
-    /// stop are called from the hotkey handler and the notification observer is
-    /// registered on the main queue.
+    /// Legacy engine-side state is controlled on main by the hotkey/notification
+    /// paths. Explicit meeting entry transfers the idle engine slot to its own
+    /// serial control executor while meetingID excludes those legacy paths.
     private var warm = false
     /// Whether the mic was granted at the moment the *current* engine's input
     /// unit started. `warm` only records that the app wants warmth, so without
@@ -111,11 +113,13 @@ public final class AudioRecorder {
                 conversion: ((AVAudioPCMBuffer) -> [Float]?)? = nil,
                 guidedDrain: (() -> Result<[Float], GuidedTemplateFailure>)? = nil,
                 captureClock: @escaping () -> TimeInterval = { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 },
+                meetingConverter: ((AVAudioFormat) -> MeetingPCMConverting?)? = nil,
                 scheduleRoute: @escaping CaptureDiagnosticCoordinator.Schedule = { delay, action in
                     let work = DispatchWorkItem(block: action)
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
                     return { work.cancel() }
                 }) {
+        self.meetingConverter = meetingConverter
         self.guidedDrain = guidedDrain
         self.captureClock = captureClock
         self.testEngine = engine; self.admission = admission; self.conversion = conversion; self.scheduleRoute = scheduleRoute
@@ -304,6 +308,7 @@ public final class AudioRecorder {
         guard ended == nil else { lock.unlock(); return }
         ended = reason
         lock.unlock()
+        guard lock.withLock({ meetingID == nil }) else { return }
         let purpose = lock.withLock { unsavedPurpose }
         if case .guidedTemplate(let session, let capture) = purpose { onGuidedEnd?(session, capture, reason) }
         else if purpose == nil { onEnd?(reason) }
@@ -353,7 +358,7 @@ public final class AudioRecorder {
     /// shouldTeardown finalizes normally and its trailing warmUp() is a no-op.
     public func setWarm(_ on: Bool) {
         warm = on
-        guard unsavedPurpose == nil, guidedScope == nil, !warmthSuspended else { return }
+        guard meetingID == nil, unsavedPurpose == nil, guidedScope == nil, !warmthSuspended else { return }
         guard !on else { return warmUp() }
         lock.lock()
         let live = capturing
@@ -364,7 +369,7 @@ public final class AudioRecorder {
     /// Idempotent build of the warm engine, subject to the permission and
     /// Bluetooth gates.
     private func warmUp() {
-        guard warm, !warmthSuspended, unsavedPurpose == nil, guidedScope == nil, !engineRunning else { return }
+        guard meetingID == nil, warm, !warmthSuspended, unsavedPurpose == nil, guidedScope == nil, !engineRunning else { return }
         // An input unit started before TCC grants the mic runs happily and
         // delivers zeros; the later grant never reaches a unit that is already
         // going. Without this, a fresh install would latch a permanently silent
@@ -533,6 +538,7 @@ public final class AudioRecorder {
     private func route(_ chunk: [Float]?, hasPCM: Bool, receivedAt: TimeInterval) -> Bool {
         let now = AudioRecorder.nowSeconds()
         lock.lock()
+        guard meetingID == nil else { lock.unlock(); return false }
         let live = capturing
         lastFeed = now
         if live, hasPCM, receivedAt >= captureStartedAt, let chunk, !chunk.isEmpty { postStartPCM = true }
@@ -574,7 +580,7 @@ public final class AudioRecorder {
         let generation = rebuildGeneration
         cancelRebuild?()
         cancelRebuild = scheduleRoute(AudioRecorder.rebuildDebounce) { [weak self] in
-            guard let self, self.rebuildGeneration == generation else { return }
+            guard let self, self.meetingID == nil, self.rebuildGeneration == generation else { return }
             self.lock.lock()
             let live = self.capturing
             let fed = AudioRecorder.recentlyFed(lastFeed: self.lastFeed, now: AudioRecorder.nowSeconds())
@@ -646,10 +652,109 @@ public final class AudioRecorder {
         lock.lock(); preRoll.reset(); lock.unlock()
     }
 
+    /// Option L: pure caller validation never reserves. This explicit entry alone claims
+    /// the shared .meeting lease, after owner durable admission/hold/two-slot precharge.
+    /// Disabled by default, including when a fake engine was injected.
+    @MainActor public func startMeeting(source: UUID, generation: UInt64, ingress: MeetingAudioIngress,
+                                        enabled: Bool = false) -> MeetingMicrophoneStart {
+        guard enabled,generation > 0,ingress.context.source == source,ingress.context.sourceGeneration == generation,
+              ingress.facts.open,ingress.facts.slots == 2,meetingID == nil,
+              unsavedPurpose == nil,guidedScope == nil,captureLease == nil,!transferring,
+              !lock.withLock({ capturing }),let lease = admission.acquire(.meeting) else { return .notStarted }
+        let id = UUID()
+        // Invalidate legacy callbacks without joining resamplerLock on MainActor.
+        // Any previously entered warm body can finish independently on its own thread.
+        lock.withLock { meetingID = id; engineEpoch = UUID(); samples = []; preRoll.discard() }
+        warmthSuspended = true; rebuildGeneration &+= 1
+        cancelRebuild?(); cancelRebuild = nil
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }; configObserver = nil
+        let transport = MeetingTransport(engine:engine,injected:testEngine,requestedUID:inputDeviceUID)
+        engine = nil; boundDevice = nil; builtAuthorized = false
+        let run = MeetingRecorderRun(ingress:ingress,makeConverter:meetingConverter ?? { NativeMeetingConverter(format:$0) })
+        let task = Task { @MainActor [self,run,transport] in
+            // One bounded control queue, never a task per callback or a timeout loser.
+            await transport.perform { [self] in
+                transport.retirePrevious()
+                resamplerLock.withLock { resampler.discard() }
+                guard !run.gate.isClosed else { return }
+                do { try transport.start(gate:run.gate) }
+                catch { run.requestStop(.unknownCoverage) }
+            }
+            await run.gate.waitForStop()
+            // stop may block and may itself wait for a tap. No recorder/ingress/gate lock,
+            // resamplerLock or MainActor is held across this worker call.
+            await transport.perform { transport.stop() }
+            await run.gate.waitForBodies()
+            let closed = await transport.perform { run.finish() }
+            guard closed else { await run.retainFailedClosure(); return }
+            // finish disposes converter/storage and severs the gate before exact release.
+            if lock.withLock({ meetingID == id }),admission.owns(lease) {
+                lock.withLock { meetingID = nil }; admission.release(lease)
+            }
+        }
+        return .actual(.init(task:task,stop:{ run.requestStop() }))
+    }
+
+    /// The recorder's single engine slot is transferred here, never duplicated. Legacy
+    /// idle transport is stopped and released before a meeting engine can be created.
+    /// Only this serial executor accesses the transferred native slot.
+    private final class MeetingTransport: @unchecked Sendable {
+        private var engine: AVAudioEngine?
+        private let injected: MicrophoneCaptureEngine?, requestedUID: String?
+        private var tap = false, observer: NSObjectProtocol?
+        private let queue = DispatchQueue(label:"Parla.meeting.recorder-control")
+        init(engine: AVAudioEngine?, injected: MicrophoneCaptureEngine?, requestedUID: String?) {
+            self.engine = engine; self.injected = injected; self.requestedUID = requestedUID
+            tap = engine != nil // the ordinary slot installs its tap before retaining a running engine
+        }
+        private struct Operation<Value>: @unchecked Sendable { let execute: () -> Value }
+        func perform<Value: Sendable>(_ work: @escaping () -> Value) async -> Value {
+            let operation = Operation(execute:work)
+            return await withCheckedContinuation { continuation in
+                queue.async { continuation.resume(returning:operation.execute()) }
+            }
+        }
+        func retirePrevious() {
+            if let injected { if injected.isRunning { injected.stop() }; return }
+            stop()
+        }
+        func start(gate: MeetingSourceGate) throws {
+            if let injected {
+                try injected.start(requestedUID:requestedUID,receive:{ [gate] in gate.receive($0) },changed:{ [gate] in gate.changed() })
+                return
+            }
+            guard !gate.isClosed else { return }
+            let fresh = AVAudioEngine(); engine = fresh
+            let input = fresh.inputNode
+            if let requestedUID,let device = AudioRecorder.deviceID(forUID:requestedUID),let unit = input.audioUnit {
+                var device = device
+                AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&device,UInt32(MemoryLayout<AudioDeviceID>.size))
+            }
+            let format = input.outputFormat(forBus:0)
+            let shape = MeetingAudioIngress.InputShape(rate:format.sampleRate,channels:Int(format.channelCount),frames:0)
+            guard shape.valid,format.commonFormat == .pcmFormatFloat32,!format.isInterleaved else { throw RecorderError.noInputFormat }
+            input.installTap(onBus:0,bufferSize:4096,format:format) { [gate] buffer,_ in gate.receive(buffer) }; tap = true
+            observer = NotificationCenter.default.addObserver(forName:.AVAudioEngineConfigurationChange,object:fresh,queue:nil) { [gate] _ in gate.changed() }
+            try fresh.start() // synchronous PCM followed by throw still belongs to the actual task
+        }
+        func stop() {
+            if let injected { injected.stop(); return }
+            if let observer { NotificationCenter.default.removeObserver(observer) }; observer = nil
+            guard let engine else { return }
+            if tap { engine.inputNode.removeTap(onBus:0); tap = false }
+            engine.stop()
+            if let unit = engine.inputNode.audioUnit {
+                var unknown = AudioDeviceID(kAudioObjectUnknown)
+                AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&unknown,UInt32(MemoryLayout<AudioDeviceID>.size))
+            }
+            self.engine = nil
+        }
+    }
+
     // MARK: - Capture
 
     public func start(diagnosticOperation: UUID? = nil) throws {
-        guard unsavedPurpose == nil, guidedScope == nil, !transferring else { throw RecorderError.captureBusy }
+        guard meetingID == nil, unsavedPurpose == nil, guidedScope == nil, !transferring else { throw RecorderError.captureBusy }
         // A new ordinary press deliberately replaces the current ordinary capture.
         // Auxiliary owners must release their own lease before dictation can enter.
         guard let lease = captureLease ?? admission.acquire(.dictation), admission.owns(lease) else { throw RecorderError.captureBusy }
@@ -707,6 +812,7 @@ public final class AudioRecorder {
         lock.lock()
         defer { lock.unlock() }
         // Guided PCM is available only through its exact owned capture API.
+        if meetingID != nil { return [] }
         if case .guidedTemplate = unsavedPurpose { return [] }
         return guidedScope == nil ? samples : []
     }
@@ -723,7 +829,7 @@ public final class AudioRecorder {
 
     /// Exact whole-session ownership suspends warmth even when no take exists.
     public func reserveGuidedTemplate(session: UUID, lease: CaptureAdmission.Lease) throws {
-        guard lease.owner == .guidedTemplate, admission.owns(lease), guidedScope == nil,
+        guard meetingID == nil, lease.owner == .guidedTemplate, admission.owns(lease), guidedScope == nil,
               unsavedPurpose == nil, captureLease == nil, !lock.withLock({ capturing }) else { throw RecorderError.captureBusy }
         guidedScope = (session, lease); warmthSuspended = true
         teardown(); resamplerLock.withLock { resampler.discard() }
@@ -782,12 +888,12 @@ public final class AudioRecorder {
 
     /// Explicit entry only. Closing a test never silently reopens the input.
     public func resumeWarmthOnExplicitEntry() {
-        guard unsavedPurpose == nil, guidedScope == nil else { return }
+        guard meetingID == nil, unsavedPurpose == nil, guidedScope == nil else { return }
         warmthSuspended = false; warmUp()
     }
 
     public func startMicrophoneTest(operation: UUID, lease: CaptureAdmission.Lease) throws {
-        guard admission.owns(lease), lease.owner == .microphoneTest, unsavedPurpose == nil, guidedScope == nil,
+        guard meetingID == nil, admission.owns(lease), lease.owner == .microphoneTest, unsavedPurpose == nil, guidedScope == nil,
               captureLease == nil else { throw RecorderError.captureBusy }
         warmthSuspended = true
         teardown() // also closes an already-warm normal engine and drops its pre-roll
@@ -853,7 +959,7 @@ public final class AudioRecorder {
     /// Teardown invalidates tap/rebuild epochs before drain. Both locks always nest
     /// resampler → samples. Scalar canceled diagnostics survive the move.
     public func stopCanceledCapture(operationID: UUID, retain: Bool) -> [Float]? {
-        guard !transferring, unsavedPurpose == nil, guidedScope == nil, captureOperationID == operationID,
+        guard meetingID == nil, !transferring, unsavedPurpose == nil, guidedScope == nil, captureOperationID == operationID,
               let lease = captureLease, lease.owner == .dictation, admission.owns(lease) else { return nil }
         transferring = true
         defer { transferring = false }
@@ -880,7 +986,7 @@ public final class AudioRecorder {
     }
 
     public func stop() -> [Float] {
-        guard unsavedPurpose == nil, guidedScope == nil else { return [] } // only diagnostic owner may close it
+        guard meetingID == nil, unsavedPurpose == nil, guidedScope == nil else { return [] } // only diagnostic owner may close it
         defer { if let captureLease { admission.release(captureLease) }; captureLease = nil }
         lock.lock()
         capturing = false
@@ -1040,4 +1146,70 @@ final class Resampler {
     func reset() { converter?.reset() }
     var hasStorage: Bool { converter != nil || out != nil }
     func discard() { converter = nil; inputFormat = nil; out = nil }
+}
+
+/// Meeting-specific bounded converter. Never changes legacy Resampler semantics.
+/// Source shape/representation/finiteness was checked before constructing this object.
+/// No supplied tap buffer survives feed. Only fixed owned input/output buffers persist.
+private final class NativeMeetingConverter: MeetingPCMConverting {
+    private let format: AVAudioFormat
+    private let converter: AVAudioConverter?
+    private let input: AVAudioPCMBuffer?, output: AVAudioPCMBuffer?
+    init?(format: AVAudioFormat) {
+        self.format = format
+        if format == AudioRecorder.targetFormat {
+            converter = nil; input = nil; output = nil; return
+        }
+        guard let converter = AVAudioConverter(from:format,to:AudioRecorder.targetFormat),
+              let input = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:8_192),
+              let output = AVAudioPCMBuffer(pcmFormat:AudioRecorder.targetFormat,frameCapacity:32_768) else { return nil }
+        self.converter = converter; self.input = input; self.output = output
+    }
+    func feed(_ source: AVAudioPCMBuffer, output destination: UnsafeMutableBufferPointer<Float>) -> MeetingConversionStep {
+        let count = Int(source.frameLength)
+        guard count <= 8_192,source.format == format,let channels = source.floatChannelData else { return .init(frames:0,status:.failed) }
+        if converter == nil {
+            guard count <= destination.count,let destination = destination.baseAddress else { return .init(frames:0,status:.failed) }
+            destination.update(from:channels[0],count:count)
+            return .init(frames:count,status:.inputExhausted) // exact canonical passthrough has no hidden EOS state
+        }
+        guard let converter,let input,let output,let owned = input.floatChannelData else { return .init(frames:0,status:.failed) }
+        for channel in 0..<Int(format.channelCount) { owned[channel].update(from:channels[channel],count:count) }
+        input.frameLength = source.frameLength; output.frameLength = 0
+        var fed = false, refusedRequest = false
+        let result = converter.convert(to:output,error:nil) { requested,status in
+            if fed { status.pointee = .noDataNow; return nil }
+            // Do not guess at partially consumed source ownership or reuse a tap buffer.
+            // Unqualified request shapes close conservatively; no padding/slicing fiction.
+            guard Int(requested) >= count else { refusedRequest = true; status.pointee = .noDataNow; return nil }
+            fed = true; status.pointee = .haveData; return input
+        }
+        let n = copyOutput(output,to:destination)
+        guard n >= 0,result != .error else { return .init(frames:max(0,n),status:.failed) }
+        let status: MeetingConversionStep.Status = fed && !refusedRequest && result == .inputRanDry ? .inputExhausted : .haveData
+        return .init(frames:n,status:status)
+    }
+    func finish(output destination: UnsafeMutableBufferPointer<Float>) -> MeetingConversionStep {
+        guard let converter,let output else { return .init(frames:0,status:.endOfStream) }
+        output.frameLength = 0
+        let result = converter.convert(to:output,error:nil) { _,status in status.pointee = .endOfStream; return nil }
+        let n = copyOutput(output,to:destination)
+        guard n >= 0 else { return .init(frames:0,status:.failed) }
+        switch result {
+        case .endOfStream: return .init(frames:n,status:.endOfStream)
+        case .error: return .init(frames:n,status:.failed)
+        case .inputRanDry: return .init(frames:n,status:.inputExhausted)
+        case .haveData: return .init(frames:n,status:.haveData)
+        @unknown default: return .init(frames:n,status:.failed)
+        }
+    }
+    private func copyOutput(_ output: AVAudioPCMBuffer, to destination: UnsafeMutableBufferPointer<Float>) -> Int {
+        let count = Int(output.frameLength)
+        guard count <= 32_768,count <= destination.count else { return -1 }
+        if count > 0 {
+            guard let from = output.floatChannelData?[0],let to = destination.baseAddress else { return -1 }
+            to.update(from:from,count:count)
+        }
+        return count
+    }
 }

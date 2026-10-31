@@ -15,6 +15,8 @@ public final class MeetingAudioIngress: @unchecked Sendable {
     }
     public struct Body: Equatable, Sendable { fileprivate let nonce: UUID, serial: UInt64 }
     public struct Drain: Equatable, Sendable { fileprivate let nonce: UUID, permits: [Permit] }
+    /// Explicit converter disposition; no fabricated samples are needed to close an uncertain source.
+    public enum Closure: Sendable { case complete, unknown(MeetingSession.Reason) }
     public struct InputShape: Sendable {
         public let rate: Double, channels: Int, frames: Int
         public init(rate: Double, channels: Int, frames: Int) { self.rate = rate; self.channels = channels; self.frames = frames }
@@ -166,10 +168,16 @@ public final class MeetingAudioIngress: @unchecked Sendable {
     /// Exactly once after source quiescence. EOS must derive exclusively from converter input accepted before the fence.
     /// Invalid EOS still seals the valid prefix and marks its uncommitted positive coverage unknown.
     @discardableResult public func end(_ token: Drain, tail: UnsafeBufferPointer<Float>) throws -> Bool {
+        try end(token,tail:tail,closure:.complete)
+    }
+    /// Identity, actual body exit and one-shot checks also guard explicit uncertainty.
+    /// Return value still describes tail validity, not overall source completeness.
+    @discardableResult public func end(_ token: Drain, tail: UnsafeBufferPointer<Float>, closure: Closure) throws -> Bool {
         defer { notify() }
         return try lock.withLock {
             guard token == drain,token.nonce == nonce,!ended,body == nil else { throw MeetingSession.Failure.stale }
             ended = true
+            if case .unknown(let why) = closure { unknown = true; if reason == nil { reason = why } }
             if revoked { return false }
             let capacity = buffers.first(where:{$0.mode == .active}).map { Int(MeetingSession.maximumFrames)-$0.frames } ?? 0
             let room = min(capacity,Int(MeetingSession.maximumTrackFrames-accepted))

@@ -3,7 +3,7 @@ import Foundation
 /// One physical recorder and its exclusive diagnostic review/shortcut owners.
 /// Main control paths acquire before starting; stale releases cannot free a newer owner.
 public final class CaptureAdmission {
-    public enum Owner { case dictation, microphoneTest, shortcut, guidedTemplate }
+    public enum Owner { case dictation, microphoneTest, shortcut, guidedTemplate, meeting }
     public struct Lease: Equatable {
         public let id: UUID
         public let owner: Owner
