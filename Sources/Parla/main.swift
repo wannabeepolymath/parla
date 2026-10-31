@@ -10,9 +10,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let templates = GuidedTemplateOwner()
     let audioImport = AudioImportOwner()
     let savedImports = SavedAudioImportOwner(root: SavedAudioImportOwner.defaultRoot)
+    let meetingHub = MainActor.assumeIsolated { MeetingHubController() }
+    private var meetingAppleObserver: AnyCancellable?, meetingParakeetObserver: AnyCancellable?
     override init() {
         super.init()
         configureGuidedTemplates()
+        MainActor.assumeIsolated { configureMeetingHub() }
         audioImport.savedImports = savedImports
         savedImports.enqueue = { [weak self] job, done in
             guard let self else { job.revoke(); job.operation.finish(); done(.failure(CancellationError())); return nil }
@@ -37,6 +40,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The callable production binder receives all authority as inert closures.
+    /// Production capture stays OFF pending separately scoped native qualification.
+    @MainActor private func configureMeetingHub() {
+        let wall = { try MeetingSession.nanoseconds(seconds:Date().timeIntervalSince1970) }
+        meetingHub.bind(.init(captureCapability:false,makeStore:{
+            let support = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+            return MeetingSessionStore(root:support.appendingPathComponent("Parla/meeting-session",isDirectory:true),profile:.init(),
+                bottom:MeetingDarwinBottom(uptime:{ProcessInfo.processInfo.systemUptime},checkpoint:{_,_ in}),wallClock:wall)
+        },microphone:{[recorder] input in MeetingMicrophoneCapture(recorder:recorder,input:input,enabled:true).port },
+        resolveInput:{[recorder] in try recorder.resolveMeetingInput(requestedUID:$0)},authorization:{
+            switch AVCaptureDevice.authorizationStatus(for:.audio) { case .authorized:return .authorized; case .notDetermined:return .undetermined; default:return .denied }
+        },requestAccess:{ AVCaptureDevice.requestAccess(for:.audio,completionHandler:$0) },openPrivacy:{
+            if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") { NSWorkspace.shared.open(url) }
+        },settings:{[store] in try store.savedRetrySnapshot()},settingsObject:store,selectionEpoch:{[unowned self] in self.preparationSelectionEpoch },
+        enqueue:{[weak self] job in
+            guard let self else { job.revoke(); job.operation.finish(); return nil }
+            let request = job.context.configuration.request
+            let next = MeetingRecognitionExecution.enqueue(previous:self.processTask,admission:self.localCleanupAdmission,job:job,settings:self.store,enter:{[weak self] in
+                    guard let self else { throw CancellationError() }
+                    try await MainActor.run {
+                        guard job.context.current else { throw CancellationError() }
+                        if request.selection.engine == .appleSpeech { self.appleSpeechPreparation.deliberateEntry() }
+                        try ParakeetAudioEntry.recovery(request,owner:self.parakeetPreparation)
+                    }
+                },load:{[weak self] request in
+                    guard let self else { throw CancellationError() }
+                    let (resident,factory) = try await MainActor.run { () throws -> (RecognitionResident?,RecognitionFactory) in
+                        guard job.context.current else { throw CancellationError() }; return (self.residentRecognition,self.recognitionFactory(for:request))
+                    }
+                    return try await RecognitionAcquisition.acquire(request:request,resident:resident,factory:factory,operation:job.operation,
+                        selectionEpoch:job.context.selectionEpoch,preparationEpoch:job.context.preparationEpoch)
+                })
+            if let next { self.processTask = next }; return next
+        },diagnostics:.shared,security:{ OriginalCopyController.currentSecurity() == .safe },copy:HubModel.writeExplicitCopy,wall:wall))
+    }
     /// Resource-free owner is created eagerly; all execution uses this app's existing owners.
     private func configureGuidedTemplates() {
         templates.bind(store: store, capture: RecorderGuidedTemplateCapture(recorder: recorder), admission: recorder.admission,
@@ -193,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.hubBootstrap.existingHub?.preparationSnapshot = snapshot
             self?.audioImport.preparationChanged(owner?.core.admissionEpoch)
             self?.templates.preparationChanged()
+            MainActor.assumeIsolated { self?.meetingHub.whisperPreparationChanged(owner?.core.admissionEpoch) }
             MainActor.assumeIsolated { self?.activePreviewCapture?.preparationChanged(owner?.core.admissionEpoch) }
         }
         owner.factory = { [weak self] in self?.recognitionFactory ?? RecognitionFactory() }
@@ -220,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { operation.revoke(); return }
             self.processTask = PendingOperationQueue.enqueue(previous: self.processTask, operation: operation, completes: true, work: work, finished: finished)
         }
+        meetingAppleObserver = owner.$snapshot.sink { [weak self] emitted in self?.meetingHub.applePreparationChanged(emitted) }
         return owner
     }
     lazy var parakeetPreparation = MainActor.assumeIsolated { () -> ParakeetPreparation in
@@ -231,6 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         owner.retireHandles = { [weak self] in
             await self?.retireRecognitionHandles(engine: .parakeet)
         }
+        meetingParakeetObserver = owner.$snapshot.sink { [weak self] emitted in self?.meetingHub.parakeetPreparationChanged(emitted) }
         return owner
     }
     lazy var recognitionFactory: RecognitionFactory = {
@@ -253,6 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     lazy var nativePreparationMenu = NativePreparationMenuActions { [weak self] action, token in
         self?.templates.cancel("Form discarded for preparation action."); self?.audioImport.invalidate("Preparation action changed import authority.")
+        MainActor.assumeIsolated { self?.meetingHub.revokePreparation(.whisper) }
         self?.nativePreparation.act(action, token: token)
     }
     var residentRecognition: RecognitionResident?
@@ -410,7 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             playbackAllowed: { [weak self] in self?.hubModel.recoveryPlayback.id == nil })
         activeMicrophoneTest = test
         let m = HubModel(store: store, history: history, recordings: recordings,
-            shortcutLabels: hubBootstrap.shortcutLabels, microphoneTest: test, experimentalRetryOwner: experimentalRetryOwner, audioImport: audioImport, templates: templates)
+            shortcutLabels: hubBootstrap.shortcutLabels, microphoneTest: test, experimentalRetryOwner: experimentalRetryOwner, audioImport: audioImport, templates: templates, meetingHub: meetingHub)
         hubBootstrap.attach(m)
         m.onRetryInput = { [weak self] in self?.hotkey.retryInput() }
         m.localRetryScheduler = { [weak self] operation, work in
@@ -454,7 +496,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         m.onPreparationAction = { [weak self] action, token in
             self?.templates.cancel("Form discarded for preparation action."); self?.audioImport.invalidate("Preparation action changed import authority.")
-            self?.nativePreparation.act(action, token: token)
+            MainActor.assumeIsolated { self?.meetingHub.revokePreparation(.whisper) }
+        self?.nativePreparation.act(action, token: token)
         }
         m.bindOriginalCopy(originalCopy)
         m.onActivityShadowRevoked = { [weak self] in MainActor.assumeIsolated { self?.revokeActivityShadow() } }
@@ -609,6 +652,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         savedImports: { [weak self] reply in
             guard let self else { reply(false); return }; self.savedImports.beginShutdown(reply)
         }, cancelSavedImports: { [weak self] in self?.savedImports.cancelShutdown() },
+        meeting: { [weak self] reply in
+            MainActor.assumeIsolated { guard let self else { reply(false); return }; self.meetingHub.beginShutdown(reply) }
+        }, cancelMeeting: { [weak self] in MainActor.assumeIsolated { self?.meetingHub.cancelShutdown() } },
         experimentalRetry: { [weak self] reply in
             MainActor.assumeIsolated {
                 guard let owner = self?.experimentalRetryOwner else { reply(true); return }
@@ -626,7 +672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ? "Quit canceled: native preparation tracking could not be persisted. Open Safe Start."
                 : "Quit canceled: clipboard restoration is unresolved. The original remains in memory.")
             self?.hud.show(.error(message))
-        }, onIntent: { [weak self] in guard let self else { return }; Self.cleanupFailoverIntent(self.store); Self.guidedQuitIntent(self.templates, imports: self.audioImport) })
+        }, onIntent: { [weak self] in guard let self else { return }; MainActor.assumeIsolated { self.meetingHub.reserveShutdown() }; Self.cleanupFailoverIntent(self.store); Self.guidedQuitIntent(self.templates, imports: self.audioImport) })
 
     lazy var canceledCaptureTermination = CanceledCaptureTermination(undo: canceledCaptureUndo, coordinator: termination)
 
@@ -675,13 +721,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         cancelTryout()
         let claimed = await Self.withSavedImportRestart(savedImports, parakeet: parakeetPreparation,
             apple: appleSpeechPreparation, local: localCleanupAdmission, experimental: experimentalRetryOwner, guided: templates,
-            chain: { self.processTask }, reservation: importRestartReservation, releaseClaim: { [self] in
+            chain: { self.processTask }, reservation: importRestartReservation, meeting: meetingHub, releaseClaim: { [self] in
                 catalogDownloads.releaseRestartReservation(); nativePreparation.core.releaseRestart()
             }) { [self] in
                 canceledCaptureUndo.shutdown()
                 let allowed = await nativePreparation.claimRestart(chain: { self.processTask }, allowed: {
                     self.session.state == .idle && !Inserter.clipboardRestorePending && !self.catalogDownloads.isActive
-                        && self.savedImports.restartReady() && self.activeMicrophoneTest?.ownsSession != true && self.templates.readyForRestart
+                        && self.meetingHub.restartReady() && self.savedImports.restartReady() && self.activeMicrophoneTest?.ownsSession != true && self.templates.readyForRestart
                         && self.appleSpeechPreparation.restartReady() && self.parakeetPreparation.restartReady()
                 }, claimOther: { self.catalogDownloads.claimRestartIfIdle() }, rejected: {})
                 guard allowed else { return false }
@@ -698,7 +744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static func withSavedImportRestart(_ saved: SavedAudioImportOwner,
         parakeet: ParakeetPreparation, apple: AppleSpeechPreparation, local: LocalCleanupAdmission,
         experimental: ExperimentalHistoryRetryOwner, guided: GuidedTemplateOwner? = nil, chain: @escaping () -> Task<Void,Never>?,
-        reservation: ImportRestartReservation? = nil, releaseClaim: @escaping () -> Void = {},
+        reservation: ImportRestartReservation? = nil, meeting: MeetingHubController? = nil, releaseClaim: @escaping () -> Void = {},
         claim: () async -> Bool) async -> Bool {
         guided?.cancel("Form discarded for restart.")
         guard reservation?.isHeld != true else { return false }
@@ -710,6 +756,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard local.reserveRestart() else { return false }; releases.append { local.releaseRestart() }
         guard experimental.reserveRestart() else { return false }; releases.append { experimental.releaseRestart() }
         guard saved.reserveRestart() else { return false }; releases.append { saved.releaseRestart() }
+        if let meeting { guard meeting.reserveRestart() else { return false }; releases.append { meeting.releaseRestart() } }
+        if let meeting { guard await meeting.drainRestart() else { return false } }
         await saved.drain()
         guard saved.restartReady() else {
             saved.notice(saved.shutdownRefusal ?? "Saved IO has not settled. Restart is unavailable.")

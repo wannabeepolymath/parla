@@ -5,6 +5,7 @@ enum HubPage: String, CaseIterable, Identifiable {
     case general = "General"
     case templates = "Voice Templates"
     case audioImport = "Import Audio"
+    case meetings = "Meetings"
     case microphone = "Microphone Test"
     case cleanup = "AI Cleanup"
     case transforms = "Output & Presets"
@@ -22,6 +23,7 @@ enum HubPage: String, CaseIterable, Identifiable {
         case .general: return "gearshape"
         case .templates: return "list.bullet.rectangle"
         case .audioImport: return "waveform.badge.plus"
+        case .meetings: return "waveform"
         case .microphone: return "mic"
         case .cleanup: return "wand.and.stars"
         case .transforms: return "text.badge.star"
@@ -39,6 +41,7 @@ enum HubPage: String, CaseIterable, Identifiable {
         case .general: return "Permissions, whisper model, and app behavior"
         case .templates: return "Named voice fields · literal review · explicit Copy and History Save"
         case .audioImport: return "Transient or saved PCM WAV · raw review and explicit exports"
+        case .meetings: return "Record your microphone, then transcribe saved audio"
         case .microphone: return "Check input and listen without a speech model"
         case .cleanup: return "Where transcripts get polished"
         case .transforms: return "Raw ASR and intentional rewrites or translations"
@@ -68,7 +71,8 @@ final class HubWindowController: NSObject, NSWindowDelegate {
         // onboardingCompleted, and building it against unloaded settings would
         // render the first-run flow for a moment to an existing user.
         self.preparationOnly = preparationOnly
-        if templatesOnly || model.templatesPageActive { model.refreshTemplates() }
+        if model.meetingPageActive { MainActor.assumeIsolated { model.meetingHub?.openPage() } }
+        else if templatesOnly || model.templatesPageActive { model.refreshTemplates() }
         else if audioImportOnly || model.audioImportPageActive { model.refreshAudioImportConfiguration() }
         else if preparationOnly { model.refreshPreparationConfiguration() } else { model.refresh() }
         if window == nil { window = makeWindow() }
@@ -77,12 +81,14 @@ final class HubWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        if model.meetingPageActive { return }
         if model.templatesPageActive { model.refreshTemplates() }
         else if model.audioImportPageActive { model.refreshAudioImportConfiguration() }
         else if preparationOnly { model.refreshPreparationConfiguration() } else { model.refresh() }
     }
 
     func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated { model.meetingHub?.windowClosed() }
         model.leaveTemplates()
         model.leaveAudioImport()
         model.microphoneTestLifecycle(.windowClose); model.stopRecoveryPlayback()
@@ -113,7 +119,7 @@ struct HubRootView: View {
         Group {
             // First run owns the whole window: there is nothing useful to
             // configure until the permissions and the model are in place.
-            if page == .templates || model.requestedPage == .templates || model.loadError != nil || model.settings.onboardingCompleted || page == .safeStart || model.requestedPage == .safeStart || page == .history || page == .privacy || page == .microphone || model.requestedPage == .microphone || model.requestedPage == .history || page == .audioImport || model.requestedPage == .audioImport {
+            if page == .meetings || model.requestedPage == .meetings || page == .templates || model.requestedPage == .templates || model.loadError != nil || model.settings.onboardingCompleted || page == .safeStart || model.requestedPage == .safeStart || page == .history || page == .privacy || page == .microphone || model.requestedPage == .microphone || model.requestedPage == .history || page == .audioImport || model.requestedPage == .audioImport {
                 HStack(spacing: 0) {
                     sidebar
                     content
@@ -129,13 +135,15 @@ struct HubRootView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .onChange(of: page) { value in
+            model.meetingPageActive = value == .meetings
+            if value == .meetings { model.meetingHub?.openPage() } else { model.meetingHub?.leavePage() }
             if value != .templates { model.leaveTemplates() }
             else { model.templatesPageActive = true; model.refreshTemplates() }
             model.discardAudioImport(); model.audioImportPageActive = value == .audioImport
             if value == .audioImport { model.refreshAudioImportConfiguration() }
             model.stopRecoveryPlayback(); model.microphoneTestLifecycle(.pageLeave)
         }
-        .onDisappear { model.leaveTemplates(); model.discardAudioImport(); model.microphoneTestLifecycle(.pageLeave) }
+        .onDisappear { model.meetingHub?.leavePage(); model.leaveTemplates(); model.discardAudioImport(); model.microphoneTestLifecycle(.pageLeave) }
         .onChange(of: model.requestedPage) { requested in
             if let requested { page = requested; model.requestedPage = nil }
         }
@@ -196,7 +204,13 @@ struct HubRootView: View {
         .overlay(alignment: .trailing) { Rectangle().fill(Theme.border).frame(width: 1) }
     }
 
-    private var content: some View {
+    @ViewBuilder private var content: some View {
+        if page == .meetings {
+            if let controller = model.meetingHub { HubMeetingView(controller:controller,openSettings:{page = .general}) }
+            else { Text("Meetings are unavailable.").frame(maxWidth:.infinity,maxHeight:.infinity).background(Theme.bg) }
+        } else { legacyContent }
+    }
+    private var legacyContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 if let err = model.loadError {
@@ -231,6 +245,7 @@ struct HubRootView: View {
         case .general: GeneralPage(model: model)
         case .templates: HubTemplatesView(model: model, owner: model.templates)
         case .audioImport: HubAudioImportView(model: model, owner: model.audioImport)
+        case .meetings: EmptyView() // dedicated content owns its persistent action rail
         case .microphone: HubMicrophoneTestView(model: model, test: model.microphoneTest)
         case .cleanup: CleanupPage(model: model)
         case .transforms: HubTransformsView(model: model)

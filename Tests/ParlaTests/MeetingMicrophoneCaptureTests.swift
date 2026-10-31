@@ -4,12 +4,12 @@ import XCTest
 @testable import ParlaCore
 @testable import Parla
 
-private final class AdapterCounter: @unchecked Sendable {
+final class AdapterCounter: @unchecked Sendable {
     private let lock = NSLock(); private var n = 0
     func hit() { lock.withLock { n += 1 } }
     var value: Int { lock.withLock { n } }
 }
-private final class AdapterGate: @unchecked Sendable {
+final class AdapterGate: @unchecked Sendable {
     private let lock = NSLock(), signal = DispatchSemaphore(value:0)
     private var armed = true, opened = false, expired = false
     let entered: XCTestExpectation
@@ -25,14 +25,20 @@ private final class AdapterGate: @unchecked Sendable {
     }
     var timedOut: Bool { lock.withLock { expired } }
 }
-private final class AdapterEngine: MicrophoneCaptureEngine, @unchecked Sendable {
+final class AdapterEngine: MicrophoneCaptureEngine, @unchecked Sendable {
     private let lock = NSLock(); private var callback: ((AVAudioPCMBuffer) -> Void)?, running = false
+    private var requested: String?, routeChanged: (() -> Void)?
+    var requestedUID: String? { lock.withLock { requested } }
+    func changeRoute() { let action = lock.withLock { routeChanged }; action?() }
+    var startSamples: [Float] = []
     let starts = AdapterCounter(), stops = AdapterCounter(), queries = AdapterCounter()
     let started = XCTestExpectation(description:"adapter fake engine started")
     var isRunning: Bool { queries.hit(); return lock.withLock { running } }
     var route: MicrophoneRoute { queries.hit(); return .init() }
     func start(requestedUID: String?, receive: @escaping (AVAudioPCMBuffer) -> Void, changed: @escaping () -> Void) throws {
-        starts.hit(); lock.withLock { running = true; callback = receive }; started.fulfill()
+        starts.hit(); lock.withLock { running = true; callback = receive; requested = requestedUID; routeChanged = changed }
+        if !startSamples.isEmpty {receive(Self.pcm(startSamples))}
+        started.fulfill()
     }
     func stop() { stops.hit(); lock.withLock { running = false; callback = nil } }
     var copied: ((AVAudioPCMBuffer) -> Void)? { lock.withLock { callback } }
@@ -44,17 +50,22 @@ private final class AdapterEngine: MicrophoneCaptureEngine, @unchecked Sendable 
     }
     func emit(_ values: [Float]) { copied?(Self.pcm(values)) }
 }
-private final class AdapterConverter: MeetingPCMConverting, @unchecked Sendable {
+final class AdapterConverter: MeetingPCMConverting, @unchecked Sendable {
     let feeds = AdapterCounter(), drains = AdapterCounter()
     var drainGate: AdapterGate?
+    var finishLatch: HubOwnedLatch?, finishEntered: XCTestExpectation?
+    var feedLatch: HubOwnedLatch?, feedEntered: XCTestExpectation?
     func feed(_ input: AVAudioPCMBuffer, output: UnsafeMutableBufferPointer<Float>) -> MeetingConversionStep {
-        feeds.hit(); let n = Int(input.frameLength)
+        feeds.hit(); if let feedLatch { feedEntered?.fulfill(); feedLatch.hold() }
+        let n = Int(input.frameLength)
         guard n <= output.count else { return .init(frames:0,status:.failed) }
         for i in 0..<n { output[i] = input.floatChannelData![0][i] }
         return .init(frames:n,status:.inputExhausted)
     }
     func finish(output: UnsafeMutableBufferPointer<Float>) -> MeetingConversionStep {
-        drains.hit(); drainGate?.hold(); return .init(frames:0,status:.endOfStream)
+        drains.hit(); drainGate?.hold()
+        if let finishLatch {finishEntered?.fulfill();finishLatch.hold()}
+        return .init(frames:0,status:.endOfStream)
     }
 }
 private final class AdapterLeaseBox: @unchecked Sendable {
@@ -208,5 +219,73 @@ final class MeetingMicrophoneCaptureTests: XCTestCase {
         catch { XCTAssertEqual(r.owner.state,.unavailable); XCTAssertFalse(r.owner.shutdownReady) }
         XCTAssertFalse(held.timedOut); XCTAssertEqual(r.recognition.value,0)
         XCTAssertTrue(r.admission.isAvailable); XCTAssertEqual(r.engine.starts.value,1)
+    }
+}
+
+
+extension MeetingMicrophoneCaptureTests {
+    @MainActor func testFrozenInputOverloadIsPureDefaultOffAndStrictFakeReadbackRefuses() async throws {
+        let engine = AdapterEngine(),admission = CaptureAdmission(),converter = AdapterConverter(),checks = AdapterCounter()
+        let recorder = AudioRecorder(engine:engine,admission:admission,meetingConverter:{_ in converter},meetingBindingCheck:{ _ in checks.hit(); throw MeetingSession.Failure.unavailable })
+        let input = try AudioRecorder.MeetingInput(uid:"frozen",label:"Literal microphone")
+        let disabled = MeetingMicrophoneCapture(recorder:recorder,input:input)
+        let selection = MeetingSession.Selection(instance:UUID(),kind:.microphone,label:"Literal microphone",generation:1)
+        XCTAssertFalse(disabled.validate(selection)); XCTAssertEqual(engine.queries.value,0); XCTAssertEqual(checks.value,0); XCTAssertTrue(admission.isAvailable)
+        let bottom = LifecycleMeetingBottom(),adapter = MeetingMicrophoneCapture(recorder:recorder,input:input,enabled:true)
+        defer { adapter.requestStop() }
+        let owner = MeetingSessionOwner(store:.init(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000}),microphone:adapter.port,
+            recognition:.init(run:{_,_ in Task{.failure(CancellationError())}},requestCancel:{}),wallClock:{1_000_000_000_000},holdEpoch:1)
+        let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16000,epoch:UUID(),mapping:.unknown)
+        guard await hubComplete({do {try await owner.startMicrophone(owner:UUID(),session:UUID(),selection:selection,segment:.init(id:UUID(),track:0,generation:1,timing:timing,canonicalStart:0))} catch {}}) else {return}
+        guard await hubEntered([engine.started]) else {return}
+        guard await hubComplete({owner.requestStopSaving();do {try await owner.finishStopSaving()} catch {}}) else {return}
+        XCTAssertEqual(engine.requestedUID,"frozen"); XCTAssertEqual(checks.value,1); XCTAssertTrue(admission.isAvailable)
+        XCTAssertEqual(engine.starts.value,1); XCTAssertGreaterThan(engine.stops.value,0)
+    }
+}
+
+
+extension MeetingMicrophoneCaptureTests {
+    @MainActor func testControllerStopLeaveAndWindowCloseKeepActualEOSAndRestartDrainPending() async throws {
+        enum Trigger: CaseIterable {case stop,leave,window}
+        for trigger in Trigger.allCases {
+            let r = try MeetingHubRig(),gate = HubOwnedLatch();defer {gate.open();r.release()}
+            r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
+            r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+            guard await hubEntered([r.engine.started]) else {return}
+            r.engine.emit(Array(repeating:Float(0.5),count:8000))
+            let entered = XCTestExpectation(description:"actual fake converter EOS held for \(trigger)")
+            r.converter.finishLatch = gate;r.converter.finishEntered = entered
+            let late = try XCTUnwrap(r.engine.copied),feeds = r.converter.feeds.value
+            switch trigger {case .stop:r.controller.stopAndSave();case .leave:r.controller.leavePage();case .window:r.controller.windowClosed()}
+            guard await hubEntered([entered]) else {return}
+            XCTAssertFalse(r.admission.isAvailable);XCTAssertNotEqual(r.controller.model.state,.stopped)
+            XCTAssertTrue(r.controller.reserveRestart());let drain = HubRestartDrain(r.controller)
+            guard await hubEntered([drain.entered]) else {return}
+            XCTAssertFalse(drain.returned);XCTAssertFalse(r.controller.restartReady())
+            late(AdapterEngine.pcm([1]));XCTAssertEqual(r.converter.feeds.value,feeds)
+            r.controller.releaseRestart();gate.open()
+            guard await hubEntered([drain.exited]) else {return}
+            XCTAssertEqual(drain.allowed,false);XCTAssertTrue(r.admission.isAvailable);XCTAssertFalse(gate.timedOut)
+            XCTAssertEqual(r.controller.model.metadata?.chunks.count,1);XCTAssertEqual(r.engine.starts.value,1);XCTAssertEqual(r.enqueues,0)
+        }
+    }
+    @MainActor func testControllerHeldActualCallbackBodyCannotBeRetiredByWindowClose() async throws {
+        let r = try MeetingHubRig(),gate = HubOwnedLatch();defer {gate.open();r.release()}
+        r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+        guard await hubEntered([r.engine.started]) else {return}
+        let entered = XCTestExpectation(description:"actual callback converter feed entered")
+        let returned = XCTestExpectation(description:"actual callback body returned")
+        r.converter.feedLatch = gate;r.converter.feedEntered = entered
+        let callback = try XCTUnwrap(r.engine.copied)
+        DispatchQueue.global().async {callback(AdapterEngine.pcm(Array(repeating:0.5,count:8000)));returned.fulfill()}
+        guard await hubEntered([entered]) else {return}
+        r.controller.windowClosed();XCTAssertTrue(r.controller.reserveRestart());let drain = HubRestartDrain(r.controller)
+        guard await hubEntered([drain.entered]) else {return}
+        XCTAssertFalse(drain.returned);XCTAssertFalse(r.controller.restartReady());XCTAssertFalse(r.admission.isAvailable)
+        gate.open();guard await hubEntered([returned,drain.exited]) else {return}
+        XCTAssertEqual(drain.allowed,true);XCTAssertTrue(r.admission.isAvailable);XCTAssertFalse(gate.timedOut)
+        XCTAssertEqual(r.engine.starts.value,1);XCTAssertEqual(r.enqueues,0)
     }
 }

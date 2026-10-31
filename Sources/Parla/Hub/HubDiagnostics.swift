@@ -31,8 +31,7 @@ extension HubModel {
         diagnosticMessage = nil
         guard let destination = diagnosticPanel(DiagnosticSaveRequest()) else { return }
         do {
-            try validateExportDestination(destination, fileExtension: "json")
-            try diagnosticWriter(frozen, destination)
+            try withValidatedExportDestination(destination,fileExtension:"json") { try diagnosticWriter(frozen,destination) }
             diagnosticMessage = "Diagnostics exported."
             diagnosticReview = nil
         } catch HistoryExportDestination.Refusal.savedStorage {

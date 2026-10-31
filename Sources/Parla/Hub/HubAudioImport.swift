@@ -89,10 +89,11 @@ extension HubModel {
         guard let url = audioImportExportPanel("Parla-native-segments.\(fileExtension)") else { return }
         guard audioImportExportIsCurrent(job: job, resultID: resultID) else { return }
         do {
-            try validateExportDestination(url, fileExtension: fileExtension, protectedFiles: [job.source.originalURL])
-            guard audioImportExportIsCurrent(job: job, resultID: resultID) else { return }
-            // Same B42 synchronous atomic writer, with no suspension after the last guard.
-            try historyExportWriter(data, url)
+            let written = try withValidatedExportDestination(url,fileExtension:fileExtension,protectedFiles:[job.source.originalURL]) {
+                guard audioImportExportIsCurrent(job:job,resultID:resultID) else { return false }
+                try historyExportWriter(data,url); return true
+            }
+            guard written else { return }
             audioImport.notice("Exported current native segments as \(formatName). History still contains text only.")
         } catch HistoryExportDestination.Refusal.savedStorage {
             audioImport.notice("Saved storage cannot supply complete protection. Retry export after storage is available.")
@@ -143,11 +144,13 @@ extension HubModel {
         guard let destination = audioImportExportPanel("Parla-saved-transcript.txt") else { return }
         guard savedReviewIsCurrent(review) else { return }
         do {
-            try validateExportDestination(destination,fileExtension:"txt")
-            guard let io = saved.beginOutputIO(review) else {return}
-            defer {saved.endOutputIO(io)}
-            guard savedReviewIsCurrent(review,allowIO:true) else { return }
-            try historyExportWriter(bytes,destination)
+            let written = try withValidatedExportDestination(destination,fileExtension:"txt") {
+                guard let io = saved.beginOutputIO(review) else { return false }
+                defer { saved.endOutputIO(io) }
+                guard savedReviewIsCurrent(review,allowIO:true) else { return false }
+                try historyExportWriter(bytes,destination); return true
+            }
+            guard written else { return }
             saved.notice("Raw text exported. The saved job and independent History are unchanged.")
         } catch HistoryExportDestination.Refusal.savedStorage {
             saved.notice("Saved storage cannot supply complete protection. Retry export after storage is available.")

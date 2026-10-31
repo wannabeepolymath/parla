@@ -32,6 +32,7 @@ public final class AudioRecorder {
     public let admission: CaptureAdmission
     private var captureLease: CaptureAdmission.Lease?
     private var meetingID: UUID? // control-side exclusion; callback reads only under lock
+    private let meetingBindingCheck: ((String) throws -> Void)?
     private let meetingConverter: ((AVAudioFormat) -> MeetingPCMConverting?)?
     private enum UnsavedPurpose: Equatable { case microphoneTest(UUID), guidedTemplate(session: UUID, capture: UUID) }
     private var unsavedPurpose: UnsavedPurpose?
@@ -114,11 +115,13 @@ public final class AudioRecorder {
                 guidedDrain: (() -> Result<[Float], GuidedTemplateFailure>)? = nil,
                 captureClock: @escaping () -> TimeInterval = { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 },
                 meetingConverter: ((AVAudioFormat) -> MeetingPCMConverting?)? = nil,
+                meetingBindingCheck: ((String) throws -> Void)? = nil,
                 scheduleRoute: @escaping CaptureDiagnosticCoordinator.Schedule = { delay, action in
                     let work = DispatchWorkItem(block: action)
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
                     return { work.cancel() }
                 }) {
+        self.meetingBindingCheck = meetingBindingCheck
         self.meetingConverter = meetingConverter
         self.guidedDrain = guidedDrain
         self.captureClock = captureClock
@@ -655,8 +658,35 @@ public final class AudioRecorder {
     /// Option L: pure caller validation never reserves. This explicit entry alone claims
     /// the shared .meeting lease, after owner durable admission/hold/two-slot precharge.
     /// Disabled by default, including when a fake engine was injected.
+    public struct MeetingInput: Equatable, Sendable {
+        public let uid: String, label: String
+        public init(uid: String,label: String) throws {
+            guard !uid.isEmpty,uid.utf8.count <= 1024,!uid.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0)}),
+                  !label.isEmpty,label.utf8.count <= 128,!label.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0)}) else { throw RecorderError.noInputFormat }
+            self.uid = uid; self.label = label
+        }
+    }
+    /// Explicit action only. A requested UID never falls back to a different device.
+    public func resolveMeetingInput(requestedUID: String?) throws -> MeetingInput {
+        let device: AudioDeviceID
+        if let requestedUID { guard let found = Self.deviceID(forUID:requestedUID) else { throw RecorderError.noInputFormat }; device = found }
+        else {
+            var found = AudioDeviceID(kAudioObjectUnknown), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            var address = AudioObjectPropertyAddress(mSelector:kAudioHardwarePropertyDefaultInputDevice,mScope:kAudioObjectPropertyScopeGlobal,mElement:kAudioObjectPropertyElementMain)
+            guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),&address,0,nil,&size,&found) == noErr,found != kAudioObjectUnknown else { throw RecorderError.noInputFormat }; device = found
+        }
+        guard let uid = Self.stringProperty(device,kAudioDevicePropertyDeviceUID),let label = Self.stringProperty(device,kAudioObjectPropertyName),
+              requestedUID == nil || requestedUID == uid else { throw RecorderError.noInputFormat }
+        return try .init(uid:uid,label:label)
+    }
+    @MainActor public func startMeeting(source: UUID,generation: UInt64,ingress: MeetingAudioIngress,input: MeetingInput,enabled: Bool = false) -> MeetingMicrophoneStart {
+        startMeetingImpl(source:source,generation:generation,ingress:ingress,input:input,enabled:enabled)
+    }
     @MainActor public func startMeeting(source: UUID, generation: UInt64, ingress: MeetingAudioIngress,
                                         enabled: Bool = false) -> MeetingMicrophoneStart {
+        startMeetingImpl(source:source,generation:generation,ingress:ingress,input:nil,enabled:enabled)
+    }
+    @MainActor private func startMeetingImpl(source: UUID,generation: UInt64,ingress: MeetingAudioIngress,input: MeetingInput?,enabled: Bool) -> MeetingMicrophoneStart {
         guard enabled,generation > 0,ingress.context.source == source,ingress.context.sourceGeneration == generation,
               ingress.facts.open,ingress.facts.slots == 2,meetingID == nil,
               unsavedPurpose == nil,guidedScope == nil,captureLease == nil,!transferring,
@@ -668,7 +698,7 @@ public final class AudioRecorder {
         warmthSuspended = true; rebuildGeneration &+= 1
         cancelRebuild?(); cancelRebuild = nil
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }; configObserver = nil
-        let transport = MeetingTransport(engine:engine,injected:testEngine,requestedUID:inputDeviceUID)
+        let transport = MeetingTransport(engine:engine,injected:testEngine,requestedUID:input?.uid ?? inputDeviceUID,strict:input != nil,bindingCheck:meetingBindingCheck)
         engine = nil; boundDevice = nil; builtAuthorized = false
         let run = MeetingRecorderRun(ingress:ingress,makeConverter:meetingConverter ?? { NativeMeetingConverter(format:$0) })
         let task = Task { @MainActor [self,run,transport] in
@@ -701,10 +731,11 @@ public final class AudioRecorder {
     private final class MeetingTransport: @unchecked Sendable {
         private var engine: AVAudioEngine?
         private let injected: MicrophoneCaptureEngine?, requestedUID: String?
+        private let strict: Bool, bindingCheck: ((String) throws -> Void)?
         private var tap = false, observer: NSObjectProtocol?
         private let queue = DispatchQueue(label:"Parla.meeting.recorder-control")
-        init(engine: AVAudioEngine?, injected: MicrophoneCaptureEngine?, requestedUID: String?) {
-            self.engine = engine; self.injected = injected; self.requestedUID = requestedUID
+        init(engine: AVAudioEngine?, injected: MicrophoneCaptureEngine?, requestedUID: String?, strict: Bool, bindingCheck: ((String) throws -> Void)?) {
+            self.engine = engine; self.injected = injected; self.requestedUID = requestedUID; self.strict = strict; self.bindingCheck = bindingCheck
             tap = engine != nil // the ordinary slot installs its tap before retaining a running engine
         }
         private struct Operation<Value>: @unchecked Sendable { let execute: () -> Value }
@@ -721,12 +752,23 @@ public final class AudioRecorder {
         func start(gate: MeetingSourceGate) throws {
             if let injected {
                 try injected.start(requestedUID:requestedUID,receive:{ [gate] in gate.receive($0) },changed:{ [gate] in gate.changed() })
+                if strict {
+                    guard let requestedUID,let bindingCheck else { throw RecorderError.noInputFormat }
+                    try bindingCheck(requestedUID) // injected actual fake binding/readback authority, never a native-ready literal
+                }
                 return
             }
             guard !gate.isClosed else { return }
             let fresh = AVAudioEngine(); engine = fresh
             let input = fresh.inputNode
-            if let requestedUID,let device = AudioRecorder.deviceID(forUID:requestedUID),let unit = input.audioUnit {
+            if strict {
+                guard let requestedUID,let device = AudioRecorder.deviceID(forUID:requestedUID),let unit = input.audioUnit else { throw RecorderError.noInputFormat }
+                var selected = device, observed = AudioDeviceID(kAudioObjectUnknown), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+                guard AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&selected,size) == noErr,
+                      AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&observed,&size) == noErr,
+                      size == UInt32(MemoryLayout<AudioDeviceID>.size),observed == device,
+                      AudioRecorder.stringProperty(observed,kAudioDevicePropertyDeviceUID) == requestedUID else { throw RecorderError.noInputFormat }
+            } else if let requestedUID,let device = AudioRecorder.deviceID(forUID:requestedUID),let unit = input.audioUnit {
                 var device = device
                 AudioUnitSetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&device,UInt32(MemoryLayout<AudioDeviceID>.size))
             }

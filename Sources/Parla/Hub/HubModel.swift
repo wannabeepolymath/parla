@@ -79,7 +79,7 @@ final class HubModel: ObservableObject {
     func parakeetAction(_ action: ParakeetPreparation.Action, target: ParakeetPreparation.SavedTarget) {
         guard loadError == nil, saveError == nil else { return }
         templates.cancel("Form discarded for preparation action."); audioImport.invalidate("Preparation action changed import authority.")
-        MainActor.assumeIsolated { parakeetOwner?.act(action, target: target) }
+        MainActor.assumeIsolated { meetingHub?.revokePreparation(.parakeet); parakeetOwner?.act(action, target: target) }
     }
     /// Only a successful disk save/reload (or explicit fresh load) grants targets.
     private func reloadParakeetConfiguration() {
@@ -99,10 +99,11 @@ final class HubModel: ObservableObject {
             guard let self, self.loadError == nil, self.saveError == nil else { return }
             guard let target = owner?.savedTarget(.global), target.admissionToken == token else { return }
             self.templates.cancel("Form discarded for preparation action."); self.audioImport.invalidate("Preparation action changed import authority.")
+            self.meetingHub?.revokePreparation(.parakeet)
             owner?.act(action, target: target)
         }
-        onParakeetCancel = { [weak self, weak owner] token in self?.audioImport.invalidate("Preparation canceled."); owner?.cancel(token: token) }
-        onParakeetDraftChanged = { [weak owner] in owner?.draftChanged() }
+        onParakeetCancel = { [weak self, weak owner] token in self?.meetingHub?.revokePreparation(.parakeet); self?.audioImport.invalidate("Preparation canceled."); owner?.cancel(token: token) }
+        onParakeetDraftChanged = { [weak self,weak owner] in MainActor.assumeIsolated { self?.meetingHub?.revokePreparation(.parakeet); owner?.draftChanged() } }
     }
     @Published var appleSpeechSnapshot = AppleSpeechSnapshot() { didSet {
         if oldValue != appleSpeechSnapshot { templates.preparationChanged() }
@@ -123,11 +124,12 @@ final class HubModel: ObservableObject {
             guard let self, let owner else { return }
             guard self.loadError == nil, self.saveError == nil else { return }
             self.templates.cancel("Form discarded for preparation action."); self.audioImport.invalidate("Preparation action changed import authority.")
+            if action != .recheck { self.meetingHub?.revokePreparation(.appleSpeech) }
             owner.deliberateEntry()
             owner.act(action, locale: locale, token: token)
         }
-        onAppleSpeechCancel = { [weak self, weak owner] token in self?.audioImport.invalidate("Preparation canceled."); owner?.cancel(token: token) }
-        onAppleSpeechDraftChanged = { [weak owner] in owner?.draftChanged() }
+        onAppleSpeechCancel = { [weak self, weak owner] token in self?.meetingHub?.revokePreparation(.appleSpeech); self?.audioImport.invalidate("Preparation canceled."); owner?.cancel(token: token) }
+        onAppleSpeechDraftChanged = { [weak self,weak owner] in MainActor.assumeIsolated { self?.meetingHub?.revokePreparation(.appleSpeech); owner?.draftChanged() } }
     }
     @Published var observedRecognition: (selection: RecognitionSelection, capabilities: RecognitionCapabilities)?
     var recognitionCapabilities: RecognitionCapabilities {
@@ -572,12 +574,15 @@ final class HubModel: ObservableObject {
     private var saveItem: DispatchWorkItem?
     var hasPendingSettingsSave: Bool { saveItem != nil }
 
+    var meetingPageActive = false
+    let meetingHub: MeetingHubController?
     init(store: SettingsStore, history: HistoryStore, clipboard: ((String) -> Void)? = nil,
          recordings: RecordingStore = .shared, shortcutLabels: ShortcutLabels = ShortcutLabels(),
          retryHTTP: @autoclosure @escaping () -> HTTPPosting = URLSessionPoster(), diagnostics: DiagnosticStore = .shared,
          microphoneTest: MicrophoneTestController = MicrophoneTestController(),
          experimentalRetryOwner: ExperimentalHistoryRetryOwner = ExperimentalHistoryRetryOwner(),
-         audioImport: AudioImportOwner = AudioImportOwner(), templates: GuidedTemplateOwner = GuidedTemplateOwner()) {
+         audioImport: AudioImportOwner = AudioImportOwner(), templates: GuidedTemplateOwner = GuidedTemplateOwner(), meetingHub: MeetingHubController? = nil) {
+        self.meetingHub = meetingHub
         self.templates = templates
         self.audioImport = audioImport
         self.experimentalRetryOwner = experimentalRetryOwner
@@ -976,8 +981,7 @@ final class HubModel: ObservableObject {
         do {
             let data = try VocabularyDocument(settings: current).encoded()
             guard let url = vocabularyExportPanel() else { return }
-            try validateExportDestination(url, fileExtension: "json")
-            try vocabularyExportWriter(data,url)
+            try withValidatedExportDestination(url,fileExtension:"json") { try vocabularyExportWriter(data,url) }
             transferMessage = "Exported words, snippets, and replacements."
         } catch { transferMessage = "Couldn’t export vocabulary. Choose a supported location outside protected files and try again." }
     }

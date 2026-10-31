@@ -7,6 +7,8 @@ final class TerminationCoordinator {
     private let onIntent: () -> Void
     private let savedImports: Begin, cancelSavedImports: () -> Void
     private var savedImportsReady: Bool?
+    private let meeting: Begin, cancelMeeting: () -> Void
+    private var meetingReady: Bool?
     private let experimentalRetry: Begin
     private let cancelExperimentalRetry: () -> Void
     private var experimentalRetryReady: Bool?
@@ -27,10 +29,12 @@ final class TerminationCoordinator {
          parakeet: @escaping Begin = { $0(true) }, cancelParakeet: @escaping () -> Void = {},
          localCleanup: @escaping Begin = { $0(true) }, cancelLocalCleanup: @escaping () -> Void = {},
          savedImports: @escaping Begin = { $0(true) }, cancelSavedImports: @escaping () -> Void = {},
+         meeting: @escaping Begin = { $0(true) }, cancelMeeting: @escaping () -> Void = {},
          experimentalRetry: @escaping Begin = { $0(true) }, cancelExperimentalRetry: @escaping () -> Void = {},
          cancelClipboard: @escaping () -> Void, cancelUpdater: @escaping () -> Void,
          reply: @escaping (Bool) -> Void, failure: @escaping () -> Void, onIntent: @escaping () -> Void = {}) {
         self.onIntent = onIntent
+        self.meeting = meeting; self.cancelMeeting = cancelMeeting
         self.savedImports = savedImports; self.cancelSavedImports = cancelSavedImports
         self.clipboard = clipboard; self.updater = updater; self.download = download; self.cancelDownload = cancelDownload
         self.cancelClipboard = cancelClipboard; self.cancelUpdater = cancelUpdater
@@ -46,6 +50,10 @@ final class TerminationCoordinator {
         onIntent() // revoke review authority even when no execution remains to drain
         let token = UUID(); intent = token
         clipboardReady = nil; updaterReady = nil; downloadReady = nil; preparationReady = nil; localCleanupReady = nil; appleSpeechReady = nil; parakeetReady = nil; requesting = true
+        meetingReady = nil
+        meeting { [weak self] allowed in
+            guard let self,self.intent == token else { return }; self.meetingReady = allowed; self.settle(token,allowed:allowed)
+        }
         savedImportsReady = nil
         savedImports { [weak self] allowed in
             guard let self, self.intent == token else { return }
@@ -80,7 +88,7 @@ final class TerminationCoordinator {
             self.settle(token, allowed: allowed)
         }
         requesting = false
-        if savedImportsReady == false || experimentalRetryReady == false || clipboardReady == false || updaterReady == false || downloadReady == false || preparationReady == false || localCleanupReady == false || appleSpeechReady == false || parakeetReady == false { cancel(); return .terminateCancel }
+        if meetingReady == false || savedImportsReady == false || experimentalRetryReady == false || clipboardReady == false || updaterReady == false || downloadReady == false || preparationReady == false || localCleanupReady == false || appleSpeechReady == false || parakeetReady == false { cancel(); return .terminateCancel }
         if allReady { intent = nil; return .terminateNow }
         return .terminateLater
     }
@@ -94,9 +102,9 @@ final class TerminationCoordinator {
         if !allowed { cancel(); reply(false) }
         else if allReady { intent = nil; reply(true) }
     }
-    private var allReady: Bool { savedImportsReady == true && experimentalRetryReady == true && clipboardReady == true && updaterReady == true && downloadReady == true && preparationReady == true && localCleanupReady == true && appleSpeechReady == true && parakeetReady == true }
+    private var allReady: Bool { meetingReady == true && savedImportsReady == true && experimentalRetryReady == true && clipboardReady == true && updaterReady == true && downloadReady == true && preparationReady == true && localCleanupReady == true && appleSpeechReady == true && parakeetReady == true }
     private func cancel() {
-        intent = nil; cancelSavedImports(); cancelExperimentalRetry(); cancelClipboard(); cancelUpdater(); cancelDownload(); cancelPreparation(); cancelLocalCleanup(); cancelAppleSpeech(); cancelParakeet(); failure()
+        intent = nil; cancelMeeting(); cancelSavedImports(); cancelExperimentalRetry(); cancelClipboard(); cancelUpdater(); cancelDownload(); cancelPreparation(); cancelLocalCleanup(); cancelAppleSpeech(); cancelParakeet(); failure()
     }
 }
 

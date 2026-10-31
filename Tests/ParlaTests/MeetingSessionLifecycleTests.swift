@@ -36,7 +36,11 @@ final class LifecycleMeetingBottom: MeetingStorageBottom {
     var tick: TimeInterval = 0, space = Int64.max, ancestorACL = 0, writeLimit = Int.max, interruptWrites = false
     var closeFailureAt: Int?, closeCount = 0, closes: [Int32] = [], payloadReads = 0, writes = 0, calls = 0
     // Opt-in for stream byte oracles. Existing foundation fixtures keep their compact zero-source default.
-    var retainSourceBytes = false
+    var retainSourceBytes = false, retainResultBytes = false
+    var openFault: ((Int32?,String,MeetingOpenMode) throws -> Void)?
+    var namedFault: ((Int32,String) throws -> Void)?
+    var openedFDs: [Int32] = [], streamCloses: [Int32] = [], openNames: [String] = [], namedNames: [String] = []
+    var uptimeReads = 0, uptimeHook: (() -> Void)?
     var observe: ((String,String?) -> Void)?
     var events: [(String,String?)] = [], cut: Int?, advanceAtWrite = false
     init(depth: Int = 12) {
@@ -47,25 +51,25 @@ final class LifecycleMeetingBottom: MeetingStorageBottom {
         var node = top
         for name in parts.dropLast() { nextInode += 1; let child = Node(name:name,inode:nextInode,directory:true); node.children[name] = child; node = child }
     }
-    func uptime() -> TimeInterval { tick }
+    func uptime() -> TimeInterval { uptimeReads += 1; uptimeHook?(); return tick }
     func checkpoint(_ operation: String, name: String?) throws {
         observe?(operation,name); events.append((operation,name)); if advanceAtWrite && operation == "write" { tick += 31 }
         if events.count-1 == cut { throw Cut.injected }
     }
     func reset(cut: Int? = nil) { events.removeAll(); self.cut = cut }
     func open(parent: Int32?, name: String, mode: MeetingOpenMode) throws -> Int32 {
-        calls += 1; let node: Node
+        calls += 1; openNames.append(name); try openFault?(parent,name,mode); let node: Node
         if let parent {
             guard let p = descriptors[parent]?.node else { throw MeetingStorageFault.io }
             if mode == .exclusive {
                 guard p.children[name] == nil else { throw MeetingStorageFault.io }; nextInode += 1
                 let child = Node(name:name,inode:nextInode,directory:false)
                 if name.hasSuffix(".source.pending"),!retainSourceBytes { child.body = .source(Data(),0) }
-                if name.hasSuffix(".result.pending") { child.body = .raw(81,0) }
+                if name.hasSuffix(".result.pending"), !retainResultBytes { child.body = .raw(81,0) }
                 p.children[name] = child; node = child
             } else { guard let existing = p.children[name] else { throw MeetingStorageFault.missing }; node = existing }
         } else { guard name == "/",mode == .directory else { throw MeetingStorageFault.io }; node = top }
-        nextFD += 1; descriptors[nextFD] = .init(node); return nextFD
+        nextFD += 1; descriptors[nextFD] = .init(node); openedFDs.append(nextFD); return nextFD
     }
     func mkdir(parent: Int32, name: String) throws {
         calls += 1; guard let p = descriptors[parent]?.node,p.children[name] == nil else { throw MeetingStorageFault.io }
@@ -73,7 +77,7 @@ final class LifecycleMeetingBottom: MeetingStorageBottom {
         if name == "meeting" { node.privateRoot = true; rootNode = node }
     }
     func inspect(_ fd: Int32) throws -> stat { calls += 1; guard let node = descriptors[fd]?.node else { throw MeetingStorageFault.io }; return node.s }
-    func named(parent: Int32, name: String) throws -> stat? { calls += 1; guard let p = descriptors[parent]?.node else { throw MeetingStorageFault.io }; return p.children[name]?.s }
+    func named(parent: Int32, name: String) throws -> stat? { calls += 1; namedNames.append(name); try namedFault?(parent,name); guard let p = descriptors[parent]?.node else { throw MeetingStorageFault.io }; return p.children[name]?.s }
     func volume(_ fd: Int32) throws -> MeetingVolume { calls += 1; guard descriptors[fd] != nil else { throw MeetingStorageFault.io }; return .init(local:true,name:"apfs") }
     func finderAlias(_ fd: Int32) throws -> Bool { calls += 1; guard descriptors[fd] != nil else { throw MeetingStorageFault.io }; return false }
     func denyACLCount(_ fd: Int32, maximum: Int, check: () throws -> Void) throws -> Int { calls += 1; guard let n = descriptors[fd]?.node else { throw MeetingStorageFault.io }; let count = n.s.st_mode & S_IFMT == S_IFDIR && !n.privateRoot ? ancestorACL : 0; guard count >= 0,count <= maximum else { throw MeetingStorageFault.io }; for _ in 0...count { try check() }; return count }
@@ -84,7 +88,7 @@ final class LifecycleMeetingBottom: MeetingStorageBottom {
         calls += 1; guard let d = descriptors[stream],d.stream else { throw MeetingStorageFault.io }
         let names = [".",".."]+d.node.children.keys.sorted(); guard d.position < names.count else { return nil }; defer { d.position += 1 }; return names[d.position]
     }
-    func closeStream(_ stream: Int32) throws { try close(stream) }
+    func closeStream(_ stream: Int32) throws { streamCloses.append(stream); try close(stream) }
     func read(_ fd: Int32, maximum: Int) throws -> Data {
         calls += 1; guard let d = descriptors[fd],maximum <= 65_536 else { throw MeetingStorageFault.io }
         if d.node.name.hasSuffix(".wav") || d.node.name.hasSuffix(".pending") || d.node.name.hasSuffix(".raw.txt") { payloadReads += 1 }
@@ -788,5 +792,444 @@ final class MeetingStreamingIngressLifecycleTests: XCTestCase {
             XCTAssertEqual(rig.saved.reduce(0) { $0+max(0,$1.count-44) },min(frames,960_000)*2)
             XCTAssertTrue(rig.store.actualHoldsDrained); try await detach(rig)
         }
+    }
+}
+
+
+extension MeetingSessionLifecycleTests {
+    func testCachedMetadataIsPureAndKeepsExactDatesSelectionsAndChunkOrder() async throws {
+        let bottom = LifecycleMeetingBottom(); var clocks = 0
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{clocks += 1; return 1_000_000_000_000})
+        XCTAssertNil(try store.metadata()); XCTAssertEqual(clocks,0); XCTAssertEqual(bottom.calls,0)
+        let source = lifecycleID(3),epoch = lifecycleID(200),session = lifecycleID(2)
+        let selection = MeetingSession.Selection(instance:source,kind:.microphone,label:"Literal microphone",generation:7)
+        let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16000,epoch:epoch,mapping:.unknown)
+        _ = try store.admit(owner:lifecycleID(1),session:session,selections:[selection],segments:[.init(id:lifecycleID(100),track:0,generation:7,timing:timing,canonicalStart:0)],authorized:{true})
+        let before = bottom.calls,clockBefore = clocks,metadata = try XCTUnwrap(store.metadata())
+        XCTAssertEqual(metadata.created,1_000_000_000_000); XCTAssertEqual(metadata.expires,605_800_000_000_000)
+        XCTAssertEqual(metadata.selections,[selection]); XCTAssertTrue(metadata.chunks.isEmpty); XCTAssertTrue(metadata.provenance.isEmpty)
+        XCTAssertEqual(bottom.calls,before); XCTAssertEqual(clocks,clockBefore)
+        _ = try store.terminal(reason:.normalStop,unknownMask:0,generation:1,holdEpoch:1,flags:127,authorized:{true}); store.reserveQuit(); try store.detach()
+    }
+    @MainActor func testLoadedProtectionUsesCachedFullMembersWithoutPayloadReads() async throws {
+        let r = MeetingLifecycleRig(); await r.releaseStop()
+        guard await hubComplete({ do { try await r.start(); try await r.seal(); try await r.owner.stop() } catch { XCTFail("Setup failed") } }) else { return }
+        let reads = r.bottom.payloadReads,carry = r.bottom.descriptors.count
+        var paths: [URL] = []
+        let value = try r.owner.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{ protection in paths = protection.files },perform:{17})
+        XCTAssertEqual(value,17); XCTAssertEqual(paths.count,4); XCTAssertTrue(paths.contains { $0.lastPathComponent.hasSuffix(".source.wav") })
+        XCTAssertEqual(r.bottom.payloadReads,reads); XCTAssertEqual(r.bottom.descriptors.count,carry)
+        r.owner.reserveQuit(); guard await hubComplete({do {try await r.owner.committedDetach()} catch {XCTFail("Detach failed")}}) else {return}
+    }
+    func testColdEveryAncestorAbsenceAndExistingUnopenedRefusal() throws {
+        for depth in 1...12 {
+            for missing in 1...depth {
+                let bottom = LifecycleMeetingBottom(depth:depth)
+                var node = bottom.top
+                for i in 0..<missing-1 { node = node.children["p\(i)"]! }
+                let name = missing == depth ? "meeting" : "p\(missing-1)"; node.children.removeValue(forKey:name)
+                let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{XCTFail("Protection has no wall query");return 0})
+                var writes = 0
+                try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{ _ in },perform:{writes += 1})
+                XCTAssertEqual(writes,1); XCTAssertEqual(bottom.payloadReads,0); XCTAssertTrue(bottom.descriptors.isEmpty)
+                XCTAssertFalse(bottom.events.contains {$0.0 == "root-registered" || $0.0 == "flock-acquired"})
+            }
+        }
+        let bottom = LifecycleMeetingBottom(depth:1)
+        bottom.top.children["meeting"] = .init(name:"meeting",inode:777,directory:true)
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{0})
+        XCTAssertThrowsError(try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in XCTFail()},perform:{XCTFail()}))
+        XCTAssertTrue(bottom.descriptors.isEmpty); XCTAssertEqual(bottom.payloadReads,0)
+    }
+    func testColdCloseUnknownCannotBeClearedByAnEmptyMetadataProjection() throws {
+        let bottom = LifecycleMeetingBottom(depth:2); bottom.closeFailureAt = 1
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{0})
+        XCTAssertThrowsError(try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in},perform:{}))
+        XCTAssertTrue(store.protectionQuarantined); XCTAssertNil(try store.metadata())
+        XCTAssertThrowsError(try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in},perform:{XCTFail()}))
+    }
+    @MainActor func testAcceptedReplacementRetiresBeforeNextAttemptAndVerifiedTextKeepsRawBytes() async throws {
+        let r = MeetingLifecycleRig(); await r.releaseStop(); await r.consumerExit.open()
+        guard await hubComplete({do {try await r.start();try await r.seal();try await r.owner.stop();try await r.owner.transcribe(chunk:r.input().id,requested:lifecycleProvenance(false))} catch {XCTFail("First part failed")}}) else {return}
+        let first = try XCTUnwrap(r.owner.metadata?.chunks.first?.accepted)
+        guard await hubComplete({do {try await r.owner.transcribe(chunk:r.input().id,requested:lifecycleProvenance(false))} catch {XCTFail("Replacement failed")}}) else {return}
+        let replacement = try XCTUnwrap(r.owner.metadata?.chunks.first?.accepted)
+        XCTAssertNotEqual(first.id,replacement.id); XCTAssertEqual(r.owner.metadata?.retirement,.some(.none))
+        XCTAssertFalse(r.bottom.names.contains(first.id.uuidString.lowercased()+".raw.txt"))
+        guard await hubComplete({do {let text = try await r.owner.openAcceptedText(authorized:{true}); XCTAssertEqual(text.text,String(repeating:"Q",count:1024))} catch {XCTFail("Verified read failed")}}) else {return}
+        r.owner.reserveQuit(); guard await hubComplete({do {try await r.owner.committedDetach()} catch {XCTFail("Detach failed")}}) else {return}
+    }
+}
+
+
+private final class HubReadinessRelease: @unchecked Sendable {
+    private let lock = NSLock(), returned = DispatchSemaphore(value:0)
+    private var observed = false
+    let workerExit = XCTestExpectation(description:"independent readiness release completed")
+    func start(_ gate: HubOwnedLatch) {
+        DispatchQueue.global().async { [self] in
+            let completed = returned.wait(timeout:.now()+2) == .success
+            lock.withLock {observed = completed}; gate.open(); workerExit.fulfill()
+        }
+    }
+    func didReturn() {returned.signal()}
+    var releasedAfterRead: Bool {lock.withLock {observed}}
+}
+extension MeetingStreamingIngressLifecycleTests {
+    @MainActor func testR2HeldWriterReadinessReturnsBeforeIndependentNonMainRelease() async throws {
+        let rig = StreamingMeetingRig();try await rig.start()
+        let entered = XCTestExpectation(description:"actual stream writer owns store lock")
+        let held = HubCheckpointHold(entered:entered,match:{$0 == "write" && $1?.hasSuffix(".source.pending") == true})
+        defer {held.latch.open();Task {await rig.release()}}
+        rig.bottom.observe = held.observe;try rig.fill(480_000)
+        guard await hubEntered([entered]) else {return}
+        let release = HubReadinessRelease();release.start(held.latch)
+        rig.owner.reserveQuit()
+        let ready = rig.owner.shutdownReady // Original C blocks here until the independent two-second fallback.
+        release.didReturn();XCTAssertFalse(ready)
+        guard await hubEntered([release.workerExit]) else {return}
+        XCTAssertTrue(release.releasedAfterRead,"Readiness must have actually returned before writer release")
+        XCTAssertFalse(held.latch.timedOut)
+        await rig.release();guard await hubComplete({let ready = await rig.owner.beginShutdown();XCTAssertTrue(ready)}) else {return}
+        guard await hubComplete({do {try await rig.owner.committedDetach()} catch {XCTFail("known detach failed")}}) else {return}
+        XCTAssertTrue(rig.bottom.descriptors.isEmpty)
+    }
+}
+
+
+/// A finite durable sequence rig: real owner/store/execution interner, virtual IO,
+/// literal raw job completion. Queue/acquisition/native-free consumer composition has separate tests.
+@MainActor final class MeetingSequenceRig {
+    let bottom = LifecycleMeetingBottom(), execution = MeetingRecognitionExecution()
+    let settings = HubSavedSettings(), session = UUID(), source = UUID(), segment = UUID(), epoch = UUID()
+    let store: MeetingSessionStore
+    var owner: MeetingSessionOwner!
+    var jobs: [MeetingRecognitionExecution.Job] = [], ids: [UUID] = []
+    var raw: (Int) -> Data = {Data("part-\($0)".utf8)}
+    var identity: RecognitionIdentity?, failIndex: Int?
+    var onJob: ((MeetingRecognitionExecution.Job) -> Void)?
+    init() {
+        bottom.retainSourceBytes = true;bottom.retainResultBytes = true
+        store = .init(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+        owner = freshOwner()
+        execution.bind(enqueue:{[unowned self] job in
+            let index = ids.firstIndex(of:job.context.chunk)!
+            jobs.append(job);onJob?(job)
+            if failIndex == index {job.put(.failure(MeetingSession.Failure.unavailable))}
+            else {job.put(.success((raw(index),identity)))}
+            return Task {job.operation.finish()}
+        },diagnostics:DiagnosticStore())
+    }
+    private func freshOwner() -> MeetingSessionOwner {
+        .init(store:store,capture:.init(validate:{_ in true},start:{ selections in
+            .init(first:selections.first.map {.init(source:$0.instance,exit:.actual(Task {}))},second:nil)
+        },requestStop:{}),recognition:execution.port,wallClock:{1_000_000_000_000},holdEpoch:1)
+    }
+    func seed(_ count: Int,lastFrames: Int = 8000,speech: Bool = false) async throws {
+        precondition((1...17).contains(count) && (1...8000).contains(lastFrames))
+        let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16000,epoch:epoch,mapping:.unknown)
+        try await owner.start(owner:UUID(),session:session,selections:[.init(instance:source,kind:.microphone,label:"Literal microphone",generation:7)],segments:[.init(id:segment,track:0,generation:7,timing:timing,canonicalStart:0)])
+        for i in 0..<count {
+            let id = UUID();ids.append(id)
+            let frames = i == count-1 ? lastFrames : 8000
+            var bytes = lifecycleWAV()
+            if frames != 8000 {
+                bytes.replaceSubrange(44..<bytes.count,with:Data(repeating:0,count:frames*2))
+                for (offset,value) in [(4,36+frames*2),(40,frames*2)] {bytes.replaceSubrange(offset..<offset+4,with:(0..<4).map {UInt8(truncatingIfNeeded:value >> ($0*8))})}
+            }
+            if speech {for frame in 0..<frames {bytes[44+frame*2+1] = 64}}
+            let input = try MeetingSessionStore.ChunkInput(session:session,source:source,id:id,generation:1,track:0,sourceGeneration:7,segment:segment,sequence:UInt64(i),start:UInt64(i*8000),frames:UInt64(frames),timing:timing,bytes:bytes)
+            let ticket = try owner.reserveInput(id:UUID(),track:0);try await owner.submit(ticket,input:input)
+        }
+        try await owner.stop()
+    }
+    func transcribe(_ index: Int) async throws {
+        try execution.prime(owner.metadata?.provenance ?? [])
+        let context = MeetingRecognitionExecution.Context(session:session,chunk:ids[index],generation:1,intent:UUID(),configuration:.init(settings.current),selectionEpoch:UUID(),preparationEpoch:nil,authority:.init(),authorize:{true})
+        let requested = try execution.prepare(context)
+        do {try await owner.transcribe(chunk:ids[index],requested:requested);await execution.settled()}
+        catch {await execution.settled();throw error}
+    }
+    func detach() async throws {owner.reserveQuit();try await owner.committedDetach()}
+    func reopen() async throws {
+        // New normally opened store, same virtual bottom/bytes; no old lease is reused.
+        let next = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+        owner = .init(store:next,capture:.init(validate:{_ in XCTFail("metadata only");return false},start:{_ in XCTFail("metadata only");return .init(first:nil,second:nil)},requestStop:{}),recognition:execution.port,wallClock:{1_000_000_000_000},holdEpoch:1)
+        try await owner.openMetadata();try execution.prime(owner.metadata?.provenance ?? [])
+    }
+}
+extension MeetingSessionLifecycleTests {
+    @MainActor func testSeventeenDurableAcceptedPartsReopenAndReprimeExactTwoRows() async throws {
+        let r = MeetingSequenceRig()
+        guard await hubComplete({do {
+            try await r.seed(17)
+            for index in 0..<17 {try await r.transcribe(index)}
+        } catch {XCTFail("durable sequence failed: \(error)")}}) else {return}
+        let original = try XCTUnwrap(r.owner.metadata),rows = original.provenance
+        XCTAssertEqual(original.chunks.compactMap(\.accepted).count,17);XCTAssertEqual(rows.count,2)
+        let requested = try XCTUnwrap(rows.first {$0.role == .requested}),observed = try XCTUnwrap(rows.first {$0.role == .observed})
+        XCTAssertTrue(original.chunks.allSatisfy {$0.accepted?.requested == requested.id && $0.accepted?.observed == observed.id})
+        XCTAssertEqual(original.chunks.map(\.sequence),Array(0..<17).map(UInt64.init))
+        let beforeReopenReads = r.bottom.payloadReads
+        guard await hubComplete({do {try await r.detach();try await r.reopen()} catch {XCTFail("reopen failed")}}) else {return}
+        XCTAssertEqual(r.bottom.payloadReads,beforeReopenReads,"explicit metadata reopen never reads audio or raw text")
+        let reads = r.bottom.payloadReads,calls = r.bottom.calls,reopened = try XCTUnwrap(r.owner.metadata)
+        XCTAssertEqual(reopened.created,original.created);XCTAssertEqual(reopened.expires,original.expires)
+        XCTAssertEqual(reopened.chunks,original.chunks);XCTAssertEqual(reopened.provenance,rows)
+        XCTAssertEqual(try r.owner.store.metadata(),reopened);XCTAssertEqual(r.bottom.payloadReads,reads);XCTAssertEqual(r.bottom.calls,calls)
+        guard await hubComplete({do {try await r.transcribe(16)} catch {XCTFail("replacement with re-primed rows failed")}}) else {return}
+        XCTAssertEqual(r.owner.metadata?.provenance,rows)
+        XCTAssertEqual(r.owner.metadata?.chunks.last?.accepted?.requested,requested.id)
+        XCTAssertEqual(r.owner.metadata?.chunks.last?.accepted?.observed,observed.id)
+        XCTAssertEqual(r.jobs.count,18)
+        guard await hubComplete({do {try await r.detach()} catch {XCTFail("detach failed")}}) else {return}
+        XCTAssertTrue(r.bottom.descriptors.isEmpty)
+    }
+    @MainActor func testReplacementPhysicalRetirementPrecedesSuccessorAndFailureBlocksSuccessor() async throws {
+        for failRetirement in [false,true] {
+            let r = MeetingSequenceRig()
+            guard await hubComplete({do {try await r.seed(2);try await r.transcribe(0)} catch {XCTFail("prefix failed")}}) else {return}
+            let old = try XCTUnwrap(r.owner.metadata?.chunks[0].accepted),oldName = old.id.uuidString.lowercased()+".raw.txt"
+            var sawUnlink = false
+            r.bottom.observe = {op,name in
+                if op == "unlink",name == oldName {
+                    sawUnlink = true
+                    if failRetirement {r.bottom.cut = r.bottom.events.count}
+                }
+            }
+            guard await hubComplete({do {
+                try await r.transcribe(0)
+                if failRetirement {XCTFail("retirement failure must refuse completion")}
+            } catch {if !failRetirement {XCTFail("replacement failed")}}}) else {return}
+            XCTAssertTrue(sawUnlink)
+            XCTAssertNotEqual(r.owner.metadata?.chunks[0].accepted?.id,old.id)
+            if failRetirement {
+                XCTAssertTrue(r.bottom.names.contains(oldName));XCTAssertEqual(r.owner.state,.unavailable);XCTAssertNotNil(r.owner.concern)
+                let jobs = r.jobs.count
+                guard await hubComplete({do {try await r.transcribe(1);XCTFail("successor must remain fenced")} catch {}}) else {return}
+                XCTAssertEqual(r.jobs.count,jobs);r.owner.reserveQuit();XCTAssertFalse(r.owner.shutdownReady)
+            } else {
+                XCTAssertFalse(r.bottom.names.contains(oldName));XCTAssertEqual(r.owner.metadata?.retirement,.some(.none))
+                r.onJob = {[weak r] job in guard let r else {return};if job.context.chunk == r.ids[1] {XCTAssertFalse(r.bottom.names.contains(oldName))}}
+                guard await hubComplete({do {try await r.transcribe(1);try await r.detach()} catch {XCTFail("successor failed")}}) else {return}
+            }
+            r.bottom.observe = nil
+        }
+    }
+    @MainActor func testVerifiedUTF8AssemblyAtRawLimitAndChangedSelectionSetRefusesOutput() async throws {
+        let r = MeetingSequenceRig()
+        // Sixteen actual 64 KiB UTF-8 results hit the inherited 1 MiB cap exactly.
+        let part = String(repeating:"é",count:32_768),partBytes = Data(part.utf8)
+        r.raw = {_ in partBytes}
+        guard await hubComplete({do {try await r.seed(17);for i in 0..<16 {try await r.transcribe(i)}} catch {XCTFail("bounded raw aggregate failed")}}) else {return}
+        guard await hubComplete({do {
+            let text = try await r.owner.openAcceptedText(authorized:{true})
+            XCTAssertEqual(text.text.utf8.count,1_048_606)
+            XCTAssertEqual(text.text,Array(repeating:part,count:16).joined(separator:"\n\n"))
+            XCTAssertLessThanOrEqual(text.text.utf8.count,1_049_054)
+            // Replace a selected result. The earlier exact metadata/result set is no longer an output grant.
+            r.raw = {_ in Data("replacement".utf8)};try await r.transcribe(0)
+            XCTAssertThrowsError(try r.owner.beginExplicitOutput(text))
+        } catch {XCTFail("text boundary failed")}}) else {return}
+        XCTAssertThrowsError(try MeetingSessionStore.ResultInput(Data(repeating:65,count:65_537)))
+        XCTAssertThrowsError(try MeetingSessionStore.ResultInput(Data([0xc3,0x28])))
+        guard await hubComplete({do {try await r.detach()} catch {XCTFail("detach failed")}}) else {return}
+    }
+}
+
+
+extension MeetingSessionLifecycleTests {
+    func testProtectionColdAtomicRetryPrechargeAndDeniedInterrupt129() throws {
+        for interrupts in [1,129] {
+            let bottom = LifecycleMeetingBottom(depth:2)
+            let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{XCTFail("no wall read");return 0})
+            var attempts = 0,lastTimeCount: Int?,timeDeltas: [Int] = [],writes = 0
+            bottom.openFault = {_,name,_ in
+                guard name == "/" else {return}
+                attempts += 1
+                if let lastTimeCount {timeDeltas.append(bottom.uptimeReads-lastTimeCount)}
+                lastTimeCount = bottom.uptimeReads
+                if attempts <= interrupts {throw MeetingStorageFault.interrupted}
+            }
+            do {
+                try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in},perform:{writes += 1})
+                XCTAssertEqual(interrupts,1)
+            } catch {XCTAssertEqual(interrupts,129)}
+            XCTAssertEqual(attempts,interrupts == 1 ? 2 : 129)
+            XCTAssertTrue(timeDeltas.allSatisfy {$0 == 3},"interrupt charge, empty retry check, and next F3 attempt each consult original Work time")
+            XCTAssertEqual(writes,interrupts == 1 ? 1 : 0)
+            XCTAssertEqual(bottom.events.filter {$0.0 == "protection-entry"}.count,1)
+            XCTAssertEqual(bottom.events.filter {$0.0 == "protection-path-open" && $0.1 == "/"}.count,attempts)
+            XCTAssertEqual(bottom.closes,Array(bottom.openedFDs.reversed()));XCTAssertEqual(Set(bottom.closes).count,bottom.closes.count)
+            XCTAssertTrue(bottom.descriptors.isEmpty);XCTAssertEqual(bottom.payloadReads,0)
+            XCTAssertFalse(bottom.events.contains {$0.0 == "root-registered" || $0.0 == "flock-acquired" || $0.0 == "cold-acquire"})
+        }
+        let bottom = LifecycleMeetingBottom(depth:1)
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{0})
+        var afterEntry: Int?
+        bottom.observe = {op,_ in if op == "protection-entry" {afterEntry = 0}}
+        bottom.uptimeHook = {
+            guard let value = afterEntry else {return};afterEntry = value+1
+            if afterEntry == 2 {bottom.tick = 31} // V2 charge returned; first F3 attempt precharge now refuses.
+        }
+        XCTAssertThrowsError(try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in XCTFail()},perform:{XCTFail()}))
+        XCTAssertTrue(bottom.openNames.isEmpty,"expired Work refuses F3 before first atomic open")
+    }
+    func testProtectionReturnedFDIsTrackedBeforePostOpenFailureAndClosesInReverseOnce() throws {
+        let bottom = LifecycleMeetingBottom(depth:3)
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{0})
+        var returns = 0
+        bottom.observe = {op,_ in
+            if op == "base-open" {returns += 1;if returns == 2 {bottom.cut = bottom.events.count}}
+        }
+        XCTAssertThrowsError(try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in XCTFail()},perform:{XCTFail()}))
+        XCTAssertEqual(bottom.openedFDs.count,2);XCTAssertEqual(bottom.closes,Array(bottom.openedFDs.reversed()))
+        XCTAssertEqual(Set(bottom.closes).count,2);XCTAssertTrue(bottom.descriptors.isEmpty)
+        XCTAssertEqual(bottom.payloadReads,0);XCTAssertFalse(store.protectionQuarantined)
+    }
+    @MainActor func testProtectionLoadedNamedRetryPrechargeDeniesInterrupt129AndExitsOutput() async throws {
+        let r = MeetingSequenceRig()
+        guard await hubComplete({do {try await r.seed(1)} catch {XCTFail("loaded setup failed")}}) else {return}
+        let carry = Set(r.bottom.descriptors.keys),reads = r.bottom.payloadReads,openCount = r.bottom.openNames.count,begin = r.bottom.events.count
+        var active = false,attempts = 0,last: Int?,deltas: [Int] = [],writes = 0
+        r.bottom.observe = {op,_ in if op == "protection-entry" {active = true}}
+        r.bottom.namedFault = {_,name in
+            guard active,name == "owner.json" else {return}
+            attempts += 1;if let last {deltas.append(r.bottom.uptimeReads-last)};last = r.bottom.uptimeReads
+            throw MeetingStorageFault.interrupted
+        }
+        XCTAssertThrowsError(try r.owner.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in XCTFail()},perform:{writes += 1}))
+        XCTAssertEqual(attempts,129);XCTAssertTrue(deltas.allSatisfy {$0 == 3})
+        XCTAssertEqual(writes,0);XCTAssertEqual(r.bottom.openNames.count,openCount,"loaded protection never opens a member")
+        XCTAssertEqual(r.bottom.payloadReads,reads);XCTAssertEqual(Set(r.bottom.descriptors.keys),carry)
+        XCTAssertTrue(r.store.actualHoldsDrained,"exact output hold exits even after retry-budget refusal")
+        r.owner.reserveQuit();XCTAssertFalse(r.owner.shutdownReady)
+        XCTAssertFalse(r.bottom.events.dropFirst(begin).contains {$0.0 == "root-registered" || $0.0 == "flock-acquired"})
+    }
+    @MainActor func testProtectionPostStreamTransferFailureUsesOnlyOnceStreamCloseAndPreservesCarry() async throws {
+        let r = MeetingSequenceRig()
+        guard await hubComplete({do {try await r.seed(1)} catch {XCTFail("loaded setup failed")}}) else {return}
+        let carry = Set(r.bottom.descriptors.keys),closeStart = r.bottom.closes.count,streamStart = r.bottom.streamCloses.count,reads = r.bottom.payloadReads
+        var active = false
+        r.bottom.observe = {op,_ in
+            if op == "protection-entry" {active = true}
+            if active,op == "fdopendir-transfer" {r.bottom.cut = r.bottom.events.count}
+        }
+        XCTAssertThrowsError(try r.owner.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in XCTFail()},perform:{XCTFail()}))
+        let closed = Array(r.bottom.closes.dropFirst(closeStart)),streams = Array(r.bottom.streamCloses.dropFirst(streamStart))
+        XCTAssertEqual(closed.count,1);XCTAssertEqual(closed,streams)
+        let closedFD = try XCTUnwrap(closed.first);XCTAssertFalse(carry.contains(closedFD))
+        XCTAssertEqual(Set(r.bottom.descriptors.keys),carry);XCTAssertTrue(r.store.actualHoldsDrained);XCTAssertEqual(r.bottom.payloadReads,reads)
+    }
+    @MainActor func testProtectionFinalNamespaceMemberAndAuthorityChangesRefuseBeforeWriter() async throws {
+        enum Change: CaseIterable {case namespace,member,authority}
+        for change in Change.allCases {
+            let r = MeetingSequenceRig()
+            guard await hubComplete({do {try await r.seed(1)} catch {XCTFail("loaded setup failed")}}) else {return}
+            var allowed = true,writes = 0
+            let reads = r.bottom.payloadReads,carry = Set(r.bottom.descriptors.keys),begin = r.bottom.events.count
+            XCTAssertThrowsError(try r.owner.withExportProtection(operation:UUID(),authorized:{allowed},validateDestination:{_ in
+                switch change {
+                case .namespace:try r.bottom.add("unknown.json")
+                case .member:r.bottom.rootNode!.children["owner.json"]!.s.st_ino += 1
+                case .authority:allowed = false
+                }
+            },perform:{writes += 1}))
+            XCTAssertEqual(writes,0);XCTAssertEqual(r.bottom.payloadReads,reads);XCTAssertEqual(Set(r.bottom.descriptors.keys),carry)
+            XCTAssertTrue(r.store.actualHoldsDrained)
+            XCTAssertFalse(r.bottom.events.dropFirst(begin).contains {$0.0 == "root-registered" || $0.0 == "flock-acquired" || $0.0 == "read-open"})
+        }
+    }
+    func testProtectionOneOriginalWorkAcrossValidatorWriterAndFinishUncertainty() throws {
+        for boundary in ["validator-time","writer-time","phase-exit","close-observed","before-outward-receipt"] {
+            let bottom = LifecycleMeetingBottom(depth:3)
+            let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{0})
+            var writes = 0
+            bottom.observe = {op,_ in if op == boundary {bottom.cut = bottom.events.count}}
+            XCTAssertThrowsError(try store.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in
+                if boundary == "validator-time" {bottom.tick = 31}
+                else {bottom.tick = 20}
+            },perform:{writes += 1;if boundary == "writer-time" {bottom.tick = 31}}))
+            XCTAssertEqual(writes,boundary == "validator-time" ? 0 : 1)
+            XCTAssertEqual(bottom.events.filter {$0.0 == "protection-entry"}.count,1)
+            XCTAssertEqual(bottom.closes,Array(bottom.openedFDs.reversed()));XCTAssertEqual(Set(bottom.closes).count,bottom.closes.count)
+            XCTAssertTrue(bottom.descriptors.isEmpty);XCTAssertEqual(bottom.payloadReads,0)
+            if boundary == "close-observed" || boundary == "before-outward-receipt" {XCTAssertTrue(store.protectionQuarantined)}
+            XCTAssertFalse(bottom.events.contains {$0.0 == "root-registered" || $0.0 == "flock-acquired" || $0.0 == "cold-acquire"})
+        }
+    }
+}
+
+
+extension MeetingSessionLifecycleTests {
+    @MainActor func testReopenedSealedTooShortAndAcceptedSelectorsKeepDatesWithoutPayloadRead() async throws {
+        let r = MeetingSequenceRig()
+        guard await hubComplete({do {try await r.seed(2,lastFrames:100);try await r.transcribe(0)} catch {XCTFail("selector setup failed")}}) else {return}
+        let before = try XCTUnwrap(r.owner.metadata),reads = r.bottom.payloadReads
+        guard await hubComplete({do {try await r.detach();try await r.reopen()} catch {XCTFail("selector reopen failed")}}) else {return}
+        let after = try XCTUnwrap(r.owner.metadata)
+        XCTAssertEqual(after.created,before.created);XCTAssertEqual(after.expires,before.expires)
+        XCTAssertEqual(after.chunks.map(\.id),r.ids);XCTAssertEqual(after.chunks.map(\.stage),[.sealed,.tooShort])
+        XCTAssertEqual(after.chunks.map(\.frames),[8000,100]);XCTAssertEqual(after.chunks.map(\.generation),[1,1])
+        XCTAssertEqual(after.chunks.map(\.sourceGeneration),[7,7]);XCTAssertEqual(after.chunks.first?.accepted,before.chunks.first?.accepted)
+        XCTAssertNil(after.chunks.last?.accepted);XCTAssertEqual(r.bottom.payloadReads,reads)
+        guard await hubComplete({do {try await r.detach()} catch {XCTFail("selector detach failed")}}) else {return}
+    }
+    @MainActor func testRecoverableInterruptedAndDeletingMetadataReopenNeverStartsOrReadsPayload() async throws {
+        for deleting in [false,true] {
+            let bottom = LifecycleMeetingBottom(),session = UUID(),source = UUID(),segment = UUID(),epoch = UUID()
+            let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+            let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16000,epoch:epoch,mapping:.unknown)
+            _ = try store.admit(owner:UUID(),session:session,selections:[.init(instance:source,kind:.microphone,label:"Literal",generation:7)],segments:[.init(id:segment,track:0,generation:7,timing:timing,canonicalStart:0)],authorized:{true})
+            let input = try MeetingSessionStore.ChunkInput(session:session,source:source,id:UUID(),generation:1,track:0,sourceGeneration:7,segment:segment,sequence:0,start:0,frames:8000,timing:timing,bytes:lifecycleWAV())
+            let a = try store.chunkA(input,authorized:{true}),b = try store.chunkB(a,bytes:input.bytes,authorized:{true});_ = try store.chunkC(b,authorized:{true})
+            if deleting {_ = try store.deleteIntent(id:UUID(),terminalGeneration:1,holdEpoch:1,authorized:{true})}
+            let original = try XCTUnwrap(store.metadata());store.reserveQuit();try store.detach()
+            let reads = bottom.payloadReads
+            let next = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+            var starts = 0,recognitions = 0
+            let owner = MeetingSessionOwner(store:next,capture:.init(validate:{_ in XCTFail("metadata cannot validate capture");return false},start:{_ in starts += 1;return .init(first:nil,second:nil)},requestStop:{}),recognition:.init(run:{_,_ in recognitions += 1;return Task {.failure(CancellationError())}},requestCancel:{}),wallClock:{1_000_000_000_000},holdEpoch:1)
+            guard await hubComplete({do {try await owner.openMetadata()} catch {XCTFail("recoverable metadata open failed")}}) else {return}
+            XCTAssertEqual(owner.metadata?.created,original.created);XCTAssertEqual(owner.metadata?.expires,original.expires)
+            XCTAssertEqual(owner.metadata?.chunks.map(\.id),[input.id]);XCTAssertEqual(bottom.payloadReads,reads)
+            XCTAssertEqual(starts,0);XCTAssertEqual(recognitions,0)
+            if deleting {
+                XCTAssertEqual(owner.state,.deleting);XCTAssertEqual(owner.metadata?.deleting,true)
+                guard await hubComplete({do {try await owner.delete(id:UUID())} catch {XCTFail("durable deletion resume failed")}}) else {return}
+                XCTAssertNil(owner.metadata);XCTAssertTrue(bottom.descriptors.isEmpty)
+            } else {
+                XCTAssertEqual(owner.state,.stopped);XCTAssertEqual(owner.metadata?.terminal,.interrupted);XCTAssertEqual(owner.metadata?.unknownCoverage,true)
+                owner.reserveQuit();guard await hubComplete({do {try await owner.committedDetach()} catch {XCTFail("recovered interrupted detach failed")}}) else {return}
+                XCTAssertTrue(bottom.descriptors.isEmpty)
+            }
+        }
+    }
+}
+
+
+extension MeetingSessionLifecycleTests {
+    @MainActor func testLoadedNamedRetryNextAttemptPrechargeRefusesBeforeSecondPrimitive() async throws {
+        let r = MeetingSequenceRig()
+        guard await hubComplete({do {try await r.seed(1)} catch {XCTFail("loaded setup failed")}}) else {return}
+        var active = false,attempts = 0,afterInterrupt = 0
+        r.bottom.observe = {op,_ in if op == "protection-entry" {active = true}}
+        r.bottom.namedFault = {_,name in
+            guard active,name == "owner.json" else {return};attempts += 1
+            r.bottom.uptimeHook = {
+                afterInterrupt += 1
+                if afterInterrupt == 3 {r.bottom.tick = 31} // interrupt and empty-check admitted; next F1 refuses.
+            }
+            throw MeetingStorageFault.interrupted
+        }
+        XCTAssertThrowsError(try r.owner.withExportProtection(operation:UUID(),authorized:{true},validateDestination:{_ in XCTFail()},perform:{XCTFail()}))
+        XCTAssertEqual(attempts,1);XCTAssertEqual(afterInterrupt,3);XCTAssertTrue(r.store.actualHoldsDrained)
+    }
+    func testProtectionWorkDeniedInterrupt129KeepsOnly128Admissions() throws {
+        let bottom = LifecycleMeetingBottom(),work = SavedAudioImportStorage.MeetingLease.Work(bottom,carry:0)
+        for _ in 0..<128 {try work.charge(f:1);try work.charge(interrupt:true);try work.charge()}
+        try work.charge(f:1) // observed 129th attempt is prepaid; its interrupt admission is denied.
+        XCTAssertThrowsError(try work.charge(interrupt:true))
+        XCTAssertEqual(work.interrupts,128);XCTAssertEqual(work.fixed,129)
+        XCTAssertEqual(work.opens,0);XCTAssertEqual(work.closes,0)
     }
 }

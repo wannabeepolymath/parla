@@ -43,6 +43,109 @@ public final class MeetingSessionStore: @unchecked Sendable {
     public struct BorrowToken: Equatable, Sendable { fileprivate let context: MeetingStorageContext, epoch: UInt64, serial: UInt64; public let session: UUID, chunk: UUID, generation: UInt64; fileprivate let attempt: UUID }
     public enum Worker: Hashable, Sendable { case microphone, system, microphoneCallback, systemCallback, writer, output }
     public struct Hold: Equatable, Sendable { fileprivate let context: MeetingStorageContext, epoch: UInt64, serial: UInt64, kind: Worker }
+    public struct AcceptedMetadata: Equatable, Sendable {
+        public let id: UUID, generation: UInt64, sourceHash: String, hash: String, bytes: Int
+        public let requested: UUID, observed: UUID
+    }
+    public struct ChunkMetadata: Equatable, Sendable {
+        public let id: UUID, generation: UInt64, source: UUID, sourceGeneration: UInt64
+        public let track: Int, sequence: UInt64, canonicalStart: UInt64, frames: UInt64
+        public let stage: MeetingSession.Stage, accepted: AcceptedMetadata?, lastAttempt: UInt64?
+    }
+    public struct Metadata: Equatable, Sendable {
+        public enum Retirement: Equatable, Sendable { case none, retired, candidateUnavailable }
+        public let session: UUID, owner: UUID, revision: UInt64, created: Int64, expires: Int64
+        public let selections: [MeetingSession.Selection], chunks: [ChunkMetadata], provenance: [MeetingSession.Provenance]
+        public let terminal: MeetingSession.Reason?, unknownCoverage: Bool, expired: Bool, deleting: Bool, unavailable: Bool
+        public let retirement: Retirement
+    }
+    /// Exclusion facts only; neither a payload grant nor reusable file authority.
+    public struct Protection {
+        public let root: URL, bindings: [URL], files: [URL], identities: Set<SavedAudioImportStorage.Identity>
+        fileprivate let operation: UUID
+    }
+    private var protectionUncertain = false
+    public var protectionQuarantined: Bool { lock.withLock { protectionUncertain || lease.poisoned } }
+    public func metadata() throws -> Metadata? {
+        try lock.withLock {
+            guard let l = ledger else { if issue { throw Failure.unavailable }; return nil }
+            guard l.chunks.count <= 240,l.provenance.count <= 32,l.tracks.count <= 2 else { throw Failure.bounds }
+            // Bottom-up merge: <=8 passes and <=1920 comparisons/moves per buffer.
+            var order = Array(l.chunks.indices), scratch = order, width = 1
+            func before(_ a: Int,_ b: Int) throws -> Bool {
+                let x = l.chunks[a], y = l.chunks[b]
+                guard x.track != y.track || x.sequence != y.sequence else { throw Failure.schema }
+                return x.track < y.track || (x.track == y.track && x.sequence < y.sequence)
+            }
+            while width < order.count {
+                var start = 0
+                while start < order.count {
+                    let middle = min(start+width,order.count), end = min(start+width*2,order.count)
+                    var a = start, b = middle
+                    for out in start..<end {
+                        let takeLeft: Bool
+                        if a == middle { takeLeft = false } else if b == end { takeLeft = true } else { takeLeft = try before(order[a],order[b]) }
+                        if takeLeft { scratch[out] = order[a]; a += 1 } else { scratch[out] = order[b]; b += 1 }
+                    }
+                    start = end
+                }
+                swap(&order,&scratch); width *= 2
+            }
+            let chunks = try order.map { i -> ChunkMetadata in
+                let c = l.chunks[i]
+                let accepted = try c.accepted.map { r -> AcceptedMetadata in
+                    guard l.provenance.indices.contains(r.requested),l.provenance.indices.contains(r.observed) else { throw Failure.schema }
+                    return .init(id:r.id,generation:r.generation,sourceHash:r.sourceHash,hash:r.hash,bytes:r.bytes,
+                        requested:l.provenance[r.requested].id,observed:l.provenance[r.observed].id)
+                }
+                return .init(id:c.id,generation:c.generation,source:l.tracks[c.track].selection.instance,sourceGeneration:c.sourceGeneration,
+                    track:c.track,sequence:c.sequence,canonicalStart:c.start,frames:c.frames,stage:c.stage,accepted:accepted,lastAttempt:c.attempt?.state.rawValue)
+            }
+            return .init(session:l.session,owner:l.owner,revision:l.revision,created:l.admitted,expires:l.expires,
+                selections:l.tracks.map(\.selection),chunks:chunks,provenance:l.provenance,terminal:l.terminal?.reason,
+                unknownCoverage:l.terminal.map { $0.mask != 0 } ?? false,expired:expired,
+                deleting:l.state == .deleting || l.state == .authorityDead,unavailable:issue || interruptionPending,
+                retirement:l.extra.map { $0.kind == .retired ? .retired : .candidateUnavailable } ?? .none)
+        }
+    }
+    @discardableResult public func retireAcceptedReplacementIfNeeded(authorized: () -> Bool) throws -> Receipt? {
+        let needed = try lock.withLock { () throws -> Bool in
+            guard !issue,let l = ledger else { throw Failure.unavailable }
+            guard let extra = l.extra else { return false }
+            guard extra.kind == .retired else { throw Failure.unavailable }; return true
+        }
+        return needed ? try resultRetire(authorized:authorized) : nil
+    }
+    /// One synchronous action, two metadata passes, one Work through actual writer return.
+    public func withExportProtection<T>(operation: UUID, authorized: () -> Bool,
+        validateDestination: (Protection) throws -> Void, perform: () throws -> T) throws -> T {
+        try lock.withLock {
+            guard !issue,!protectionUncertain,!interruptionPending,!expired else { throw Failure.unavailable }
+            if let l = ledger {
+                guard l.state != .active,l.state != .deleting,l.state != .authorityDead,l.extra?.kind != .candidate,
+                      let ownerMember,let ledgerMember else { throw Failure.held }
+                return try lease.withLoadedProtection(authorized:authorized,catalog:{ names,lockMember in
+                    let all = self.targets(l)
+                    guard all.count <= 481,all.allSatisfy(\.exact) else { throw Failure.unavailable }
+                    try self.audit(names,l)
+                    var members: [String:Member] = ["lock":lockMember,"owner.json":ownerMember,"manifest.json":ledgerMember]
+                    for t in all {
+                        for name in t.aliases where names.contains(name) {
+                            guard members.updateValue(t.member,forKey:name) == nil else { throw Failure.schema }
+                        }
+                    }
+                    guard members.count == names.count,members.count <= 512 else { throw Failure.bounds }; return members
+                },validate:{ bindings,files,identities in
+                    try validateDestination(.init(root:self.lease.root,bindings:bindings,files:files,identities:identities,operation:operation))
+                },perform:perform)
+            }
+            do {
+                return try lease.withColdProtection(authorized:authorized,validate:{ bindings in
+                    try validateDestination(.init(root:self.lease.root,bindings:bindings,files:[],identities:[],operation:operation))
+                },perform:perform)
+            } catch { if lease.coldProtectionUncertain { protectionUncertain = true }; throw error }
+        }
+    }
     private typealias Lease = SavedAudioImportStorage.MeetingLease
     private typealias Ledger = MeetingSession.Ledger
     private typealias J = MeetingJSON

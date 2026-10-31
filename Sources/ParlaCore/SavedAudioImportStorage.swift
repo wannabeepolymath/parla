@@ -715,14 +715,161 @@ extension SavedAudioImportStorage {
                 }
             }
         }
-        private func directoryInfo(_ fd: Int32, privateRoot: Bool, strictParent: Bool, budget b: Work) throws -> stat {
+        private var protectionUID: uid_t?
+        private(set) var coldProtectionUncertain = false
+        private func protectionBoundary(_ label: String,_ b: Work,authorized: () -> Bool) throws {
+            try checkpoint(label,name:nil,fixed:17,b); guard authorized() else { throw Failure.revoked }
+        }
+        func withLoadedProtection<T>(authorized: () -> Bool,
+            catalog: (Set<String>,Member) throws -> [String:Member],
+            validate: ([URL],[URL],Set<Identity>) throws -> Void,perform: () throws -> T) throws -> T {
+            guard drained,!hasBorrow else { throw Failure.contended }
+            let hold = try register(.output)
+            var work: Work?, exitAttempted = false
+            do {
+                let b = try begin(); work = b
+                try checkpoint("protection-entry",name:nil,fixed:33,b)
+                guard authorized(),let lockMember else { throw Failure.revoked }
+                try b.charge(f:32)
+                try self.validate(b); let firstNames = try names(b), members = try catalog(firstNames,lockMember)
+                let identities = try protectionMembers(members,b,authorized:authorized)
+                let urls = members.keys.map { root.appendingPathComponent($0) }
+                let bound = bindings.indices.map { index in
+                    bindings.prefix(index+1).reduce(URL(fileURLWithPath:"/",isDirectory:true)) { $0.appendingPathComponent($1.name,isDirectory:true) }
+                }
+                try protectionBoundary("protection-before-validator",b,authorized:authorized)
+                try validate(bound,urls,identities.union(registered.map { [$0] } ?? []))
+                try protectionBoundary("protection-before-final",b,authorized:authorized)
+                try self.validate(b); guard try names(b) == firstNames else { throw Failure.changed }
+                guard try protectionMembers(members,b,authorized:authorized) == identities,authorized() else { throw Failure.changed }
+                let result = try perform() // actual synchronous return, including reentrancy and throws
+                guard authorized() else { throw Failure.revoked }
+                _ = try finish(b); exitAttempted = true; try actualExit(hold); return result
+            } catch {
+                if let b = work { fail(b) }
+                if exitAttempted { poisoned = true; unavailable = true }
+                else { exitAttempted = true; do { try actualExit(hold) } catch { poisoned = true; unavailable = true } }
+                throw error
+            }
+        }
+        private func protectionMembers(_ members: [String:Member],_ b: Work,authorized: () -> Bool) throws -> Set<Identity> {
+            guard members.count <= profile.members,let uid = protectionUID,let registered else { throw Failure.unavailable }
+            var identities = Set<Identity>()
+            for (name,expected) in members {
+                var observed: stat?
+                while true {
+                    try b.charge(f:1); guard authorized() else { throw Failure.revoked }
+                    do { observed = try bottom.named(parent:directory,name:name); break }
+                    catch MeetingStorageFault.interrupted { try b.charge(interrupt:true); try b.charge() }
+                }
+                guard let s = observed,s.st_mode & S_IFMT == S_IFREG,s.st_uid == uid,s.st_mode & 0o7777 == 0o600,
+                      s.st_nlink == 1,s.st_size >= 0,s.st_flags & 0x4000_0000 == 0,s.st_dev == registered.device,
+                      expected.matches(s) else { throw Failure.changed }
+                identities.insert(expected.identity); try b.charge(io:1)
+            }
+            return identities
+        }
+        /// Independent cold ownership; never activates or borrows the retired lease.
+        private final class ColdProtectionProbe {
+            private enum AttemptFailure: Error { case missing }
+            struct Held { let fd: Int32, identity: Identity, url: URL }
+            let lease: MeetingLease, work: Work, parts: [String]
+            var raw: [Int32] = [], held: [Held] = [], missing: String?, uncertain = false
+            init(_ lease: MeetingLease,parts: [String]) { self.lease = lease; self.parts = parts; work = Work(lease.bottom,carry:0); raw.reserveCapacity(13); held.reserveCapacity(12) }
+            func open(parent: Int32?,name: String,authorized: () -> Bool) throws -> Int32 {
+                while true {
+                    try work.charge(f:3); guard authorized() else { throw Failure.revoked }
+                    try lease.bottom.checkpoint("protection-path-open",name:name)
+                    let fd: Int32
+                    do { fd = try lease.bottom.open(parent:parent,name:name,mode:.directory) }
+                    catch MeetingStorageFault.interrupted { try work.charge(interrupt:true); try work.charge(); continue }
+                    catch MeetingStorageFault.missing { throw AttemptFailure.missing }
+                    raw.append(fd) // actual raw return is tracked before every fallible check
+                    try work.opened(); try lease.bottom.checkpoint("base-open",name:nil); return fd
+                }
+            }
+            func classify(_ fd: Int32,index: Int,url: URL) throws {
+                let s = try lease.directoryInfo(fd,privateRoot:false,strictParent:index == parts.count-1,budget:work,checkVolume:false)
+                held.append(.init(fd:fd,identity:Identity(s),url:url))
+            }
+            func initial(authorized: () -> Bool) throws {
+                work.path = 3072; try lease.checkpoint("protection-entry",name:nil,fixed:33,work); try work.charge(v:2)
+                let fd = try open(parent:nil,name:"/",authorized:authorized)
+                try classify(fd,index:0,url:URL(fileURLWithPath:"/",isDirectory:true))
+                for (i,name) in parts.enumerated() {
+                    guard authorized(),let parent = held.last else { throw Failure.revoked }
+                    let child: Int32
+                    do { child = try open(parent:parent.fd,name:name,authorized:authorized) }
+                    catch AttemptFailure.missing {
+                        missing = name; try absence(parent.fd,name:name); try volume(parent.fd); try work.checkTime(); return
+                    }
+                    guard i != parts.count-1 else { throw Failure.unknown }
+                    let url = parent.url.appendingPathComponent(name,isDirectory:true)
+                    try classify(child,index:i+1,url:url)
+                    guard let s = try lease.bottom.named(parent:parent.fd,name:name),Identity(s) == held.last!.identity,
+                          s.st_mode & S_IFMT == S_IFDIR else { throw Failure.changed }
+                }
+                throw Failure.unknown
+            }
+            func absence(_ parent: Int32,name: String) throws {
+                guard try lease.bottom.named(parent:parent,name:name) == nil else { throw Failure.changed }
+            }
+            func volume(_ fd: Int32) throws {
+                let v = try lease.bottom.volume(fd); guard v.local,v.name == "apfs" || v.name == "hfs" else { throw Failure.unavailable }
+            }
+            func final(authorized: () -> Bool) throws {
+                try work.charge(v:2); guard let missing,!held.isEmpty else { throw Failure.unavailable }
+                for (i,h) in held.enumerated() {
+                    guard authorized(),Identity(try lease.directoryInfo(h.fd,privateRoot:false,strictParent:i == parts.count-1,budget:work,checkVolume:false)) == h.identity else { throw Failure.changed }
+                    if i > 0 {
+                        guard let s = try lease.bottom.named(parent:held[i-1].fd,name:parts[i-1]),Identity(s) == h.identity,
+                              s.st_mode & S_IFMT == S_IFDIR else { throw Failure.changed }
+                    }
+                }
+                try absence(held.last!.fd,name:missing); try volume(held.last!.fd); try work.checkTime()
+            }
+            func closeAll() {
+                while let fd = raw.popLast() {
+                    work.closed(); var failed = false
+                    do { try lease.bottom.close(fd) } catch { failed = true }
+                    do { try lease.bottom.checkpoint("close-observed",name:nil) } catch { failed = true }
+                    if failed { uncertain = true }
+                }
+            }
+        }
+        func withColdProtection<T>(authorized: () -> Bool,validate: ([URL]) throws -> Void,perform: () throws -> T) throws -> T {
+            guard retired,!active,!poisoned,!unavailable,!coldProtectionUncertain,rawCount == 0,drained else { throw Failure.unavailable }
+            guard root.isFileURL,root.host == nil || root.host == "" || root.host == "localhost",root.query == nil,root.fragment == nil,
+                  root.path.utf8.count <= 4096,!root.path.utf8.contains(0),root.path.hasPrefix("/") else { throw Failure.bounds }
+            let parts = root.path.split(separator:"/").map(String.init)
+            guard !parts.isEmpty,parts.count <= profile.pathComponents,!parts.contains("."),!parts.contains("..") else { throw Failure.bounds }
+            let probe = ColdProtectionProbe(self,parts:parts), b = probe.work
+            var closing = false
+            do {
+                try probe.initial(authorized:authorized)
+                try protectionBoundary("protection-before-validator",b,authorized:authorized)
+                try validate(probe.held.map(\.url))
+                try protectionBoundary("protection-before-final",b,authorized:authorized)
+                try probe.final(authorized:authorized); guard authorized() else { throw Failure.revoked }
+                let result = try perform()
+                try checkpoint("phase-exit",name:nil,fixed:17,b)
+                closing = true; probe.closeAll(); guard !probe.uncertain else { throw Failure.uncertain }
+                try b.checkTime(); try bottom.checkpoint("before-outward-receipt",name:nil)
+                guard authorized() else { throw Failure.revoked }; return result
+            } catch {
+                b.fixed += 17; probe.closeAll()
+                if probe.uncertain || closing { coldProtectionUncertain = true }
+                throw error
+            }
+        }
+        private func directoryInfo(_ fd: Int32, privateRoot: Bool, strictParent: Bool, budget b: Work, checkVolume: Bool = true) throws -> stat {
             let s = try bottom.inspect(fd), acl = try bottom.denyACLCount(fd,maximum:privateRoot ? 0 : 64,check:{try b.checkTime()})
             guard s.st_mode & S_IFMT == S_IFDIR, s.st_uid == bottom.uid || (!privateRoot && s.st_uid == 0),
                 s.st_flags & 0x4000_0000 == 0, acl >= 0, acl <= 64, !privateRoot || acl == 0,
                 !privateRoot || s.st_mode & 0o7777 == 0o700,
                 s.st_mode & 0o022 == 0 || (!privateRoot && !strictParent && s.st_uid == 0 && s.st_mode & S_ISVTX != 0),
                 try !bottom.finderAlias(fd) else { throw Failure.changed }
-            if privateRoot || strictParent { let v = try bottom.volume(fd); guard v.local, v.name == "apfs" || v.name == "hfs" else { throw Failure.unavailable } }; return s
+            if checkVolume && (privateRoot || strictParent) { let v = try bottom.volume(fd); guard v.local, v.name == "apfs" || v.name == "hfs" else { throw Failure.unavailable } }; return s
         }
         private func fileInfo(_ fd: Int32, cap: Int64, budget b: Work) throws -> Member {
             let s = try bottom.inspect(fd)
@@ -739,7 +886,8 @@ extension SavedAudioImportStorage {
         }
         private func validateBody(_ b: Work, retirementOnly: Bool = false) throws {
             guard !poisoned, let registered, !base.isEmpty else { throw Failure.unavailable }
-            guard Identity(try directoryInfo(directory,privateRoot:true,strictParent:false,budget:b)) == registered else { throw Failure.changed }
+            let rootInfo = try directoryInfo(directory,privateRoot:true,strictParent:false,budget:b)
+            guard Identity(rootInfo) == registered else { throw Failure.changed }; protectionUID = rootInfo.st_uid
             for (i,binding) in bindings.enumerated() {
                 let held = try directoryInfo(binding.fd,privateRoot:i == bindings.count-1,strictParent:i == bindings.count-2,budget:b)
                 guard Identity(held) == binding.identity, let named = try bottom.named(parent:binding.parent,name:binding.name), Identity(named) == binding.identity, named.st_mode & S_IFMT == S_IFDIR else { throw Failure.changed }

@@ -6,9 +6,13 @@ import ParlaCore
 @MainActor final class MeetingMicrophoneCapture {
     private let recorder: AudioRecorder
     private let enabled: Bool
+    private var input: AudioRecorder.MeetingInput?
     private var current: (id: UUID, recording: MeetingMicrophoneRecording)?
     init(recorder: AudioRecorder, enabled: Bool = false) {
         self.recorder = recorder; self.enabled = enabled
+    }
+    init(recorder: AudioRecorder,input: AudioRecorder.MeetingInput,enabled: Bool = false) {
+        self.recorder = recorder; self.input = input; self.enabled = enabled
     }
     func validate(_ selection: MeetingSession.Selection) -> Bool {
         // Pure and NONRESERVING. In particular, never query recorder availability or
@@ -20,7 +24,10 @@ import ParlaCore
               ingress.context.source == selection.instance,ingress.context.sourceGeneration == selection.generation else {
             return .init(source:selection.instance,exit:.notStarted)
         }
-        switch recorder.startMeeting(source:selection.instance,generation:selection.generation,ingress:ingress,enabled:true) {
+        let start: MeetingMicrophoneStart
+        if let input { start = recorder.startMeeting(source:selection.instance,generation:selection.generation,ingress:ingress,input:input,enabled:true) }
+        else { start = recorder.startMeeting(source:selection.instance,generation:selection.generation,ingress:ingress,enabled:true) }
+        switch start {
         case .notStarted: return .init(source:selection.instance,exit:.notStarted)
         case .actual(let recording):
             let id = UUID(); current = (id,recording)

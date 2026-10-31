@@ -1,7 +1,7 @@
 import Foundation
 import ParlaCore
 
-/// Fake-port foundation only. No app entry, capture adapter, recognizer factory or implicit dependency exists.
+/// Inert meeting owner. Every service and action is explicitly supplied by the app binder.
 @MainActor final class MeetingSessionOwner {
     struct Producer {
         enum Exit { case notStarted, actual(Task<Void,Never>) }
@@ -40,7 +40,7 @@ import ParlaCore
         let requestCancel: () -> Void
     }
     struct Ticket: Equatable { fileprivate let id: UUID, session: UUID, generation: UInt64, track: Int, source: UUID, sourceGeneration: UInt64 }
-    enum RecognitionState { case none, pending, canceled, failed, completed }
+    enum RecognitionState: Equatable { case none, pending, canceled, failed, completed }
     private(set) var recognitionState = RecognitionState.none
     enum State: Equatable { case idle, starting, recording, stopping, stopped, transcribing, deleting, expired, unavailable, detached }
     private final class Authority: @unchecked Sendable {
@@ -51,8 +51,84 @@ import ParlaCore
     private struct Ingress { let ticket: Ticket, hold: MeetingSessionStore.Hold, chunk: Bool; var submitted: Bool }
     let store: MeetingSessionStore
     private let capture: CapturePort, recognition: RecognitionPort, wall: () throws -> Int64, holdEpoch: UInt64
-    private(set) var state: State = .idle, projection: MeetingSession.Projection = .idle
+    private(set) var state: State = .idle { didSet { publish() } }
+    private(set) var projection: MeetingSession.Projection = .idle { didSet { publish() } }
     private(set) var concern: MeetingSession.Reason?
+    struct Snapshot: Equatable {
+        let state: State, projection: MeetingSession.Projection, concern: MeetingSession.Reason?
+        let recognition: RecognitionState, metadata: MeetingSessionStore.Metadata?, pendingStart: Bool, phaseActive: Bool
+    }
+    private(set) var metadata: MeetingSessionStore.Metadata?
+    var onChange: ((Snapshot) -> Void)?
+    private var lastSnapshot: Snapshot?
+    var snapshot: Snapshot { .init(state:state,projection:projection,concern:concern,recognition:recognitionState,metadata:metadata,pendingStart:pendingStart,phaseActive:phaseActive) }
+    private func publish() { let next = snapshot; if next != lastSnapshot { lastSnapshot = next; onChange?(next) } }
+    struct VerifiedText: Equatable {
+        let metadata: MeetingSessionStore.Metadata, text: String
+    }
+    struct OutputToken: Equatable { fileprivate let id: UUID, hold: MeetingSessionStore.Hold }
+    private var explicitOutput: OutputToken?, protectionOperation: UUID?
+    private var textAuthority: Authority?
+    var protectionQuarantined: Bool { store.protectionQuarantined }
+    func openMetadata() async throws {
+        guard protectionOperation == nil,!pendingStart,!phaseActive else { throw MeetingSession.Failure.held }
+        if state == .idle { await refresh() }
+        else { let store = store; try await io { try store.evaluate() }; try await cache() }
+        guard state != .unavailable else { throw MeetingSession.Failure.unavailable }
+    }
+    func requestStopSaving() {
+        if pendingStart { captureAuthority?.revoke() }
+        microphoneIngress?.fence(); ingressOpen = false
+        if state == .starting || state == .recording { state = .stopping }
+        requestProducerStop(); publish()
+    }
+    func finishStopSaving() async throws {
+        guard !pendingStart else { throw MeetingSession.Failure.held }
+        if session == nil { if concern == nil { state = .idle }; publish(); return }
+        if state == .recording || state == .stopping || state == .unavailable { try await stop() }
+    }
+    func revokeTextReads() { textAuthority?.revoke() }
+    func openAcceptedText(authorized: @escaping @Sendable () -> Bool) async throws -> VerifiedText {
+        guard state == .stopped,!pendingStart,!phaseActive,explicitOutput == nil,protectionOperation == nil,let frozen = metadata,
+              !frozen.expired,!frozen.deleting,!frozen.unavailable else { throw MeetingSession.Failure.held }
+        let authority = Authority(); textAuthority = authority
+        defer { if textAuthority === authority { textAuthority = nil }; publish() }
+        let store = store
+        var bytes = Data(), rawCount = 0, parts = 0
+        for chunk in frozen.chunks {
+            guard let accepted = chunk.accepted else { continue }
+            guard authority.allowed(),authorized(),metadata == frozen else { throw MeetingSession.Failure.stale }
+            let next = try await io {
+                // Revocation refuses a not-yet-entered read. An entered, bounded hash
+                // read retains its captured admission through actual return; no later part enters.
+                let entered = authority.allowed() && authorized()
+                guard entered else { throw CancellationError() }
+                return try store.readAccepted(session:frozen.session,chunk:chunk.id,result:accepted.id,authorized:{entered})
+            }
+            guard authority.allowed(),authorized(),metadata == frozen,next.count == accepted.bytes,rawCount <= 1_048_576-next.count else { throw MeetingSession.Failure.stale }
+            rawCount += next.count; if parts > 0 { bytes.append(contentsOf:[10,10]) }; bytes.append(next); parts += 1
+        }
+        guard parts > 0,bytes.count <= 1_049_054,let text = String(data:bytes,encoding:.utf8),authorized(),authority.allowed(),try store.metadata() == frozen else { throw MeetingSession.Failure.stale }
+        return .init(metadata:frozen,text:text)
+    }
+    func beginExplicitOutput(_ value: VerifiedText) throws -> OutputToken {
+        guard state == .stopped,!quitIntent,!phaseActive,!pendingStart,explicitOutput == nil,protectionOperation == nil,
+              metadata == value.metadata,!value.metadata.expired,!value.metadata.deleting else { throw MeetingSession.Failure.held }
+        try store.evaluate(); guard try store.metadata() == value.metadata else { throw MeetingSession.Failure.stale }
+        let token = OutputToken(id:UUID(),hold:try store.register(.output)); explicitOutput = token; return token
+    }
+    func endExplicitOutput(_ token: OutputToken) throws {
+        guard explicitOutput == token else { throw MeetingSession.Failure.stale }
+        try store.actualExit(token.hold); explicitOutput = nil; publish()
+    }
+    func withExportProtection<T>(operation: UUID,authorized: () -> Bool,
+        validateDestination: (MeetingSessionStore.Protection) throws -> Void,perform: () throws -> T) throws -> T {
+        guard !quitIntent,!pendingStart,!phaseActive,protectionOperation == nil,explicitOutput == nil,textAuthority == nil,
+              state == .idle || state == .stopped,transcriptionTask == nil,producers.isEmpty,stopTask == nil,deleteTask == nil else { throw MeetingSession.Failure.held }
+        protectionOperation = operation; phaseActive = true; publish()
+        defer { phaseActive = false; if !store.protectionQuarantined { protectionOperation = nil }; publish() }
+        return try store.withExportProtection(operation:operation,authorized:authorized,validateDestination:validateDestination,perform:perform)
+    }
     private var terminalReason: MeetingSession.Reason?
     private var lifetime: MeetingSessionOwner?
     private var generation: UInt64 = 0, selections: [MeetingSession.Selection] = [], session: UUID?
@@ -105,22 +181,23 @@ import ParlaCore
             while phaseActive { await withCheckedContinuation { idleWaiters.append($0) } }
         }
         guard !phaseActive else { throw MeetingSession.Failure.held }
-        phaseActive = true // registered before the detached body can start
+        phaseActive = true; publish() // registered before the detached body can start
         let task = Task.detached { Result { try operation() } }
         let join = Task { _ = await task.value }; phase = join
         let result = await task.value; await join.value
-        phase = nil; phaseActive = false; let waiters = idleWaiters; idleWaiters.removeAll(); for waiter in waiters { waiter.resume() }
+        phase = nil; phaseActive = false; publish(); let waiters = idleWaiters; idleWaiters.removeAll(); for waiter in waiters { waiter.resume() }
         return try result.get()
     }
     private func waitForPhase() async {
         if !phaseActive { return }
         await withCheckedContinuation { idleWaiters.append($0) }
     }
-    private func cache() async throws { let store = store; projection = try await io { store.projection } }
+    private func cache() async throws { let store = store; let values = try await io { (store.projection,try store.metadata()) }; metadata = values.1; projection = values.0; publish() }
     func refresh() async {
         guard state == .idle else { return }; lifetime = self; let store = store
         do {
             projection = try await io { try store.bootstrap() }
+            try await cache()
             if projection.session != nil {
                 session = projection.session
                 if (projection.state == .interrupted || projection.state == .stopped),!projection.expired { let epoch = holdEpoch; _ = try await io { try store.terminal(reason:.interrupted,unknownMask:3,generation:0,holdEpoch:epoch,flags:1,authorized:{true}) }; try await cache() }
@@ -140,12 +217,12 @@ import ParlaCore
         try await startImpl(owner:owner,session:session,selections:[selection],segments:[segment],streaming:true)
     }
     private func startImpl(owner: UUID, session: UUID, selections: [MeetingSession.Selection], segments: [MeetingSession.Segment], streaming: Bool) async throws {
-        guard state == .idle,self.session == nil,!quitIntent,concern == nil,!selections.isEmpty,selections.count <= 2 else { throw MeetingSession.Failure.stale }
+        guard state == .idle,self.session == nil,!quitIntent,concern == nil,protectionOperation == nil,explicitOutput == nil,!selections.isEmpty,selections.count <= 2 else { throw MeetingSession.Failure.stale }
         reservedSlots = 0; unknownMask = 0; terminalReason = nil; deleteRequested = false; stopRequest = nil; stopTask = nil; deleteTask = nil
         state = .starting; generation = try increment(generation); let admittedGeneration = generation
-        pendingStart = true; lifetime = self
+        pendingStart = true; lifetime = self; publish()
         let authority = Authority(); captureAuthority = authority; let store = store
-        defer { pendingStart = false }
+        defer { pendingStart = false; publish() }
         let valid: Bool
         if streaming,let microphonePort { valid = await microphonePort.validate(selections[0]) }
         else { valid = await capture.validate(selections) }
@@ -158,7 +235,11 @@ import ParlaCore
         do {
             _ = try await io { try store.admit(owner:owner,session:session,selections:selections,segments:segments,authorized:authority.allowed) }
             self.session = session; self.selections = selections
-            guard state == .starting,!quitIntent,generation == admittedGeneration else { throw MeetingSession.Failure.stale }
+            guard state == .starting,!quitIntent,generation == admittedGeneration,authority.allowed() else {
+                let epoch = holdEpoch, gen = generation
+                _ = try await io { try store.terminal(reason:.cancel,unknownMask:0,generation:gen,holdEpoch:epoch,flags:1,authorized:{true}) }
+                state = .stopped; try await cache(); return
+            }
             var holds: [MeetingSessionStore.Hold] = []
             for s in selections { holds.append(try store.register(s.kind == .microphone ? .microphone : .system)) }
             let runs: [Producer]
@@ -442,7 +523,8 @@ import ParlaCore
                 if authority.allowed(),!deleteRequested,!quitIntent {
                     let a = try await io { try store.resultReserve(token,borrow:selected.0,input:raw.input,observed:raw.observed,authorized:authority.allowed) }
                     let b = try await io { try store.resultWrite(a,bytes:raw.bytes,authorized:authority.allowed) }
-                    _ = try await io { try store.resultPromote(b,authorized:authority.allowed) }; recognitionState = .completed
+                    _ = try await io { try store.resultPromote(b,authorized:authority.allowed) }
+                    _ = try await io { try store.retireAcceptedReplacementIfNeeded(authorized:{true}) }; recognitionState = .completed
                 } else if !deleteRequested { _ = try await io { try store.cancelAttempt(token,authorized:{true}) }; recognitionState = .canceled }
                 if let token = borrow {
                     borrow = nil // the queued retirement owns this token through its actual exit
@@ -461,14 +543,14 @@ import ParlaCore
                 if let token = output { output = nil; do { try store.actualExit(token) } catch { fail(error) } }
                 attempt = nil; recognitionState = authority.allowed() ? .failed : .canceled
                 if !deleteRequested {
-                    do { try await cache(); if projection.unavailable { fail(error) } else { state = .stopped } } catch { fail(error) }
+                    do { try await cache(); if projection.unavailable { fail(error) } else if concern == nil { state = .stopped } } catch { fail(error) }
                 }
                 return .failure(error)
             }
         }
         transcriptionTask = task; let result = await task.value; transcriptionTask = nil; try result.get()
     }
-    func cancelTranscription() { attemptAuthority?.revoke(); if recognitionTask != nil { recognition.requestCancel() } }
+    func cancelTranscription() { attemptAuthority?.revoke(); if recognitionTask != nil { recognition.requestCancel() }; publish() }
     func delete(id: UUID) async throws {
         if let deleteTask { try await deleteTask.value.get(); return }
         guard session != nil else { throw MeetingSession.Failure.stale }
@@ -495,7 +577,7 @@ import ParlaCore
                 guard receipt.deletionRemaining == 0 else { throw MeetingSession.Failure.bounds }
                 if receipt.phase != .deleteAuthority { let prior = receipt; receipt = try await io { try store.deleteAuthority(prior,authorized:{true}) } }
                 let dead = receipt; _ = try await io { try store.deleteClose(dead,authorized:{true}) }
-                session = nil; state = .idle; concern = nil; projection = .idle; lifetime = nil
+                session = nil; metadata = nil; state = .idle; concern = nil; projection = .idle; lifetime = nil
                 microphoneIngress = nil; streamObserver = nil; streamWriter = nil; streamQuitPending = false; streamWriterFinished = false; streamWriterID = nil; streamFailure = nil
                 return .success(())
             } catch { fail(error); return .failure(error) }
@@ -507,7 +589,7 @@ import ParlaCore
         catch { if microphoneIngress != nil { fail(error) }; throw error }
         let store = store
         if microphoneIngress == nil {
-            try await io { try store.evaluate() }; try await cache()
+            try await io(waitingForAdmission:true) { try store.evaluate() }; try await cache()
             if projection.expired { ingressOpen = false; state = .expired; cancelTranscription(); try await delete(id:deleteID) }
             return
         }
@@ -521,7 +603,7 @@ import ParlaCore
         if projection.expired { ingressOpen = false; state = .expired; cancelTranscription(); try await delete(id:deleteID) }
     }
     func reserveQuit() {
-        quitIntent = true; ingressOpen = false; attemptAuthority?.revoke(); captureAuthority?.revoke()
+        quitIntent = true; ingressOpen = false; attemptAuthority?.revoke(); if pendingStart { captureAuthority?.revoke() }; revokeTextReads()
         if let stream = microphoneIngress,(!stream.facts.settled || !producers.isEmpty || streamWriter != nil || streamObserver != nil) {
             stream.fence(); streamQuitPending = true; requestProducerStop()
         } else { store.reserveQuit() }
@@ -529,7 +611,16 @@ import ParlaCore
     }
     func cancelQuit() { quitIntent = false; streamQuitPending = false; store.cancelQuit() } // revoked producer/review/attempt authority is never restored
     var shutdownReady: Bool {
-        quitIntent && !streamQuitPending && streamWriter == nil && streamObserver == nil && (microphoneIngress == nil || microphoneIngress!.facts.settled) && !pendingStart && stopTask == nil && deleteTask == nil && producerJoin == nil && !phaseActive && phase == nil && producers.isEmpty && unclassifiedProducerTasks.isEmpty && ingress.isEmpty && submissions.isEmpty && recognitionTask == nil && transcriptionTask == nil && concern == nil && (session == nil || store.shutdownReady)
+        // Reject owner-recorded work before consulting predicates that take the store IO lock.
+        guard quitIntent,explicitOutput == nil,protectionOperation == nil,textAuthority == nil,
+              !streamQuitPending,streamWriter == nil,streamObserver == nil,
+              microphoneIngress == nil || microphoneIngress!.facts.settled,
+              !pendingStart,stopTask == nil,deleteTask == nil,producerJoin == nil,
+              !phaseActive,phase == nil,producers.isEmpty,unclassifiedProducerTasks.isEmpty,
+              ingress.isEmpty,submissions.isEmpty,recognitionTask == nil,transcriptionTask == nil,
+              concern == nil else { return false }
+        guard !store.protectionQuarantined else { return false }
+        return session == nil || store.shutdownReady
     }
     /// Explicit future composition hook. Request acknowledgment never substitutes for any owned actual exit.
     func beginShutdown() async -> Bool {
