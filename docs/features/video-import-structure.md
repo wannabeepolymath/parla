@@ -206,3 +206,43 @@ repeat those earlier WAV/audio checks or establish a full-package pass. No media
 native decoding ran. Native delay/trim/waveform proof, reader ownership, staging,
 storage migration and
 real file-import integration remain open. B40 and canonical status 23/43 are unchanged.
+
+## Separate restricted PCM MOV reader
+
+`ImportedPCMMOV` is a separate pure reader for the deliberately narrow
+`qtPCM16kV1` profile. It does not relax the AAC grammar or authorize a native
+reader. The profile requires a nonfragmented, self-contained QuickTime MOV with
+exactly one audio and one video track. Audio is version-zero `sowt`, mono signed
+16-bit little-endian PCM at 16 kHz, with fixed two-byte samples, one-tick timing,
+and no edit or a single identity edit. Audio chunks must advance in physical
+file order. Both track durations must map exactly to the movie duration.
+
+The reader makes a deep, zero-origin source copy and binds validated audio chunk
+ranges to that copy. `Inspection.decode()` accepts no replacement bytes. It
+maps literal little-endian samples directly to Float values using division by
+32768, preserves chunk order, and publishes only a complete result. Cancellation
+is checked around the source copy and allocation, during structural work, at
+most every 4096 extracted frames, and before returning. Those checkpoints are
+cooperative; they do not establish a wall-clock cancellation deadline.
+
+The complete source is capped at 20 MiB, audio at 6400–9,600,000 frames, combined
+chunks at 4096, video samples and explicit table rows at 32,768 each, metadata at
+2 MiB, boxes at 4096, nesting at 12, and structural work at 131,072 logical
+credits. PCM scalar extraction has its separate frame cap. These are logical
+bounds, not a process-memory or CPU-time guarantee. There is no per-audio-frame
+extent allocation, resampler, media framework, path reader, or format fallback.
+
+The visual description and video payload remain opaque after the restricted
+fixed-field, reference, timing and extent checks. They cannot choose or rewrite
+audio samples; overlap can only cause refusal. This is no video playback or
+bitstream conformance claim, and these bytes must not be passed to a native
+visual consumer on the strength of this reader.
+
+The reviewed component passed **18 PCM MOV tests**, alongside **4 existing WAV
+and 31 AAC structural tests**, in one serial package invocation with zero
+failures. The tests use authored in-memory containers, including literal sample
+oracles, compact tables, nonzero Data origins, external backing mutation,
+limits, rational clocks, aliases and cancellation checkpoints. Actual exporter
+compatibility remains unobserved. The reader is not connected to file selection,
+durable storage, recognition or output. General MOV/MP4 import and B40 remain
+incomplete; the macOS completion count stays 23/43.
