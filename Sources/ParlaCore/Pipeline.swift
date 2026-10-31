@@ -1,8 +1,15 @@
 import Foundation
 
 public struct Pipeline {
+    public enum FailureLogging { case details, contentFree }
+    public var failureLogging: FailureLogging = .details
+    public var log: (String) -> Void = { NSLog("%@", $0) }
+    private func logFailure(_ error: Error) {
+        log(failureLogging == .contentFree ? "Parla cleanup failed; using local fallback"
+            : "Parla cleanup failed, keeping raw transcript: \(error)")
+    }
     /// nil ⇒ the whisper pass failed or was aborted (not "no speech" — that is "").
-    public var transcribe: ([Float], String?) -> String?
+    public var transcribe: ([Float], String?) async -> String?
     public var cleanup: (String, CleanupContext) async throws -> String
     public var settings: () -> Settings
     /// The destination app's bundle ID, not its name: the only thing the prompt
@@ -11,8 +18,12 @@ public struct Pipeline {
     public var frontBundleID: () -> String?
     public var frontBrowserURL: () -> String? = { nil }
     public var singleLine: Bool = false
+    public var diagnostics: DiagnosticOperation?
+    public var failoverRun: CleanupFailoverRun?
+    /// Lazy only after ordinary bypasses. nil means pre-issuance category eligibility.
+    public var surroundingText: ((String, CleanupContext) async throws -> String?)?
 
-    public init(transcribe: @escaping ([Float], String?) -> String?,
+    public init(transcribe: @escaping ([Float], String?) async -> String?,
                 cleanup: @escaping (String, CleanupContext) async throws -> String,
                 settings: @escaping () -> Settings,
                 frontBundleID: @escaping () -> String?) {
@@ -22,22 +33,47 @@ public struct Pipeline {
         self.frontBundleID = frontBundleID
     }
 
+    /// Production output seam: the resolved settings are captured by value, including
+    /// the provider's model. Disabled cleanup and locked snippets never call the factory.
+    public init(outputSettings: Settings, bundleID: String?, browserURL: String? = nil,
+                singleLine: Bool = false, diagnostics: DiagnosticOperation? = nil, failureLogging: FailureLogging = .details,
+                makeClient: @escaping (Settings) throws -> CleanupProviding) {
+        self.init(transcribe: { _, _ in nil }, cleanup: { text, context in
+            let client = try diagnostics.map { diagnostic in
+                try diagnostic.makeProvider(settings: outputSettings) { try makeClient(outputSettings) }
+            } ?? makeClient(outputSettings)
+            return try await client.clean(transcript: text, context: context)
+        }, settings: { outputSettings }, frontBundleID: { bundleID })
+        frontBrowserURL = { browserURL }
+        self.singleLine = singleLine
+        self.diagnostics = diagnostics
+        self.failureLogging = failureLogging
+    }
+
     /// Whisper pass only: trimmed transcript, nil when empty OR when the pass
     /// failed. Split from clean() so the caller can finalize raw text instantly
     /// and polish behind it.
-    public func transcript(samples: [Float]) -> String? {
+    public func transcript(samples: [Float]) async -> String? {
         // The min-audio floor lives HERE, on the shared path, not on each caller:
         // whisper invents content on near-silence, and while the app happened to
         // check first, parla-eval — driving this same Pipeline — did not, so it
         // decoded 1.6s of room tone (rms 8.3e-5) as "Testosterone.swift," and
         // scored it. One guard, so the eval measures what ships.
-        guard TextRules.audioWorthTranscribing(sampleCount: samples.count,
-                                               rms: AudioRecorder.rms(samples)) else { return nil }
+        if let skip = Self.recognitionSkip(samples: samples) {
+            diagnostics?.update { $0.asr = skip == .minimumDuration ? .minimumDuration : .silence }
+            return nil
+        }
         let s = settings()
-        let prompt = s.dictionary.isEmpty ? nil : s.dictionary.joined(separator: ", ")
-        guard let t = transcribe(samples, prompt)?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
-        return t
+        let prompt = VocabularyHints.asrPrompt(s.dictionary)
+        return Self.transcriptProjection(await transcribe(samples, prompt))
+    }
+    public static func recognitionSkip(samples: [Float]) -> RecognitionSkip? {
+        TextRules.audioWorthTranscribing(sampleCount: samples.count, rms: AudioRecorder.rms(samples))
+            ? nil : samples.count < 6400 ? .minimumDuration : .silence
+    }
+    public static func transcriptProjection(_ text: String?) -> String? {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        return text
     }
 
     /// Whole-transcript snippet match — TypeWhisper's `literal_locked`. When the
@@ -55,7 +91,9 @@ public struct Pipeline {
         let key = Eval.normalizeForWER(transcript)
         guard !key.isEmpty else { return nil }
         return snippets.filter { Eval.normalizeForWER($0.key) == key }
-            .max { $0.key.count < $1.key.count }?.value
+            .sorted {
+                $0.key.count == $1.key.count ? $0.key < $1.key : $0.key.count > $1.key.count
+            }.first?.value
     }
 
     /// LLM cleanup, sanitized. Never throws — cleanup must never kill a
@@ -63,73 +101,96 @@ public struct Pipeline {
     /// so the caller can tell the user why nothing changed.
     public func clean(transcript: String) async -> (text: String, failure: String?) {
         let s = settings()
-        // Deterministic snippet: no network, no sanitizer, no length ceiling —
-        // this text is ours, not a model's.
-        if let expansion = Pipeline.snippetExpansion(transcript: transcript,
-                                                     snippets: s.snippets) {
+        diagnostics?.providerSettings(s)
+        if s.outputMode == .raw { diagnostics?.update { $0.providerOutcome = .off }; return (transcript, nil) }
+        if s.outputMode == .selectedPreset {
+            do {
+                let preset = try s.selectedTransformPreset()
+                let operation = IntentionalTransform(source: transcript, instruction: preset.intent, settings: s, preset: preset)
+                let result = try await operation.run { _ in
+                    // Adapter keeps the same injectable production provider seam.
+                    TransformCleanup(cleanup: cleanup)
+                }
+                return (result, nil)
+            } catch {
+                if s.usesAppleIntelligence { diagnostics?.update { $0.localCleanupReason = LocalCleanupReason.from(error) } }
+                diagnostics?.update { if $0.providerOutcome == .returned { $0.providerOutcome = .invalidResult } else if $0.providerOutcome == .unknown { $0.providerOutcome = .refused } }
+                return (transcript, IntentionalTransform.failureMessage(error))
+            }
+        }
+        // Locked snippets bypass both the provider and local replacements.
+        if let expansion = Pipeline.snippetExpansion(transcript: transcript, snippets: s.snippets) {
+            diagnostics?.update { $0.providerOutcome = .localSnippet }
             return (expansion, nil)
         }
+        guard s.cleanupEnabled else {
+            diagnostics?.update { $0.providerOutcome = .off }
+            return (LiteralReplacement.apply(s.replacements, to: transcript), nil)
+        }
+        let result = await cleanWithProvider(transcript: transcript, settings: s)
+        return (LiteralReplacement.apply(s.replacements, to: result.text), result.failure)
+    }
+
+    private func cleanWithProvider(transcript: String, settings s: Settings) async -> (text: String, failure: String?) {
         let ctx = CleanupContext(dictionary: s.dictionary, snippets: s.snippets,
                                  appName: nil, bundleID: frontBundleID(),
-                                 browserURL: frontBrowserURL(), singleLine: singleLine)
+                                 browserURL: frontBrowserURL(), singleLine: singleLine, style: s.cleanupStyle)
         do {
-            let cleaned = CleanupSanitizer.sanitize(try await cleanup(transcript, ctx))
-            if cleaned.isEmpty {
-                NSLog("Parla cleanup sanitized to empty, keeping raw transcript")
-                return (transcript, "cleanup returned no text")
+            let contextual = try await surroundingText?(transcript, ctx)
+            let candidate: String
+            if let contextual { candidate = contextual } else { candidate = try await cleanup(transcript, ctx) }
+            let cleaned = CleanupSanitizer.sanitize(candidate)
+            if let failure = CleanupOutput.validationFailure(cleaned, source: transcript, snippets: s.snippets) {
+                NSLog("Parla cleanup returned invalid text, keeping raw transcript")
+                diagnostics?.update { $0.providerOutcome = .invalidResult }
+                try failoverRun?.adjudicate(accepted: false)
+                return (transcript, failure)
             }
-            // ponytail: char-count ceiling against LLM repetition loops (same
-            // failure class as the whisper loops guarded in Transcriber). Cleanup
-            // legitimately grows text a little (punctuation) and triggered
-            // snippets a lot, so allow 2x + 200 plus matched expansions; upgrade
-            // to repeated-substring detection if a real cleanup ever trips this.
-            let rawLower = transcript.lowercased()
-            let allowance = 2 * transcript.count + 200
-                + s.snippets.reduce(0) { total, snippet in
-                    let key = snippet.key.lowercased()
-                    guard !key.isEmpty else { return total }
-                    var count = 0
-                    var start = rawLower.startIndex
-                    while let range = rawLower.range(of: key, range: start..<rawLower.endIndex) {
-                        count += 1
-                        start = range.upperBound
-                    }
-                    return total + snippet.value.count * count
-                }
-            if cleaned.count > allowance {
-                NSLog("Parla cleanup output degenerate (\(cleaned.count) chars for \(transcript.count)-char transcript), keeping raw transcript")
-                return (transcript, "cleanup returned invalid text")
-            }
-            // Floor. The ceiling above only catches runaway EXPANSION; a model
-            // that answers the transcript, summarises it, or refuses in one line
-            // comes back far SHORTER, and that was typed straight over the
-            // user's words with nothing to stop it. Cleanup legitimately shrinks
-            // filler-heavy speech ("um, so, like, the thing is…"), so the floor
-            // is deliberately generous and only applies once the transcript is
-            // long enough for a ratio to mean anything.
-            // ponytail: a length ratio, not a relatedness check — proving the
-            // output still says what the user said needs a second model call.
-            // Upgrade only if drift is observed above this floor.
-            if transcript.count >= 80, cleaned.count < transcript.count / 5 {
-                NSLog("Parla cleanup output truncated (\(cleaned.count) chars for \(transcript.count)-char transcript), keeping raw transcript")
-                return (transcript, "cleanup returned truncated text")
-            }
+            try failoverRun?.adjudicate(accepted: true)
             return (cleaned, nil)
         } catch let error as CleanupError {
-            NSLog("%@", "Parla cleanup failed, keeping raw transcript: \(error)")
+            logFailure(error)
             return (transcript, error.userMessage)
         } catch let error as URLError {
-            NSLog("%@", "Parla cleanup failed, keeping raw transcript: \(error)")
+            logFailure(error)
             return (transcript, error.code == .timedOut
                     ? "cleanup timed out" : "cleanup network unavailable")
         } catch {
-            NSLog("%@", "Parla cleanup failed, keeping raw transcript: \(error)")
+            logFailure(error)
             return (transcript, "cleanup failed")
         }
     }
 
     public func process(samples: [Float]) async -> String? {
-        guard let t = transcript(samples: samples) else { return nil }
+        guard let t = await transcript(samples: samples) else { return nil }
         return await clean(transcript: t).text
+    }
+}
+
+private struct TransformCleanup: CleanupProviding {
+    let cleanup: (String, CleanupContext) async throws -> String
+    func clean(transcript: String, context: CleanupContext) async throws -> String {
+        try await cleanup(transcript, context)
+    }
+}
+
+/// Shared acceptance guards, not a semantic preservation test. Call sanitation
+/// once on each provider output; assembly uses validation without re-sanitation.
+public enum CleanupOutput {
+    public static func validationFailure(_ cleaned: String, source: String, snippets: [String: String] = [:]) -> String? {
+        if cleaned.isEmpty { return "cleanup returned no text" }
+        let rawLower = source.lowercased()
+        let allowance = 2 * source.count + 200 + snippets.reduce(0) { total, snippet in
+            let key = snippet.key.lowercased()
+            guard !key.isEmpty else { return total }
+            var count = 0, start = rawLower.startIndex
+            while let range = rawLower.range(of: key, range: start..<rawLower.endIndex) {
+                count += 1; start = range.upperBound
+            }
+            return total + snippet.value.count * count
+        }
+        if cleaned.count > allowance { return "cleanup returned invalid text" }
+        if source.count >= 80, cleaned.count < source.count / 5 { return "cleanup returned truncated text" }
+        return nil
     }
 }

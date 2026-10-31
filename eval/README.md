@@ -1,16 +1,26 @@
 # Parla eval harness
 
-Measures whether Parla's output is getting better or worse. Two metrics per leg:
+Reports output differences per leg, with separate offline scorer-drift and
+[reviewed output-policy checks](quality/README.md):
 
 - **zero-edit rate** — fraction where the output needs *zero* edits versus a
   human-written golden (case- and punctuation-sensitive). This is the product
-  promise, and it is binary.
+  promise, and it is binary. All whitespace runs are folded, including newlines.
 - **WER** — word error rate over a canonically normalized token stream, so a
   one-word regression is distinguishable from a total failure. Reported as
   corpus WER, **p50, p90 and failure rate (WER > 20 %)** — a mean hides exactly
   the tail that makes a dictation app feel broken.
 
-Both sides of every comparison go through the **same** normalizer
+- **structure-match** — case/punctuation-sensitive exact match after folding
+  horizontal whitespace within lines and normalizing line endings/outer
+  whitespace. Internal newlines and blank lines remain significant.
+- **newline-fidelity** — exact match of newline positions at cumulative
+  whitespace-delimited word offsets; repeated offsets encode blank lines.
+  This isolates layout from spelling/punctuation but does not judge meaning.
+  Together with structure-match it catches paragraph-only changes that retain
+  zero WER. Horizontal indentation/spacing is not evaluated.
+
+Both sides of every WER comparison go through the **same** normalizer
 (`Eval.werTokens`): curly apostrophes folded first, then case, punctuation,
 whitespace and single-word numbers (`six` == `6`). Normalizing one side only is
 the most common way a WER harness lies. Digits still count for zero-edit rate,
@@ -20,7 +30,8 @@ which is why both metrics are reported.
 swift run parla-eval [dir]            # full pipeline: wav → whisper → cleanup
 swift run parla-eval --asr-only       # whisper leg only  (no API key needed)
 swift run parla-eval --cleanup-only   # cleanup leg only  (no model needed)
-swift run parla-eval verify           # re-score committed fixtures, offline
+swift run parla-eval verify           # scorer drift over committed hypotheses, offline
+.build/debug/parla-eval quality-check  # explicit reviewed text-output policy, offline
 swift run parla-eval compare a b      # diff two results files (see A/B below)
 ```
 
@@ -41,12 +52,11 @@ input:
 | `NAME.wav` | 16 kHz mono audio; drives the whisper leg |
 | `NAME.raw.txt` | verbatim transcript: the **ASR reference** when a `.wav` exists, otherwise the **cleanup input** (a text-only case) |
 
-**Text cases need no microphone.** They exercise the cleanup path directly, and
-they are how the corpus grew past its original two entries. **Audio cases are
-still missing**: only `hello.wav` and `fillers.wav` exist, neither has a
-`.raw.txt`, so the ASR leg is currently unscored and everything below the
-whisper decoder is unmeasured. Recording that corpus is outstanding work — the
-text cases do not substitute for it.
+**Text cases need no microphone.** Provider runs exercise cleanup directly.
+The separate `quality/cases` corpus adds 25 authored minimal-pair and layout
+examples. These are textual goldens, not human speech/audio evidence. Existing
+`cases` also includes synthetic WAV fixtures; consented human speech coverage
+remains separate work. Offline checks never invoke cleanup.
 
 Golden files may lead with header lines, which are stripped before comparison:
 
@@ -69,10 +79,11 @@ that must be transcribed, never obeyed), `jargon`, `snippets`.
 
 ## Reproducibility
 
-The cleanup context is pinned to `eval/context.json` (dictionary + snippets),
+The cleanup context is pinned to `eval/context.json` (dictionary, snippets and replacements),
 **not** to your live Settings — an eval that reads the developer's settings is
 not reproducible. Only provider credentials (key, model, base URL) still come
-from Settings.
+from Settings. Omitted replacement rules default to an empty list; without a
+fixture, all three vocabulary fields are empty.
 
 ## A/B: comparing two cleanup models
 
@@ -155,14 +166,32 @@ self-corrections, trailing-off). Record yourself:
 Then write `name.raw.txt` (what was actually said, verbatim — this scores the
 ASR leg) and `name.golden.txt` (what Parla should have inserted).
 
-## `verify` — the CI gate
+## `verify` — the scorer-drift CI gate
 
 A full run writes `eval/results.json`: every scored leg with its reference and
 hypothesis. Commit it. `parla-eval verify` re-scores those committed
 hypotheses with today's normalizer and scorers — **no model, no API key, no
-network** — so a change to `Eval`, `CleanupSanitizer`, `TextRules` or the
-degenerate-output guards is caught in seconds. Until a full run has been done
+network** — so scorer drift in fixed inputs is caught in seconds. It does not rerun cleanup,
+sanitization, delivery or model inference, and does not enforce absolute quality.
+Existing failing baseline hypotheses remain visible but do not fail this mode.
+Until a full run has been done
 and committed, `verify` reports zero fixtures and exits 0.
+
+## `quality-check` — the explicit output-policy CI gate
+
+[Policy, format, exit codes, limitations and real-result workflow](quality/README.md).
+This separate offline gate checks complete case coverage, structure-sensitive
+accepted text (including reviewed alternatives) and protected literal counts.
+CI checks the authored outputs; a pass validates the evaluator and reviewed
+fixtures, **not measured live model quality**. Real generated results can be
+checked with `quality-check --out /path/to/results.json` without a model/network.
+Missing cases, unreadable results and malformed rules fail rather than skip.
+
+Report/compare show structure-match and newline-fidelity alongside unchanged
+WER and zero-edit. Compare includes layout-only disagreements, including when
+both outputs miss the golden, and escapes newlines in case details. These new
+metrics do not change `verify` drift semantics or full-run WER exit thresholds;
+`compare` still never returns 1.
 
 ## Requirements (full run only)
 
@@ -190,3 +219,27 @@ model scoring worse than another is its answer, not its failure.
 `swift run parla-eval --self-check` asserts the `compare` arithmetic offline in
 a few milliseconds — no corpus, no key, no network. It is the only check the
 comparison math gets, because exercising it for real costs two full runs.
+
+
+## `corpus-check` — bounded offline corpus admission/reporting
+
+```
+parla-eval corpus-check MANIFEST [--results SAVED_RUN [--against OTHER_RUN]]
+```
+
+All paths are read inputs. No `--out` is accepted, and no files, settings,
+credentials, cleanup command or model are created/accessed by this mode. Mixed,
+unknown, duplicate and incomplete arguments refuse before legacy dispatch.
+Exit `0` means valid declared bindings, **not a quality pass**; exit `2` means
+invalid/unreadable input. Manifest-only success measures no model quality.
+Saved results require strict complete terminal coverage and exact manifest,
+audio/reference/revision/input bindings; scores are recomputed with the existing
+scorers. Failures/skips and no-speech controls remain visible separately from
+scored speech. Paired pipeline cleanup remains dependent on its ASR inputs.
+No transcripts or private paths are printed.
+
+[Exact versioned schema, bounds, filesystem/attestation limits, external-generator
+contract and proposed human collection/reference/withdrawal protocol](human-corpus-protocol.md).
+Consent/engine declarations are not truth certification. No actual human corpus
+or live quality evidence is supplied; B02 remains partial. Existing verify,
+quality-check, comparison, scorer arithmetic and live-run contracts are unchanged.

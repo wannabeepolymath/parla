@@ -6,7 +6,11 @@ by default), and typed into whatever app you're using. Hold **⇧+fn** instead
 with text selected to speak an edit instruction and transform the selection in
 place (see [Command mode](#command-mode)).
 
-Parla is macOS-only. A separate Rust implementation for wlroots compositors
+The desktop app described below is macOS-only. An initial native Android app
+with on-device English transcription, direct AI cleanup using your own API key,
+a floating microphone, and a voice keyboard lives in [`android/`](android/README.md).
+It has emulator coverage; physical-device and target-app qualification is still
+pending. A separate Rust implementation for wlroots compositors
 (sway, Hyprland, river) lives in `linux/` at Milestone 1 — dictate, then paste
 from the clipboard. It is code-complete but has not yet run on Linux hardware;
 see [`linux/README.md`](linux/README.md) to build it and

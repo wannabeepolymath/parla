@@ -8,7 +8,7 @@ final class OnboardingFlagTests: XCTestCase {
     private func store() -> SettingsStore {
         SettingsStore(url: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathComponent("settings.json"))
+            .appendingPathComponent("settings.json"), credentials: testCredentialStore())
     }
 
     func testFreshInstallStartsIncomplete() {

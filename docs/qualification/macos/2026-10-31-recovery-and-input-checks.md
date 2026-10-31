@@ -1,0 +1,17 @@
+# macOS recovery acceptance and owned microphone observation
+
+B46 meets its canonical code and policy criteria for the existing bounded local PCM-WAV recovery path. This does not certify every native device, player, file format or recognition backend.
+
+An independent source audit traced the recovery list and its explicit replay, retranscribe and delete actions, inactive-file eligibility, lease ownership, expiry, durable failed-write markers, secure purge and default disposal of successful recordings. It found no required implementation change. Seventeen inspected source/test hashes still match that audit.
+
+A fresh serial skip-build run executed exactly twelve selected recovery methods: five RecordingRecoveryTests and seven HubAudioRecoveryTests, with zero failures and process exit 0. The process group and output settled. All 364 frozen source/document records and Git HEAD, branch, staged entries and status remained unchanged during the run. Twelve test-owned fixture creation/removal pairs were reported. Removal reports follow successful filesystem removal; they are not independent physical-erasure observations. Foundation temporary directories were used; TMPDIR containment is not claimed.
+
+The checks use real synthetic WAV/header/metadata and filesystem operations with injected failures. Recognition, clipboard, credentials and playback use test doubles. Hub construction and refresh perform passive keyboard-source, permission-status and login-item status queries. There was no microphone capture, real recognition, provider request, general clipboard operation or access to user recordings. Recovery-specific native playback, recognition, rendered UI and human hearing remain unverified. The separate successful Whisper import/export observation corroborates shared recognition infrastructure only.
+
+The runner initially rejected its postprocessing because its expected test identifiers omitted module prefixes. Corrected validation matched all twelve exact names in the same saved log. No test rerun or product change was made to resolve that reporting error.
+
+Separately, an operator-controlled owned input/audio workbench run recorded one six-second microphone take with signal, a known input route and an explicit Listen request. The user subsequently confirmed hearing the recording. Capture buffers were reported cleared: zero samples, zero pre-roll and no retained converter. The supervised process exited 0 with closed output and preserved source/bundle pins. No audio was persisted in its receipt. This is one current-host microphone/player observation, not recovery playback or general device qualification.
+
+The user explicitly skipped keyboard-layout switching and the physical mouse check. Both remain untested. The original receipt's `heardConfirmed` field remains null; the later user statement is retained in a separate operator-confirmation addendum.
+
+Evidence root at observation: `/private/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-owned-ocr-20261030-0av9ol73/`. Recovery evidence: `b46-acceptance-audit-report.md`, `b46-acceptance-audit-check-plan.json`, and `b46-fresh-checks-20261031/{claim.json,result.json,audit-pin-check.json,source-before.json,source-after.json,commands/01.json,commands/01.stdout,fixtures.tsv}`. Hands-on evidence: `workbench-hands-on-01/{result.json,operator-confirmation.json}`. These temporary resources remain retained; no commit or release is implied.

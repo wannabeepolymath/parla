@@ -1,0 +1,2 @@
+# category: quantities
+Set the timeout to 50 seconds.

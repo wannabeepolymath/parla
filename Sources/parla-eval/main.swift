@@ -21,6 +21,10 @@ import ParlaCore
 //   parla-eval verify [dir]     re-score the committed eval/results.json with
 //                               today's normalizer and scorer — no model, no
 //                               key, no network. This is the CI gate.
+//   parla-eval quality-check [dir]
+//                               check reviewed cleanup outputs against explicit
+//                               text rules; --out reads real generated results,
+//                               --policy selects rules.json (offline only)
 //   parla-eval compare a b      diff two results files: aggregates per leg and
 //                               category, then the cases they disagree on most
 //   parla-eval --self-check     assert the compare arithmetic offline
@@ -39,7 +43,7 @@ import ParlaCore
 // scoring worse than another is the answer the mode exists to produce, not a
 // failure of the mode.
 
-enum Mode { case full, asrOnly, cleanupOnly, verify, compare }
+enum Mode { case full, asrOnly, cleanupOnly, verify, compare, qualityCheck }
 
 /// A case scoring worse than this is a failure, not a near miss. macparakeet's
 /// threshold: corpus WER hides exactly the dictations that feel broken.
@@ -71,6 +75,7 @@ func die(_ msg: String, _ code: Int32) -> Never {
 /// A closure over a top-level `var` references the global rather than capturing
 /// it, so `transcriber` below is the only strong reference to release.
 func quit(_ code: Int32) -> Never {
+    transcriber?.release()
     transcriber = nil
     exit(code)
 }
@@ -78,6 +83,22 @@ func quit(_ code: Int32) -> Never {
 // MARK: - Arguments
 
 var args = Array(CommandLine.arguments.dropFirst())
+
+// Strict offline dispatch precedes every legacy option, discovery and engine
+// boundary. A mixed occurrence refuses here; it cannot fall through to live work.
+if args.contains("corpus-check") {
+    do {
+        print(try EvalCorpus.check(arguments: args))
+        exit(0)
+    } catch let error as EvalCorpusError {
+        FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
+        exit(2)
+    } catch {
+        FileHandle.standardError.write(Data("corpus-check refused: unreadable\n".utf8))
+        exit(2)
+    }
+}
+
 
 /// Removes `--flag value` from `args` and returns the value. Value-taking flags
 /// are consumed BEFORE the positional scan below, or `--model foo` would leave
@@ -95,18 +116,20 @@ func takeOption(_ name: String) -> String? {
 let modelOverride = takeOption("--model")
 let outPath = takeOption("--out")
 let cleanupCmd = takeOption("--cleanup-cmd")
+let policyPath = takeOption("--policy")
 
 let mode: Mode = args.contains("compare") ? .compare
+    : args.contains("quality-check") ? .qualityCheck
     : args.contains("verify") || args.contains("--verify") ? .verify
     : args.contains("--asr-only") ? .asrOnly
     : args.contains("--cleanup-only") ? .cleanupOnly
     : .full
-let positional = args.filter { !$0.hasPrefix("-") && $0 != "verify" && $0 != "compare" }
-let dir = positional.first ?? "eval/cases"
+let positional = args.filter { !$0.hasPrefix("-") && $0 != "verify" && $0 != "compare" && $0 != "quality-check" }
+let dir = positional.first ?? (mode == .qualityCheck ? "eval/quality/cases" : "eval/cases")
 let dirURL = URL(fileURLWithPath: dir, isDirectory: true)
 let evalRoot = dirURL.deletingLastPathComponent()
 let resultsURL = outPath.map { URL(fileURLWithPath: $0) }
-    ?? evalRoot.appendingPathComponent("results.json")
+    ?? evalRoot.appendingPathComponent(mode == .qualityCheck ? "reviewed-results.json" : "results.json")
 let contextURL = evalRoot.appendingPathComponent("context.json")
 
 // MARK: - Case files
@@ -126,23 +149,9 @@ struct CaseResult: Codable {
     var wer: Double?
 }
 
-let headerKeys: Set<String> = ["category", "app", "bundle"]
-
-/// Strip leading "# key: value" headers. Only known keys count, so a golden
-/// whose first line is genuinely "#define FOO" keeps its text.
+/// Shared extraction preserves the original case-file behavior in every mode.
 func parseCaseFile(_ text: String) -> (headers: [String: String], body: String) {
-    var headers: [String: String] = [:]
-    var lines = ArraySlice(text.components(separatedBy: "\n"))
-    while let line = lines.first, line.hasPrefix("#") {
-        let parts = line.dropFirst().split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else { break }
-        let key = parts[0].trimmingCharacters(in: .whitespaces)
-        guard headerKeys.contains(key) else { break }
-        headers[key] = parts[1].trimmingCharacters(in: .whitespaces)
-        lines = lines.dropFirst()
-    }
-    return (headers, lines.joined(separator: "\n")
-        .trimmingCharacters(in: .whitespacesAndNewlines))
+    EvalCorpus.parseCaseFile(text)
 }
 
 // MARK: - Reporting
@@ -152,10 +161,13 @@ func parseCaseFile(_ text: String) -> (headers: [String: String], body: String) 
 /// about what "zero-edit rate" or "corpus WER" means.
 struct Summary {
     var n = 0, zeroEdit = 0, edits = 0, refWords = 0
+    var structureMatch = 0, newlineMatch = 0
     var rates: [Double] = [], seconds: [Double] = []
     var byCategory: [String: (edits: Int, ref: Int)] = [:]
     var corpusWER: Double { refWords > 0 ? Double(edits) / Double(refWords) : 0 }
     var zeroEditRate: Double { n > 0 ? Double(zeroEdit) / Double(n) : 0 }
+    var structureRate: Double { n > 0 ? Double(structureMatch) / Double(n) : 0 }
+    var newlineRate: Double { n > 0 ? Double(newlineMatch) / Double(n) : 0 }
     /// 0 for a category this run never scored — the caller unions both runs'
     /// category sets, so an absent one has no edits to report.
     func categoryWER(_ key: String) -> Double {
@@ -176,6 +188,8 @@ func summarize(_ rs: [CaseResult]) -> Summary {
         s.byCategory[r.category, default: (0, 0)].edits += w.edits
         s.byCategory[r.category, default: (0, 0)].ref += w.referenceWords
         if Eval.normalize(r.reference) == Eval.normalize(r.hypothesis) { s.zeroEdit += 1 }
+        if Eval.normalizeStructure(r.reference) == Eval.normalizeStructure(r.hypothesis) { s.structureMatch += 1 }
+        if Eval.newlineLayout(r.reference) == Eval.newlineLayout(r.hypothesis) { s.newlineMatch += 1 }
     }
     return s
 }
@@ -189,12 +203,12 @@ func report(_ results: [CaseResult]) -> Bool {
         guard !rs.isEmpty else { continue }
         let s = summarize(rs)
 
-        for r in rs where Eval.normalize(r.reference) != Eval.normalize(r.hypothesis) {
+        for r in rs where Eval.normalizeStructure(r.reference) != Eval.normalizeStructure(r.hypothesis) {
             let w = Eval.wer(reference: r.reference, hypothesis: r.hypothesis)
             if w.rate > failThreshold { qualityFailed = true }
             print("\(w.rate > failThreshold ? "FAIL" : "near") \(leg) \(r.name) (wer \(pct(w.rate)))")
-            print("  golden: \(Eval.normalize(r.reference))")
-            print("  actual: \(Eval.normalize(r.hypothesis))")
+            print("  golden: \(Eval.normalizeStructure(r.reference).debugDescription)")
+            print("  actual: \(Eval.normalizeStructure(r.hypothesis).debugDescription)")
         }
 
         let n = s.n
@@ -205,6 +219,7 @@ func report(_ results: [CaseResult]) -> Bool {
         p90 \(pct(Eval.percentile(s.rates, 0.9)))  \
         fail(>\(Int(failThreshold * 100))%) \(failures)/\(n)
         """)
+        print("  structure-match \(s.structureMatch)/\(n) (\(pct(s.structureRate)))  newline-fidelity \(s.newlineMatch)/\(n) (\(pct(s.newlineRate)))")
         let cats = s.byCategory.keys.sorted().map { "\($0) \(pct(s.categoryWER($0)))" }
         print("  by category: " + cats.joined(separator: "  "))
         print("  latency p50/p95: \(fmt(Eval.percentile(s.seconds, 0.5)))s/\(fmt(Eval.percentile(s.seconds, 0.95)))s")
@@ -248,6 +263,7 @@ struct Disagreement {
     /// flag because a punctuation-only difference moves the product promise
     /// without moving WER at all — the WER normalizer folds punctuation away.
     let zeroFlip: Bool
+    let structureFlip: Bool, newlineFlip: Bool, layoutChanged: Bool
     var magnitude: Double { abs(werB - werA) }
 }
 
@@ -259,8 +275,14 @@ func disagreements(_ pairs: [(CaseResult, CaseResult)]) -> [Disagreement] {
         let wy = Eval.wer(reference: y.reference, hypothesis: y.hypothesis).rate
         let zx = Eval.normalize(x.reference) == Eval.normalize(x.hypothesis)
         let zy = Eval.normalize(y.reference) == Eval.normalize(y.hypothesis)
-        guard abs(wx - wy) > 1e-9 || zx != zy else { return nil }
-        return Disagreement(a: x, b: y, werA: wx, werB: wy, zeroFlip: zx != zy)
+        let sx = Eval.normalizeStructure(x.reference) == Eval.normalizeStructure(x.hypothesis)
+        let sy = Eval.normalizeStructure(y.reference) == Eval.normalizeStructure(y.hypothesis)
+        let nx = Eval.newlineLayout(x.reference) == Eval.newlineLayout(x.hypothesis)
+        let ny = Eval.newlineLayout(y.reference) == Eval.newlineLayout(y.hypothesis)
+        let layoutChanged = Eval.newlineLayout(x.hypothesis) != Eval.newlineLayout(y.hypothesis)
+        guard abs(wx - wy) > 1e-9 || zx != zy || sx != sy || nx != ny || layoutChanged else { return nil }
+        return Disagreement(a: x, b: y, werA: wx, werB: wy, zeroFlip: zx != zy,
+                            structureFlip: sx != sy, newlineFlip: nx != ny, layoutChanged: layoutChanged)
     }
     // Name breaks ties so the same two files always print the same order.
     .sorted {
@@ -324,7 +346,22 @@ if args.contains("--self-check") {
     // WER alone drops it, and zero-edit is the product promise.
     precondition(d[1].magnitude < 1e-9 && d[1].zeroFlip, "punctuation-only flip survives")
 
-    print("self-check: compare arithmetic OK")
+    let email = "Hi Sam,\n\nThanks."
+    let flat = "Hi Sam, Thanks."
+    let layoutA = c("cleanup", "layout", "email", email, email)
+    let layoutB = c("cleanup", "layout", "email", email, flat)
+    let layoutDiff = disagreements([(layoutA, layoutB)])
+    precondition(Eval.wer(reference: email, hypothesis: flat).rate == 0
+                 && Eval.normalize(email) == Eval.normalize(flat), "old whitespace semantics stay intact")
+    precondition(layoutDiff.count == 1 && layoutDiff[0].structureFlip && layoutDiff[0].newlineFlip
+                 && !layoutDiff[0].zeroFlip, "paragraph-only compare disagreement survives")
+    precondition(summarize([layoutB]).structureMatch == 0 && summarize([layoutB]).newlineMatch == 0,
+                 "paragraph-only report mismatch survives")
+    let otherLayout = c("cleanup", "layout", "email", email, "Hi\nSam, Thanks.")
+    precondition(disagreements([(layoutB, otherLayout)]).count == 1,
+                 "layout changes remain visible when both outputs miss the golden")
+
+    print("self-check: compare arithmetic and layout visibility OK")
     exit(0)
 }
 
@@ -354,6 +391,8 @@ if mode == .compare {
 
         print("  \(padR("zero-edit", 18)) \(padL("\(sa.zeroEdit)/\(sa.n)", 7)) → "
             + "\(padL("\(sb.zeroEdit)/\(sb.n)", 7))   \(padL(pp(sb.zeroEditRate - sa.zeroEditRate), 8))")
+        metricRow("structure-match", sa.structureRate, sb.structureRate)
+        metricRow("newline-fidelity", sa.newlineRate, sb.newlineRate)
         metricRow("corpus WER", sa.corpusWER, sb.corpusWER)
         metricRow("p50", Eval.percentile(sa.rates, 0.5), Eval.percentile(sb.rates, 0.5))
         metricRow("p90", Eval.percentile(sa.rates, 0.9), Eval.percentile(sb.rates, 0.9))
@@ -372,10 +411,13 @@ if mode == .compare {
             + "read these, the numbers above only say whether something moved:")
         for d in diffs.prefix(10) {
             print("    \(padL(pp(d.werB - d.werA), 8))  \(d.a.name)  A \(pct(d.werA)) → B \(pct(d.werB))"
-                + (d.zeroFlip ? "  [zero-edit flip]" : ""))
-            print("      golden: \(Eval.normalize(d.a.reference))")
-            print("      A:      \(Eval.normalize(d.a.hypothesis))")
-            print("      B:      \(Eval.normalize(d.b.hypothesis))")
+                + (d.zeroFlip ? "  [zero-edit flip]" : "")
+                + (d.structureFlip ? "  [structure flip]" : "")
+                + (d.newlineFlip ? "  [newline flip]" : "")
+                + (d.layoutChanged ? "  [layout changed]" : ""))
+            print("      golden: \(Eval.normalizeStructure(d.a.reference).debugDescription)")
+            print("      A:      \(Eval.normalizeStructure(d.a.hypothesis).debugDescription)")
+            print("      B:      \(Eval.normalizeStructure(d.b.hypothesis).debugDescription)")
         }
         if diffs.count > 10 { print("    … and \(diffs.count - 10) more") }
     }
@@ -383,6 +425,41 @@ if mode == .compare {
     // RESULT this mode exists to produce, not a failure of it — same discipline
     // that keeps a network flake (3) out of the quality regression code (1).
     exit(0)
+}
+
+// MARK: - quality-check: enforce reviewed output policy, offline
+
+if mode == .qualityCheck {
+    guard positional.count <= 1 else { die("quality-check takes at most one case directory", 2) }
+    let policyURL = policyPath.map { URL(fileURLWithPath: $0) }
+        ?? evalRoot.appendingPathComponent("rules.json")
+    do {
+        let policy = try Eval.qualityPolicy(from: Data(contentsOf: policyURL))
+        let entries = try FileManager.default.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: nil)
+        let goldens = entries.filter { $0.lastPathComponent.hasSuffix(".golden.txt") }
+        let raws = entries.filter { $0.lastPathComponent.hasSuffix(".raw.txt") }
+        let expected = Set(policy.cases.map(\.name))
+        guard Set(raws.map { String($0.lastPathComponent.dropLast(8)) }) == expected else {
+            throw Eval.QualityError.invalid("raw input cases must exactly match policy cases")
+        }
+        for raw in raws where try parseCaseFile(String(contentsOf: raw, encoding: .utf8)).body.isEmpty {
+            throw Eval.QualityError.invalid("empty raw input: \(raw.lastPathComponent)")
+        }
+        var references: [String: String] = [:]
+        for golden in goldens {
+            references[String(golden.lastPathComponent.dropLast(11))] =
+                parseCaseFile(try String(contentsOf: golden, encoding: .utf8)).body
+        }
+        let failures = try Eval.checkQuality(policy: policy, references: references,
+                                             results: Data(contentsOf: resultsURL))
+        print("quality-check: \(policy.cases.count) cleanup outputs, explicit policy v\(policy.version) (offline)")
+        print("  results: \(resultsURL.path)")
+        failures.forEach { print("FAIL \($0)") }
+        print("quality-check: \(failures.isEmpty ? "PASS" : "FAIL") — evaluated text only; no live model quality measured")
+        exit(failures.isEmpty ? 0 : 1)
+    } catch {
+        die("quality-check: \(error.localizedDescription)", 2)
+    }
 }
 
 // MARK: - verify: re-score committed fixtures, offline
@@ -463,29 +540,43 @@ let needsCleanup = mode != .asrOnly
 
 // MARK: - Engines
 
-var transcriber: WhisperTranscriber?
+var transcriber: EvalRecognition?
 var modelPath = ""
 if needsASR {
     modelPath = WhisperTranscriber.defaultModelPath()
     guard fm.fileExists(atPath: modelPath) else {
         die("whisper model not found at \(modelPath)", 2)
     }
-    do { transcriber = try WhisperTranscriber(modelPath: modelPath) }
+    do {
+        transcriber = EvalRecognition()
+        try await transcriber?.acquire(needsASR: true, request: { RecognitionRequest(settings: Settings()) })
+    }
     catch { die("\(error)", 2) }
 }
 
 // Cleanup context is PINNED to a committed fixture. Reading the developer's
-// dictionary and snippets would make every run unreproducible; only the
+// dictionary, snippets and replacements would make every run unreproducible; only the
 // provider credentials still come from local Settings.
-var settings = SettingsStore().load()
+let settingsStore = SettingsStore()
+_ = settingsStore.migrateSelectedCredentials()
+var settings = settingsStore.load()
+// Live destination profiles and output controls never affect reproducible fixtures.
+settings.profiles = []
+settings.outputMode = .cleanup
+settings.transformPresets = []
+settings.selectedPresetID = nil
+settings.cleanupEnabled = true
+settings.cleanupStyle = .standard
 if let data = try? Data(contentsOf: contextURL),
    let fixture = try? JSONDecoder().decode(Settings.self, from: data) {
     settings.dictionary = fixture.dictionary
     settings.snippets = fixture.snippets
+    settings.replacements = fixture.replacements
 } else {
     settings.dictionary = []
     settings.snippets = [:]
-    print("note: no \(contextURL.lastPathComponent) — running with an empty dictionary and no snippets")
+    settings.replacements = []
+    print("note: no \(contextURL.lastPathComponent) — running with an empty dictionary, no snippets and no replacements")
 }
 
 // --model overrides the model for THIS run only: `settings` is a loaded copy and
@@ -495,6 +586,8 @@ if let data = try? Data(contentsOf: contextURL),
 // the server for its first model") — and the run only ever uses one of them, so
 // setting both overrides whichever provider is configured. Credentials and base
 // URL still come from Settings; only the model name moves.
+do { try EvalCleanupSelection.validate(settings: settings, modelOverride: modelOverride, command: cleanupCmd) }
+catch { die("Apple Intelligence uses the system model; --model is unsupported for this provider.", 2) }
 if let modelOverride {
     settings.cleanupModel = modelOverride
     settings.cleanup.model = modelOverride
@@ -565,7 +658,7 @@ if needsCleanup {
         client = CommandCleanupClient(path: cleanupCmd, model: modelOverride ?? "")
     } else {
         do {
-            client = try makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
+            client = try makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment, credentials: settingsStore.credentials)
         } catch { die("\(error)", 2) }
     }
 }
@@ -573,16 +666,8 @@ if needsCleanup {
 // actually produced the text. With --cleanup-cmd the configured provider is not
 // involved at all, and labelling those fixtures with `cleanup.model` claims a
 // run came from a provider that was never called.
-let cleanupEngine: String = {
-    guard let cleanupCmd else {
-        return settings.cleanup.provider == "anthropic"
-            ? settings.cleanupModel : (settings.cleanup.model ?? settings.cleanup.provider)
-    }
-    let exe = URL(fileURLWithPath: cleanupCmd).lastPathComponent
-    // The command picks its own model; --model is the only way it can be named
-    // here, which is why it is passed through to the command as argv[2].
-    return "cmd:\(exe)" + (modelOverride.map { " \($0)" } ?? "")
-}()
+let cleanupEngine = EvalCleanupSelection.label(settings: settings, modelOverride: modelOverride, command: cleanupCmd)
+
 if modelOverride != nil {
     print("cleanup model for this run: \(cleanupEngine) (--model; settings.json untouched)")
 }
@@ -593,7 +678,7 @@ struct NoEngine: Error {}
 var currentBundle: String?
 let pipeline = Pipeline(
     // flatMap, not ?? "": a failed pass must score as a failure, not as silence.
-    transcribe: { samples, prompt in transcriber.flatMap { $0.transcribe(samples, initialPrompt: prompt) } },
+    transcribe: { samples, prompt in await transcriber?.transcribe(samples, prompt: prompt) },
     cleanup: { text, ctx in
         guard let client else { throw NoEngine() }
         // Back off and retry on 429 — here, NOT in CleanupClient. The app is
@@ -636,7 +721,7 @@ for name in names {
             continue
         }
         let t0 = Date()
-        let heard = pipeline.transcript(samples: samples) ?? ""
+        let heard = await pipeline.transcript(samples: samples) ?? ""
         let asr = Date().timeIntervalSince(t0)
         if let rawRef {
             results.append(CaseResult(name: name, category: category, leg: "asr",

@@ -4,7 +4,7 @@ import Foundation
 /// prompt's tone hint (`PromptBuilder`) and the newline-flatten rule below.
 /// `.unknown` is a real answer, not a fallback failure: unrecognized apps and
 /// browser hosts get no tone sentence. Recognized email sites get email structure.
-public enum AppCategory {
+public enum AppCategory: Sendable {
     case terminal, code, chat, email, prose, unknown
 }
 

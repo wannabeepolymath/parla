@@ -16,6 +16,73 @@ final class HUD: @unchecked Sendable {
     private let waveform = WaveformView()
     private let appIcon = NSImageView() // shown only inside the drag chip
     private var hideItem: DispatchWorkItem?
+    var canceledCaptureActions: CanceledCaptureHUDActions?
+    var onCanceledCaptureDismiss: () -> Void = {}
+    private var canceledCaptureView: CanceledCaptureView = .empty
+    private var undoButton = CanceledCaptureButton(title: "Undo", target: nil, action: nil)
+    private var copyButton = CanceledCaptureButton(title: "Copy", target: nil, action: nil)
+    private var discardButton = CanceledCaptureButton(title: "Discard", target: nil, action: nil)
+    private let canceledPreview = NSTextField(wrappingLabelWithString: "")
+    private func installCanceledCaptureButtons() {
+        for (index, button) in [undoButton, copyButton, discardButton].enumerated() {
+            button.isHidden = true; button.bezelStyle = .rounded
+            button.frame = NSRect(x: index == 2 ? 300 : 16, y: 10, width: 100, height: 30)
+            pill.addSubview(button)
+        }
+        undoButton.setAccessibilityLabel("Undo capture cancellation")
+        copyButton.setAccessibilityLabel("Copy canceled capture transcript")
+        discardButton.setAccessibilityLabel("Discard canceled capture")
+    }
+    private func clearCanceledCaptureUI(notify: Bool) {
+        let hadOwner = canceledCaptureView != .empty
+        canceledCaptureView = .empty
+        for button in [undoButton, copyButton, discardButton] { button.isHidden = true; button.captureToken = nil }
+        canceledPreview.stringValue = ""; canceledPreview.isHidden = true
+        if panel.frame.size != NSSize(width: 284, height: 68) {
+            panel.setContentSize(NSSize(width: 284, height: 68)); pill.frame = Self.activePillFrame
+        }
+        if notify && hadOwner { onCanceledCaptureDismiss() }
+    }
+    func showCanceledCapture(_ state: CanceledCaptureView) {
+        if state == .empty {
+            guard canceledCaptureView != .empty else { return }
+            clearCanceledCaptureUI(notify: false); settle(); return
+        }
+        hideItem?.cancel(); hideItem = nil
+        clearCanceledCaptureUI(notify: false)
+        // A control still tracking an old mouse press must never acquire the
+        // next offer's token. Retire its instance before painting new actions.
+        for button in [undoButton, copyButton, discardButton] { button.removeFromSuperview() }
+        undoButton = CanceledCaptureButton(title: "Undo", target: nil, action: nil)
+        copyButton = CanceledCaptureButton(title: "Copy", target: nil, action: nil)
+        discardButton = CanceledCaptureButton(title: "Discard", target: nil, action: nil)
+        installCanceledCaptureButtons()
+        canceledCaptureView = state
+        expand()
+        isIdle = false; showingToast = true
+        dot.isHidden = true; waveform.isHidden = true
+        let isPreview: Bool
+        switch state { case .preview: isPreview = true; default: isPreview = false }
+        panel.setContentSize(NSSize(width: 444, height: isPreview ? 244 : 112))
+        pill.frame = NSRect(x: 12, y: 12, width: 420, height: isPreview ? 220 : 88)
+        label.frame = NSRect(x: 16, y: isPreview ? 188 : 56, width: 388, height: 20)
+        switch state {
+        case .offer: label.stringValue = "Capture canceled"; undoButton.isHidden = false
+        case .processing: label.stringValue = "Preparing preview…"
+        case .preview(_, let text):
+            label.stringValue = "Canceled capture"
+            canceledPreview.stringValue = text; canceledPreview.isHidden = false
+            canceledPreview.frame = NSRect(x: 16, y: 48, width: 388, height: 128)
+            copyButton.isHidden = false
+        case .empty: break
+        }
+        discardButton.isHidden = false
+        canceledCaptureActions?.bind(undoButton, action: .undo, token: state.token)
+        canceledCaptureActions?.bind(copyButton, action: .copy, token: state.token)
+        canceledCaptureActions?.bind(discardButton, action: .discard, token: state.token)
+        if let screen = currentScreen() { panel.setFrameOrigin(dockOrigin(idle: false, on: screen)) }
+        panel.orderFrontRegardless()
+    }
     // Currently collapsed to the mini idle capsule (vs. the full active pill).
     private var isIdle = false
     // Whether the pill is showing a finished-state toast (which auto-hides)
@@ -128,6 +195,11 @@ final class HUD: @unchecked Sendable {
         label.usesSingleLineMode = true // so lineBreakMode truncates instead of wrapping
         pill.addSubview(label)
 
+        installCanceledCaptureButtons()
+        canceledPreview.textColor = .white; canceledPreview.font = .systemFont(ofSize: 13)
+        canceledPreview.maximumNumberOfLines = 7; canceledPreview.lineBreakMode = .byTruncatingTail
+        canceledPreview.isSelectable = false; canceledPreview.isHidden = true
+        pill.addSubview(canceledPreview)
         appIcon.image = NSApp.applicationIconImage
         appIcon.imageScaling = .scaleProportionallyUpOrDown
         appIcon.isHidden = true
@@ -222,12 +294,14 @@ final class HUD: @unchecked Sendable {
 
     /// Settle after a dictation: collapse to idle when always-on, else order out.
     private func settle() {
+        clearCanceledCaptureUI(notify: true)
         hideItem?.cancel()
         hideItem = nil
         if showAlways { collapse(animated: true) } else { panel.orderOut(nil) }
     }
 
     func show(_ state: State) {
+        clearCanceledCaptureUI(notify: true)
         hideItem?.cancel()
         hideItem = nil
         // .listening moves to the screen the user is dictating into; every other
@@ -237,12 +311,13 @@ final class HUD: @unchecked Sendable {
         // Preview repaints every ~300 ms mid-recording — re-docking the panel on
         // each one would fight a drag in progress. Already expanded: relabel only.
         case .preview where !isIdle: break
+        case .speculativePreview where !isIdle: break
         default: expand()
         }
         switch state {
         case .listening, .handsFree:
             label.frame = NSRect(x: 158, y: 12, width: 92, height: 20)
-        case .preview:
+        case .preview, .speculativePreview:
             // Waveform out, dot stays: the moving text is the liveness cue, but
             // the pill must still read as recording. Room left for the dot.
             label.frame = NSRect(x: 30, y: 12, width: 214, height: 20)
@@ -257,7 +332,7 @@ final class HUD: @unchecked Sendable {
             label.lineBreakMode = .byTruncatingTail
         }
         switch state {
-        case .listening, .handsFree, .transcribing, .polishing: showingToast = false
+        case .listening, .handsFree, .transcribing, .polishing, .speculativePreview: showingToast = false
         default: showingToast = true
         }
         switch state {
@@ -272,6 +347,16 @@ final class HUD: @unchecked Sendable {
             dot.isHidden = false
             waveform.isHidden = false
             label.stringValue = "Hands-free…"
+            panel.orderFrontRegardless()
+        case .speculativePreview(let update):
+            dot.isHidden = false
+            waveform.isHidden = true
+            switch update {
+            case .draft(let text, let englishOnly):
+                label.stringValue = (englishOnly ? "Draft · English only · " : "Draft · ") + text
+                label.lineBreakMode = .byTruncatingHead
+            case .status(let status): label.stringValue = status.message
+            }
             panel.orderFrontRegardless()
         case .preview(let text):
             // Mid-recording, like .handsFree: no waveform clear, no scheduleHide.
@@ -366,7 +451,7 @@ final class HUD: @unchecked Sendable {
     private func dockOrigin(idle: Bool, on screen: NSScreen) -> NSPoint {
         let vis = screen.visibleFrame, f = screen.frame
         let margin: CGFloat = idle ? 10 : 16
-        let pf = idle ? idlePillFrame(for: dockEdge) : HUD.activePillFrame
+        let pf = idle ? idlePillFrame(for: dockEdge) : (canceledCaptureView == .empty ? HUD.activePillFrame : pill.frame)
         let px: CGFloat, py: CGFloat
         switch dockEdge {
         case .bottom, .top:

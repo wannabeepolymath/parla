@@ -21,7 +21,11 @@ let package = Package(
         .executableTarget(name: "parla-eval", dependencies: ["ParlaCore"]),
         // Types known strings into a real app and reads them back — the half of
         // the Tier 0 #8 insertion check that unit tests structurally cannot do.
-        .executableTarget(name: "parla-insert-check", dependencies: ["ParlaCore"]),
+        .target(name: "OwnedOCRFixture", dependencies: ["ParlaCore"]),
+        .executableTarget(name: "parla-insert-check", dependencies: ["ParlaCore", "OwnedOCRFixture"]),
+        .executableTarget(name: "parla-owned-ocr-check", dependencies: ["OwnedOCRFixture"]),
+        .executableTarget(name: "parla-owned-input-audio-check", dependencies: ["ParlaCore"]),
+        .testTarget(name: "OwnedInputAudioCheckTests", dependencies: ["parla-owned-input-audio-check"]),
         .testTarget(name: "ParlaCoreTests", dependencies: ["ParlaCore"]),
         .testTarget(name: "ParlaTests", dependencies: ["Parla"]),
     ]

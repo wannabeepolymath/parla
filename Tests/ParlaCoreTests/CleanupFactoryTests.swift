@@ -145,7 +145,7 @@ final class CleanupFactoryTests: XCTestCase {
         s.anthropicApiKey = "k"
         XCTAssertThrowsError(try makeCleanupClient(settings: s, env: [:])) { error in
             let message = "\(error)"
-            XCTAssertTrue(message.contains("some-future-thing"))
+            XCTAssertTrue(message.lowercased().contains("provider"))
             XCTAssertTrue(message.contains("anthropic"))
             XCTAssertTrue(message.contains("openai-compatible"))
         }
@@ -227,5 +227,26 @@ final class CleanupFactoryTests: XCTestCase {
         XCTAssertEqual(req.url?.absoluteString, "http://localhost:11434/v1/chat/completions")
         let json = try JSONSerialization.jsonObject(with: req.httpBody!) as! [String: Any]
         XCTAssertEqual(json["model"] as? String, "llama3")
+    }
+}
+
+
+extension CleanupFactoryTests {
+    func testB21PinnedBackupSourcesNeverFallThroughOrPrompt() throws {
+        let d = try B21SettingsDocument(B21SettingsDocument.primary)
+        var row = CleanupBackup(baseURL:"https://backup.test/v1",model:"exact",source:.namedEnvironment,environmentName:"BACKUP_KEY")
+        let s = try row.settings(preserving:B21SettingsDocument.primary)
+        d.backend.values[try .compatible(row.baseURL)] = "must-not-fall-through"
+        XCTAssertThrowsError(try resolveCleanupBackupCredential(row,settings:s,env:[:],credentials:d.store.credentials))
+        _ = try resolveCleanupBackupCredential(row,settings:s,env:["BACKUP_KEY":"chosen"],credentials:d.store.credentials)
+        XCTAssertEqual(d.backend.reads,0)
+        row.source = .scopedKeychain; row.environmentName = nil
+        _ = try resolveCleanupBackupCredential(row,settings:s,env:["BACKUP_KEY":"ignored"],credentials:d.store.credentials)
+        XCTAssertEqual(d.backend.interactiveReads,[false])
+        row.source = .keylessCompatible
+        _ = try resolveCleanupBackupCredential(row,settings:s,env:[:],credentials:d.store.credentials)
+        XCTAssertEqual(d.backend.reads,1)
+        var legacy = s; legacy.cleanup.apiKey = "legacy"
+        XCTAssertThrowsError(try resolveCleanupBackupCredential(row,settings:legacy,env:[:],credentials:d.store.credentials))
     }
 }

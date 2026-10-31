@@ -16,6 +16,17 @@ struct InsertionDestination<Identity: Equatable> {
         self.element = element; self.selection = selection
     }
 
+    /// Selection replacement needs positive field and window identity. Opaque
+    /// process-only fallback remains available for ordinary pending dictation.
+    func matchesSelection(_ current: Self) -> Bool {
+        guard let process, process == current.process,
+              let element, element == current.element,
+              let selection, !selection.isEmpty, selection == current.selection else { return false }
+        if let window, let other = current.window { return window == other }
+        if let windowNumber, let other = current.windowNumber { return windowNumber == other }
+        return false
+    }
+
     func matches(_ current: Self) -> Bool {
         guard let process, process == current.process else { return false }
         // Pasting replaces a selection. Do not overwrite text newly selected

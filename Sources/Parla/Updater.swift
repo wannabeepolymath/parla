@@ -26,15 +26,18 @@ final class UpdateController {
 
     private let hud: HUD
     private let claimRestart: () async -> Bool
+    private let releaseRestart: () -> Void
     private var checkTask: Task<UpdateCheck.Outcome, Never>?
     /// The install gate: set before the first suspension, held through restart.
     private var installTask: Task<Void, Never>?
     private var installed = false
-    private var quitPending = false
+    private let terminationIntent = UpdateTerminationIntent()
+    private var quitPending: Bool { terminationIntent.isPending }
 
-    init(hud: HUD, claimRestart: @escaping () async -> Bool) {
+    init(hud: HUD, claimRestart: @escaping () async -> Bool, releaseRestart: @escaping () -> Void = {}) {
         self.hud = hud
         self.claimRestart = claimRestart
+        self.releaseRestart = releaseRestart
     }
 
     /// Canonical, so the relaunch opens the app that was swapped.
@@ -142,13 +145,13 @@ final class UpdateController {
                     hud.show(.error("Installed — reopen Parla to finish"))
                     try? await Task.sleep(nanoseconds: 3_000_000_000) // long enough to read it
                 }
-                if quitPending { NSApp.reply(toApplicationShouldTerminate: true) } else { NSApp.terminate(nil) }
+                if quitPending { completeTermination() } else { NSApp.terminate(nil) }
             } catch {
                 NSLog("%@", "Parla update failed: \(error)")
                 committing = false
                 installTask = nil
                 state = .failed(update)
-                if quitPending { return NSApp.reply(toApplicationShouldTerminate: true) }
+                if terminationIntent.installFailed(releaseRestart: releaseRestart) { return }
                 let step = (error as? UpdateInstaller.Failure)?.step.rawValue ?? "unknown"
                 hud.show(.error("Update failed: \(step)"))
             }
@@ -157,10 +160,10 @@ final class UpdateController {
 
     /// Quit before the swap cancels the transaction and replies once its
     /// cleanup (detach, temp removal) is done; after, Quit waits for the swap.
-    func shouldTerminate() -> NSApplication.TerminateReply {
-        guard let installTask, !installed else { return .terminateNow }
-        quitPending = true
-        if !committing { installTask.cancel() }
-        return .terminateLater
+    func shouldTerminate(_ reply: @escaping (Bool) -> Void) {
+        terminationIntent.request(waitingForInstall: installTask != nil && !installed,
+                                  committing: committing, cancelInstall: { self.installTask?.cancel() }, reply: reply)
     }
+    func cancelTerminationIntent() { terminationIntent.cancel() }
+    private func completeTermination() { terminationIntent.complete() }
 }

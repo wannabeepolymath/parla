@@ -1,5 +1,15 @@
 import AppKit
 import ParlaCore
+import OwnedOCRFixture
+
+// First statement: reserved owned grammar cannot enter the legacy watchdog/AX path.
+switch OwnedOCRInvocation.parse(CommandLine.arguments) {
+case .legacy: break
+case .refuse:
+    print("owned-ocr not-tested invalid-invocation")
+    exit(2)
+case .owned: OwnedOCRQualification.enter()
+}
 
 // parla-insert-check: the automated half of the Tier 0 #8 insertion smoke test.
 //

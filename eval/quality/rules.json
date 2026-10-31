@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "like-literal",
+      "protected": [
+        "like"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "like-filler",
+      "protected": [],
+      "alternatives": []
+    },
+    {
+      "name": "sort-literal",
+      "protected": [
+        "sort of",
+        "Mira",
+        "?"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "sort-filler",
+      "protected": [
+        "USB-C"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "sort-hedge",
+      "protected": [
+        "sort of"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "you-know-literal",
+      "protected": [
+        "you know",
+        "Mira"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "you-know-filler",
+      "protected": [],
+      "alternatives": []
+    },
+    {
+      "name": "correction-replace",
+      "protected": [
+        "Thursday"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "correction-negation",
+      "protected": [
+        "Tuesday",
+        "not Thursday"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "question",
+      "protected": [
+        "autoPay",
+        "?"
+      ],
+      "alternatives": [
+        "Could you disable autoPay?"
+      ]
+    },
+    {
+      "name": "statement",
+      "protected": [
+        "autoPay"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "negative",
+      "protected": [
+        "not",
+        "autoPay"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "positive",
+      "protected": [
+        "autoPay"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "quantity-fifteen",
+      "protected": [
+        "15"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "quantity-fifty",
+      "protected": [
+        "50"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "money-fifty",
+      "protected": [
+        "$12.50"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "money-five",
+      "protected": [
+        "$12.05"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "money-euro",
+      "protected": [
+        "€12.50"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "url-one",
+      "protected": [
+        "https://example.com/a?x=1&y=2"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "url-two",
+      "protected": [
+        "https://example.com/a?x=2&y=1"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "identifier-not-equal",
+      "protected": [
+        "userID",
+        "!="
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "identifier-equal",
+      "protected": [
+        "userId",
+        "=="
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "email-paragraphs",
+      "protected": [
+        "Mira",
+        "Sam"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "list-newlines",
+      "protected": [
+        "userID",
+        "autoPay"
+      ],
+      "alternatives": []
+    },
+    {
+      "name": "terminal-single-line",
+      "protected": [
+        "git status",
+        "git diff --staged"
+      ],
+      "alternatives": []
+    }
+  ]
+}

@@ -9,8 +9,9 @@ final class HubModelTests: XCTestCase {
     /// switched straight back to the old model.
     func testAFiredSaveIsNotReplayedOverALaterWrite() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let store = SettingsStore(url: dir.appendingPathComponent("settings.json"))
-        let hub = HubModel(store: store, history: HistoryStore(url: dir.appendingPathComponent("history.json")))
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SettingsStore(url: dir.appendingPathComponent("settings.json"), credentials: testCredentialStore())
+        let hub = HubModel(store: store, history: HistoryStore(url: dir.appendingPathComponent("history.json")), recordings: RecordingStore(directory: dir.appendingPathComponent("recordings")))
         hub.refresh()
         hub.settings.showHudAlways.toggle()             // a Hub edit, saved on a 0.5 s debounce…
         RunLoop.main.run(until: Date() + 0.8)           // …which fires

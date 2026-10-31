@@ -29,7 +29,7 @@ struct OnboardingView: View {
         // the README and the menu's Set API Key… item both steer users toward —
         // the transcript text does leave the Mac. Says the same thing the
         // Privacy page and the README already say.
-        "Speech recognition runs on this Mac — your audio never leaves it. Optional AI cleanup sends the transcript text, never audio, to the provider you set up.",
+        "Speech recognition runs on this Mac. Optional cleanup uses Apple’s on-device system model or your configured endpoint. Endpoint cleanup sends text, never audio. Apple manages its system-model assets and updates.",
         "One dictation, straight into this window — nothing is typed anywhere else."
     ]
 
@@ -37,7 +37,7 @@ struct OnboardingView: View {
     private var ready: Bool {
         switch step {
         case 0: return model.micGranted && model.axGranted
-        case 1: return model.modelLoaded
+        case 1: return model.modelInstalled
         default: return transcript != nil
         }
     }
@@ -46,7 +46,10 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) { stepView }
+                VStack(alignment: .leading, spacing: 18) {
+                    Button("Safe Start controls (optional)") { model.requestedPage = .safeStart }
+                    stepView
+                }
                     .padding(.horizontal, 32)
                     .padding(.bottom, 24)
                     .frame(maxWidth: 620, alignment: .leading)
@@ -155,6 +158,8 @@ struct OnboardingView: View {
                     }
                 }
             }
+            Button("Microphone self-test (no model needed)") { model.requestedPage = .microphone }
+                .buttonStyle(HubButtonStyle())
             if !model.axGranted { dragTile }
         }
     }
@@ -191,8 +196,8 @@ struct OnboardingView: View {
                    footer: "You can switch models later in General. Larger ones are more accurate and slower.") {
             HubRow(ModelCatalog.default.displayName,
                    detail: "\(ModelCatalog.default.sizeLabel) · downloaded once, then used offline") {
-                if model.modelLoaded {
-                    StatusChip(text: "Ready")
+                if model.modelInstalled {
+                    StatusChip(text: "Installed")
                 } else if let progress = model.downloadProgress {
                     ProgressView(value: progress).frame(width: 160)
                 } else {
@@ -256,9 +261,9 @@ struct OnboardingView: View {
 
     /// The window can close mid-recording; the mic must not stay open for it.
     private func endTryout() {
-        guard recording else { return }
-        recording = false
-        model.onTryoutStop { _ in }
+        guard recording || transcribing else { return }
+        recording = false; transcribing = false
+        model.onTryoutCancel()
     }
 
     private func advance() {
@@ -276,45 +281,61 @@ struct OnboardingView: View {
 /// app" a property of the code rather than a promise.
 extension AppDelegate {
     func tryoutStart() -> String? {
-        guard !session.isCapturing else { return "Finish the dictation that's already running first." }
-        guard activeTranscriber() != nil else { return "No speech model is loaded yet." }
-        // The push-to-talk key must not start a real dictation on top of this
-        // one — it would type into whatever is behind the Hub window.
-        HotkeyMonitor.suspended = true
-        do {
-            try recorder.start()
-        } catch {
-            HotkeyMonitor.suspended = false
-            return "Couldn't start the microphone: \(error)"
+        guard MainActor.assumeIsolated({ invocation.beginTryout() }) else { return "Finish the dictation that's already running first." }
+        let request = RecognitionRequest(settings: store.load())
+        let refusal: String? = MainActor.assumeIsolated {
+            guard store.lastError == nil, !invocation.secureEvidence() else { return "Recognition settings or secure focus are unavailable." }
+            return ParakeetAudioEntry.tryout(request, owner: parakeetPreparation, otherEngine: {
+                appleSpeechPreparation.deliberateEntry()
+                if request.selection.engine == .invalid { return "Recognition configuration unavailable." }
+                if let reason = appleSpeechPreparation.cachedRefusal(for: request) { return reason.message }
+                if let reason = nativePreparation.cachedRefusal { return reason.description }
+                if request.selection.engine == .whisper, !FileManager.default.fileExists(atPath: request.modelPath) { return "Choose an installed speech model first." }
+                return nil
+            })
+        }
+        if let refusal { MainActor.assumeIsolated { invocation.endTryout() }; return refusal }
+        MainActor.assumeIsolated { startup.enterDictation() }
+        tryoutRecognition = request
+        tryoutOperation = PendingOperation(name: "Speech tryout")
+        do { try recorder.start() }
+        catch {
+            tryoutRecognition = nil; tryoutOperation?.revoke(); tryoutOperation?.finish(); tryoutOperation = nil
+            MainActor.assumeIsolated { invocation.endTryout() }
+            return "Couldn't start the microphone."
         }
         hud.show(.listening(command: false))
         return nil
     }
 
     func tryoutStop(_ done: @escaping (String) -> Void) {
-        HotkeyMonitor.suspended = false
+        guard let request = tryoutRecognition, let operation = tryoutOperation else { done(""); return }
         let samples = recorder.stop()
-        guard let transcriber else { done(""); hud.hide(); return }
+        tryoutRecognition = nil
         hud.show(.transcribing)
-        // On the same chain as every other whisper pass: the ctx isn't reentrant.
-        processTask = Task { [prev = processTask] in
-            await prev?.value
-            // Same floor the real pipeline uses — below it whisper hallucinates a
-            // sentence out of silence, which is the worst possible first impression.
-            // ?? "": a failed pass reads as "nothing recognized" here — the
-            // tryout has no error surface, and retrying is one button away.
-            let text = TextRules.audioWorthTranscribing(sampleCount: samples.count,
-                                                        rms: AudioRecorder.rms(samples))
-                ? (transcriber.transcribe(samples, initialPrompt: nil) ?? "") : ""
+        let preparationEpoch: UUID? = request.selection.engine == .whisper ? nativePreparation.core.admissionEpoch : nil
+        let selectionEpoch = preparationSelectionEpoch, factory = recognitionFactory(for: request)
+        processTask = RecognitionAcquisition.enqueueTryout(previous: processTask, operation: operation, work: {
+            let resident = await MainActor.run { self.residentRecognition }
+            var refusal: PreparationRefusal?
+            let text = await RecognitionAcquisition.tryout(samples: samples, request: request,
+                resident: resident, factory: factory, operation: operation,
+                selectionEpoch: selectionEpoch, preparationEpoch: preparationEpoch, refused: { refusal = $0 })
+            let safeStartRefusal = refusal
             await MainActor.run {
-                // Back to idle on every exit. `.preview` is a mid-recording state
-                // in the real pipeline — a terminal state always follows it and
-                // schedules the hide. Nothing follows the tryout, so showing it
-                // here stranded the pill on screen, recording dot lit, until the
-                // next dictation. The transcript is in the Hub window anyway.
-                self.hud.hide()
-                done(text)
+                guard request.selection.engine == .whisper else { return }
+                if let safeStartRefusal { self.nativePreparation.notice(safeStartRefusal) }
+                else { self.nativePreparation.refresh() }
             }
-        }
+            return text
+        }, current: { self.tryoutOperation == operation }, done: { done($0) }, finished: {
+            guard self.tryoutOperation == operation else { return }
+            self.tryoutOperation = nil
+            self.invocation.endTryout(); self.hud.hide()
+        })
+    }
+    func cancelTryout() {
+        tryoutOperation?.revoke(); tryoutOperation?.requestAbort()
+        if tryoutRecognition != nil { tryoutStop { _ in } }
     }
 }

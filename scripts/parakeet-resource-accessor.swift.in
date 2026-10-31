@@ -1,0 +1,34 @@
+// Producer-owned derivative of FluidAudio's automatic resource accessor.
+// Template bytes and the derived input are part of the source manifest.
+import Foundation
+import MachO
+
+enum ParakeetResourceLocation {
+    // Pure path algebra; tests need not construct a native Foundation Bundle.
+    static func resources(executable: String) -> String? {
+        let suffix = "/ParlaParakeetHelper.bundle/Contents/MacOS/ParlaParakeetHelper"
+        guard executable.utf8.count <= 16_384, executable.hasPrefix("/"),
+              executable.hasSuffix(suffix), !executable.contains("\0"),
+              executable.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+                .allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
+        return String(executable.dropLast("MacOS/ParlaParakeetHelper".count))
+            + "Resources/FluidAudio_FluidAudio.bundle"
+    }
+    static func executable() -> String? {
+        var size: UInt32 = 16_385
+        var bytes = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&bytes, &size) == 0, size <= 16_385,
+              let end = bytes.firstIndex(of: 0), end > 0 else { return nil }
+        return String(bytes: bytes.prefix(end).map { UInt8(bitPattern: $0) }, encoding: .utf8)
+    }
+}
+extension Bundle {
+    static let module: Bundle = {
+        guard let executable = ParakeetResourceLocation.executable(),
+              let path = ParakeetResourceLocation.resources(executable: executable),
+              let bundle = Bundle(url: URL(fileURLWithPath: path, isDirectory: true)) else {
+            fatalError("Parakeet resource bundle unavailable")
+        }
+        return bundle
+    }()
+}

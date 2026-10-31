@@ -1,0 +1,2 @@
+# category: code
+Open https://example.com/a?x=2&y=1.

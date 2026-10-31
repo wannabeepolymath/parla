@@ -4,17 +4,21 @@ import Foundation
 /// `apiKey` is optional so keyless local servers (Ollama) work without an Authorization header.
 /// `model` is optional too: when nil, the server's first listed model is used.
 public struct OpenAICompatClient: CleanupProviding {
+    var diagnostics: DiagnosticOperation?
     let baseURL: String
     let apiKey: String?
     let model: String?
+    let usage: CleanupUsageSink
     let http: HTTPPosting
+    let executionPolicy: HistoryRetryExecutionPolicy?
 
     public init(baseURL: String, apiKey: String?, model: String?,
-                http: HTTPPosting = URLSessionPoster()) {
+                http: HTTPPosting = URLSessionPoster(), usage: @escaping CleanupUsageSink = recordCleanupUsage, executionPolicy: HistoryRetryExecutionPolicy? = nil) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.model = model
-        self.http = http
+        self.usage = usage
+        self.http = http; self.executionPolicy = executionPolicy
     }
 
     // ponytail: re-fetched every call when model is empty; cache it if the
@@ -26,7 +30,9 @@ public struct OpenAICompatClient: CleanupProviding {
         var req = URLRequest(url: url)
         if let apiKey { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         req.timeoutInterval = 15
-        let (data, response) = try await http.post(req)
+        try Task.checkCancellation()
+        let (data, response) = try await diagnosticPost(req, using: http, diagnostics: diagnostics)
+        try Task.checkCancellation()
         guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw CleanupError.api(statusCode: code, data: data)
@@ -49,9 +55,20 @@ public struct OpenAICompatClient: CleanupProviding {
     }
 
     public func clean(transcript: String, context: CleanupContext) async throws -> String {
+        try executionPolicy?.check()
+        if let executionPolicy {
+            guard PromptBuilder.system(context: context).utf8.count + PromptBuilder.user(transcript: transcript, context: context).utf8.count <= 16 * 1024 else { throw SegmentedRetryFailure.request }
+            try executionPolicy.reserve(128 * 1024)
+        }
+        defer { executionPolicy?.release(128 * 1024) }
+        try Task.checkCancellation()
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         let modelID: String
-        if let model { modelID = model } else { modelID = try await firstServerModel(base: base) }
+        if let model { modelID = model }
+        else {
+            guard executionPolicy == nil else { throw SegmentedRetryFailure.configuration }
+            modelID = try await firstServerModel(base: base)
+        }
         guard let url = URL(string: base + "/chat/completions") else {
             throw CleanupError(description: "invalid cleanup base URL: \(baseURL)")
         }
@@ -63,7 +80,7 @@ public struct OpenAICompatClient: CleanupProviding {
         // bounds total generation time — and, because finish() awaits on the
         // processTask chain, also how long a hung provider can stall the next
         // dictation. Keep in lockstep with CleanupClient's 15s.
-        req.timeoutInterval = 15
+        req.timeoutInterval = try executionPolicy?.remaining() ?? 15
         let body: [String: Any] = [
             "model": modelID,
             // Modern OpenAI cap; max_tokens stays absent for o-series/gpt-5-class.
@@ -76,8 +93,18 @@ public struct OpenAICompatClient: CleanupProviding {
             ],
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if executionPolicy != nil, (req.httpBody?.count ?? 0) > 128 * 1024 { throw SegmentedRetryFailure.request }
 
-        let (data, response) = try await http.post(req)
+        try Task.checkCancellation()
+        diagnostics?.providerRequestModel(modelID)
+        let (data, response) = try await diagnosticPost(req, using: http, diagnostics: diagnostics)
+        try Task.checkCancellation()
+        try executionPolicy?.check()
+        if let executionPolicy {
+            guard data.count <= 256 * 1024 else { throw SegmentedRetryFailure.response }
+            try executionPolicy.reserve(data.count * 2)
+        }
+        defer { executionPolicy?.release(data.count * 2) }
         guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw CleanupError.api(statusCode: code, data: data)
@@ -109,17 +136,15 @@ public struct OpenAICompatClient: CleanupProviding {
                 let finish_reason: String?
             }
             struct Usage: Decodable { let prompt_tokens: Int?; let completion_tokens: Int? }
+            let model: String?
             let choices: [Choice]
             let usage: Usage?
         }
         let decoded = try JSONDecoder().decode(Response.self, from: data)
-        // `modelID`, not `model`: when the model field is empty this is the id
-        // the server actually picked, which is the one that got billed.
-        Metrics.shared.update {
-            $0.cleanupModel = modelID
-            $0.promptTokens = decoded.usage?.prompt_tokens
-            $0.completionTokens = decoded.usage?.completion_tokens
-        }
+        // Prefer the response's resolved model; older servers omit it, so use
+        // the configured/discovered request model as the compatible fallback.
+        diagnostics?.providerModel(decoded.model)
+        usage(decoded.model ?? modelID, decoded.usage?.prompt_tokens, decoded.usage?.completion_tokens)
         switch decoded.choices.first?.finish_reason {
         case let reason? where reason == "length" || reason == "content_filter":
             throw CleanupError(description: "cleanup response stopped (finish_reason=\(reason))")
@@ -127,6 +152,7 @@ public struct OpenAICompatClient: CleanupProviding {
             break
         }
         if let refusal = decoded.choices.first?.message.refusal, !refusal.isEmpty {
+            diagnostics?.update { $0.providerOutcome = .refused }
             throw CleanupError(description: "cleanup response refused: \(refusal)")
         }
         let text = decoded.choices.first?.message.content ?? ""

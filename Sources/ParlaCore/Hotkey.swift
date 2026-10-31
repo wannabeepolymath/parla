@@ -168,6 +168,7 @@ public struct HotkeyBindings: Codable, Equatable, Sendable {
     public var pushToTalk = KeyChord(63)                        // fn
     public var handsFree = KeyChord(49, .fn)                    // fn+Space
     public var pasteLast = KeyChord(9, [.ctrl, .cmd])           // ⌃⌘V
+    public var runSelectedPreset: KeyChord? = nil
     public var openScratchpad = KeyChord(1, [.ctrl, .cmd])      // ⌃⌘S
     public init() {}
 
@@ -183,17 +184,19 @@ public struct HotkeyBindings: Codable, Equatable, Sendable {
         handsFree = chord(.handsFree, handsFree)
         pasteLast = chord(.pasteLast, pasteLast)
         openScratchpad = chord(.openScratchpad, openScratchpad)
+        runSelectedPreset = (try? c.decodeIfPresent(KeyChord.self, forKey: .runSelectedPreset)) ?? nil
     }
 
     private var named: [(String, KeyChord)] {
         [("hands-free", handsFree), ("paste last", pasteLast), ("open Scratchpad", openScratchpad)]
+            + (runSelectedPreset.map { [("run selected preset", $0)] } ?? [])
     }
 
     /// nil when the set is usable, else why it isn't — a sentence fragment for
     /// the Hub banner. Every rule here is a way to make Parla unreachable from
     /// the keyboard, so the Hub refuses the binding and a hand-edited
     /// settings.json falls back to the defaults instead of bricking dictation.
-    public func problem() -> String? {
+    public func problem(display: (KeyChord) -> String = { $0.display }) -> String? {
         guard let trigger = KeyChord.modifierKey(pushToTalk.keyCode), pushToTalk.modifiers.isEmpty else {
             return "push to talk must be a modifier key held on its own — fn, control, option or command"
         }
@@ -210,14 +213,14 @@ public struct HotkeyBindings: Codable, Equatable, Sendable {
         // strips the bit), so it reaches an fn trigger anyway.
         if !handsFree.modifiers.contains(trigger),
            !(trigger == .fn && KeyChord.fnDecorated.contains(handsFree.keyCode)) {
-            return "hands-free is pressed while holding push to talk, so it must include \(pushToTalk.display)"
+            return "hands-free is pressed while holding push to talk, so it must include \(display(pushToTalk))"
         }
         for (name, chord) in named.dropFirst() {  // the two idle chords
             if chord.modifiers.isEmpty {
                 return "\(name) needs at least one modifier, or it fires while you type"
             }
             if chord.modifiers.contains(trigger) {
-                return "\(name) can't use \(pushToTalk.display) — holding it starts dictation"
+                return "\(name) can't use \(display(pushToTalk)) — holding it starts dictation"
             }
         }
         for (i, a) in named.enumerated() {
@@ -240,6 +243,8 @@ public struct HotkeyBindings: Codable, Equatable, Sendable {
 /// global monitors: fn+Space / Esc / ⌃⌘V must be swallowed, not leak a space
 /// or an Esc into the front app. Other cancelling keys still pass through.
 public final class HotkeyMonitor {
+    public enum TapEvents { case keyboardAndOtherMouse, otherMouseOnly }
+    public let tapEvents: TapEvents
     public enum Edge: Equatable {
         /// Recording starts. command is true when shift was held at fn-down:
         /// that dictation is a transform-selection instruction, not plain
@@ -256,12 +261,30 @@ public final class HotkeyMonitor {
         /// ⌃⌘V while idle: paste the last transcript.
         case pasteLast
         /// ⌃⌘S while idle: open the scratchpad.
+        case runSelectedPreset
         case openScratchpad
         /// Esc while idle: dismiss the HUD toast.
         case dismiss
     }
     /// Called on the main thread once `start()` has run (see `emit`).
     public var onEdge: ((Edge) -> Void)?
+    public var onMouseEdge: ((MouseInputEdge) -> Void)?
+    public var onTapStatus: ((InputTapStatus) -> Void)?
+    private let inputAuthority: PhysicalInputAuthority
+    private let captureAdmission: CaptureAdmission
+    /// Native state is trusted only when it agreed at the original down.
+    /// Remappers/remote sources may be invisible to HID; unknown cancels rather
+    /// than fabricating a successful release time.
+    private let buttonState: (Int) -> MouseButtonState
+    private var mouseBinding: MouseButtonBinding?
+    private var mouseDebts: [Int: MousePress] = [:] // at most 14 supported buttons
+    private var activeMouse: MousePress?
+    private var tapStatusValue = InputTapStatus.unavailable
+    public var tapStatus: InputTapStatus { lock.withLock { tapStatusValue } }
+    public var pendingMouseReleaseCount: Int { lock.withLock { mouseDebts.count } }
+    /// Shared production queue seam; tests hold/drain this exact hop without sleep.
+    var enqueueOnMain: (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) }
+
     /// Sessions shorter than this are treated as accidental (see Edge.up).
     public var shortTapThreshold: TimeInterval = 0.2
     /// Live bindings. Re-read from settings.json per event rather than pushed in
@@ -272,11 +295,22 @@ public final class HotkeyMonitor {
     /// swallows the very chords being re-recorded (⌃⌘V, fn+Space) and they
     /// never reach the Hub window. Written on main, read on the tap thread.
     public static var suspended: Bool {
-        get { suspendedLock.lock(); defer { suspendedLock.unlock() }; return suspendedFlag }
-        set { suspendedLock.lock(); suspendedFlag = newValue; suspendedLock.unlock() }
+        get { suspendedLock.lock(); defer { suspendedLock.unlock() }; return suspendedFlag || !suspensions.isEmpty }
+        set { suspendedLock.lock(); if newValue && !suspendedFlag { suspensionEpoch &+= 1 }; suspendedFlag = newValue; suspendedLock.unlock() }
     }
     private static let suspendedLock = NSLock()
     private static var suspendedFlag = false
+    private static var suspensionEpoch: UInt64 = 0
+    public static var suspensionRevision: UInt64 { suspendedLock.withLock { suspensionEpoch } }
+    private static var suspensionSnapshot: (revision: UInt64, suspended: Bool) {
+        suspendedLock.withLock { (suspensionEpoch, suspendedFlag || !suspensions.isEmpty) }
+    }
+    private static var suspensions: Set<UUID> = []
+    public static func acquireSuspension() -> UUID {
+        suspendedLock.withLock { let id = UUID(); suspensions.insert(id); suspensionEpoch &+= 1; return id }
+    }
+    public static func releaseSuspension(_ id: UUID) { _ = suspendedLock.withLock { suspensions.remove(id) } }
+
 
     /// Guards everything below. The machine runs on the tap thread; the
     /// watchdog and `endSession` reach it from main. Recursive because
@@ -325,7 +359,15 @@ public final class HotkeyMonitor {
     /// startWatchdog() only; a test hook, not a live setting.
     public var watchdogInterval: TimeInterval = 5
 
-    public init(store: SettingsStore = SettingsStore()) { self.store = store }
+    public init(store: SettingsStore = SettingsStore(), inputAuthority: PhysicalInputAuthority = PhysicalInputAuthority(),
+                captureAdmission: CaptureAdmission = CaptureAdmission(),
+                tapEvents: TapEvents = .keyboardAndOtherMouse, buttonState: @escaping (Int) -> MouseButtonState = {
+                    guard let button = CGMouseButton(rawValue: UInt32($0)) else { return .unknown }
+                    return CGEventSource.buttonState(.hidSystemState, button: button) ? .down : .up
+                }) {
+        self.store = store; self.inputAuthority = inputAuthority; self.captureAdmission = captureAdmission
+        self.tapEvents = tapEvents; self.buttonState = buttonState
+    }
 
     // MARK: - Pure state machine (exercised by tests; `time` injected so tests never sleep)
 
@@ -396,6 +438,7 @@ public final class HotkeyMonitor {
         lock.lock(); defer { lock.unlock() }
         guard undelivered == 0 else { return }
         session = .idle
+        cancelMousePress()
     }
 
     /// Hand an edge to the app. From the tap thread that means a hop to main —
@@ -403,9 +446,10 @@ public final class HotkeyMonitor {
     /// reload, none of which may run inside the tap callback. Order is the
     /// order of decision: main's queue is FIFO.
     private func emit(_ edge: Edge) {
+        if case .down = edge { cancelMousePress() }
         guard deliversOnMain else { onEdge?(edge); return }
         undelivered += 1
-        DispatchQueue.main.async { [self] in
+        enqueueOnMain { [self] in
             onEdge?(edge)
             lock.lock(); undelivered -= 1; lock.unlock()
         }
@@ -482,8 +526,27 @@ public final class HotkeyMonitor {
             emit(.openScratchpad)
             return true
         }
+        if bindings.runSelectedPreset?.matches(keyCode, modifiers) == true {
+            emit(.runSelectedPreset)
+            return true
+        }
         if keyCode == 53 { emit(.dismiss) } // Esc while idle: dismiss HUD toast, pass through
         return false
+    }
+
+    /// Shared tap entry point, with repeat/suspension I/O supplied by the caller.
+    /// No HID/event tap is needed to exercise actual binding reload and dispatch.
+    public func receiveKeyDown(keyCode: UInt16, modifiers: KeyChord.Modifiers,
+                               isRepeat: Bool = false, at time: TimeInterval) -> Bool {
+        guard !Self.suspended else { return false }
+        if isRepeat { return keyCode == lastSwallowedKeyCode }
+        refreshBindings()
+        if keyCode == 53, activeMouse != nil {
+            cancelMousePress(); lastSwallowedKeyCode = keyCode; return true
+        }
+        let swallowed = keyDown(keyCode: keyCode, modifiers: modifiers, at: time)
+        lastSwallowedKeyCode = swallowed ? keyCode : nil
+        return swallowed
     }
 
     /// Pick up Hub rebinds. A hand-edited settings.json that would leave Parla
@@ -491,17 +554,118 @@ public final class HotkeyMonitor {
     /// same sets up front, this is the file-edited path.
     /// Internal, not private: the tests drive this loading path directly.
     func refreshBindings() {
-        let next = store.load().hotkeys
+        let settings = store.load()
+        refreshMouseBinding(settings)
+        let next = settings.hotkeys
         guard next != loadedBindings else { return }
         loadedBindings = next
         bindings = next.problem() == nil ? next : HotkeyBindings()
     }
 
+    private func refreshMouseBinding(_ settings: Settings) {
+        guard settings.mouseBinding != mouseBinding else { return }
+        inputAuthority.invalidateQueuedMouseStarts()
+        cancelMousePress() // revoke BEFORE adopting; original release debt survives
+        mouseBinding = settings.mouseBinding
+    }
+
+    // MARK: - Other-button native entry and recovery
+
+    /// Actual callback seam. Left/right and marked synthetic events cannot
+    /// create or settle debt. Suspension/rebind affect capture, not owed ups.
+    @discardableResult public func receiveMouseEvent(button: Int, isDown: Bool,
+                                                     synthetic: Bool = false, at time: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard MouseButtonBinding.supportedNumbers.contains(button), !synthetic else { return false }
+        refreshMouseBinding(store.load())
+        if Self.suspended || activeMouse.map({ !$0.isValid || $0.suspensionRevision != Self.suspensionRevision }) == true { cancelMousePress() }
+        if !isDown {
+            guard let press = mouseDebts.removeValue(forKey: button) else { return false }
+            if activeMouse == press {
+                activeMouse = nil
+                emitMouse(.up(press, short: time - press.downAt < shortTapThreshold))
+            }
+            return true
+        }
+        // Repeated downs belong to the original swallowed press, never a new
+        // capture (even after a rebind). Its up settles this single debt.
+        if mouseDebts[button] != nil { return true }
+        // Pair admission flags with their revision before eligibility checks;
+        // an exclusion racing this callback cannot become an authorized down.
+        let admission = captureAdmission.inputSnapshot
+        let suspension = Self.suspensionSnapshot
+        let authority = inputAuthority.snapshot
+        guard mouseBinding?.buttonNumber == button, activeMouse == nil, session == .idle,
+              tapStatusValue == .ready, !suspension.suspended, admission.allowed,
+              authority.allowsMouse else { return false }
+        let press = MousePress(button: button, at: time, tracksPhysicalState: buttonState(button) == .down,
+                               inputEpoch: authority.epoch, admissionRevision: admission.revision,
+                               suspensionRevision: suspension.revision)
+        mouseDebts[button] = press; activeMouse = press
+        emitMouse(.down(press))
+        return true
+    }
+
+    private func cancelMousePress() {
+        guard let press = activeMouse else { return }
+        activeMouse = nil; press.invalidate(); emitMouse(.cancel(press))
+    }
+    private func emitMouse(_ edge: MouseInputEdge) {
+        guard deliversOnMain else { onMouseEdge?(edge); return }
+        undelivered += 1
+        enqueueOnMain { [self] in
+            onMouseEdge?(edge)
+            lock.withLock { undelivered -= 1 }
+        }
+    }
+    /// Called by callback outages, watchdog, permission loss and port recreation.
+    /// Resets never finalize mouse audio. Keep uncertain release debts bounded
+    /// until an observed up or trusted physical-up reconciles them.
+    public func receiveTapStatus(_ status: InputTapStatus) {
+        lock.lock(); defer { lock.unlock() }
+        if status != .ready { inputAuthority.invalidateQueuedMouseStarts(); cancelMousePress() }
+        guard tapStatusValue != status else { return }
+        tapStatusValue = status
+        enqueueOnMain { [weak self] in self?.onTapStatus?(status) }
+    }
+    public func reconcileMouseButtons() {
+        lock.lock(); defer { lock.unlock() }
+        refreshMouseBinding(store.load())
+        if Self.suspended || activeMouse.map({ !$0.isValid || $0.suspensionRevision != Self.suspensionRevision }) == true { cancelMousePress() }
+        for (button, press) in mouseDebts {
+            let physical = buttonState(button)
+            if press.tracksPhysicalState, physical == .down { continue }
+            if activeMouse == press { cancelMousePress() }
+            if press.tracksPhysicalState, physical == .up { mouseDebts[button] = nil }
+        }
+    }
+
+    /// Passive settings reload: no tap/HID, capture or provider construction.
+    public func reloadMouseConfiguration() { lock.withLock { refreshMouseBinding(store.load()) } }
+    /// Explicit existing-tap recovery path, shared with watchdog retry.
+    public func retryInput() {
+        lock.lock(); defer { lock.unlock() }
+        if tap == nil { start() } else { ensureAlive() }
+    }
+
     // MARK: - Event tap
 
+    static func eventMask(_ events: TapEvents) -> CGEventMask {
+        let mouse = CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.otherMouseUp.rawValue)
+        switch events {
+        case .keyboardAndOtherMouse:
+            return mouse | CGEventMask(1 << CGEventType.keyDown.rawValue)
+                | CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        case .otherMouseOnly: return mouse
+        }
+    }
+
     public func start() {
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
-            | CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        lock.lock(); defer { lock.unlock() }
+        // Explicit Retry and the pending automatic retry may converge here.
+        guard tap == nil else { return }
+        let mask = Self.eventMask(tapEvents)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
             eventsOfInterest: mask,
@@ -517,6 +681,7 @@ public final class HotkeyMonitor {
         else {
             // No Accessibility permission yet (fresh install): keep retrying so
             // a grant starts working without an app restart.
+            receiveTapStatus(.unavailable)
             NSLog("Parla: keyboard event tap unavailable (Accessibility not granted?), retrying in 3s")
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.start() }
             return
@@ -524,6 +689,7 @@ public final class HotkeyMonitor {
         lock.lock()
         self.tap = tap
         deliversOnMain = true
+        receiveTapStatus(.ready)
         lock.unlock()
         // The tap gets a thread of its own. On the main run loop it held every
         // key the user typed, in any app, behind whatever main was doing — and a
@@ -583,11 +749,13 @@ public final class HotkeyMonitor {
     /// itself died. No-op in the normal case (one bool check).
     private func ensureAlive() {
         lock.lock(); defer { lock.unlock() }
+        reconcileMouseButtons()
         guard let tap else { return } // never created: start()'s own retry owns that
-        // Every tick, not only after a revive: secure input deafens the tap
-        // without ever disabling it, so "enabled" proves nothing about a release.
+        // Preserve keyboard missed-release finalization even on permission loss.
         defer { reconcileWithKeyboard() }
+        guard AXIsProcessTrusted() else { receiveTapStatus(.permissionLost); return }
         guard CFMachPortIsValid(tap) else {
+            receiveTapStatus(.invalidPort)
             NSLog("Parla: hotkey tap port went invalid, recreating")
             CFMachPortInvalidate(tap) // also drops the dead port's run-loop source
             self.tap = nil
@@ -598,9 +766,11 @@ public final class HotkeyMonitor {
             start()
             return
         }
-        guard !CGEvent.tapIsEnabled(tap: tap) else { return }
+        guard !CGEvent.tapIsEnabled(tap: tap) else { receiveTapStatus(.ready); return }
+        receiveTapStatus(.disabled)
         NSLog("Parla: hotkey tap was found disabled, re-enabling")
         CGEvent.tapEnable(tap: tap, enable: true)
+        if CGEvent.tapIsEnabled(tap: tap) { receiveTapStatus(.ready) }
     }
 
     /// The trigger as the keyboard reports it, not as our bookkeeping remembers
@@ -622,7 +792,7 @@ public final class HotkeyMonitor {
 
     /// The tap callback, on the tap thread. Everything here is bookkeeping —
     /// no I/O beyond one stat() and the HID flags, so it returns in microseconds.
-    private func process(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    func process(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         lock.lock(); defer { lock.unlock() }
         let pass = Unmanaged.passUnretained(event)
         switch type {
@@ -632,8 +802,20 @@ public final class HotkeyMonitor {
             // watchdog catches (see ensureAlive).
             NSLog("Parla: hotkey tap disabled by %@, re-enabling",
                   type == .tapDisabledByTimeout ? "timeout" : "user input")
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) } // macOS disables slow taps; revive
+            receiveTapStatus(.disabled)
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                if CGEvent.tapIsEnabled(tap: tap) { receiveTapStatus(.ready) }
+            } // macOS disables slow taps; revive
             reconcileWithKeyboard() // a release during the outage went straight past us
+            return pass
+        case .otherMouseDown, .otherMouseUp:
+            let swallow = receiveMouseEvent(button: Int(event.getIntegerValueField(.mouseEventButtonNumber)),
+                                            isDown: type == .otherMouseDown,
+                                            synthetic: event.getIntegerValueField(.eventSourceUserData) == Inserter.syntheticMarker,
+                                            at: Double(event.timestamp) / 1_000_000_000)
+            return swallow ? nil : pass
+        case .flagsChanged where tapEvents == .otherMouseOnly, .keyDown where tapEvents == .otherMouseOnly:
             return pass
         case _ where Self.suspended: // the Hub is recording a binding — see `suspended`
             return pass
@@ -658,21 +840,9 @@ public final class HotkeyMonitor {
             guard event.getIntegerValueField(.eventSourceUserData) != Inserter.syntheticMarker
             else { return pass }
             let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-            // Autorepeat must not re-drive the state machine (a held space would
-            // latch-then-stop hands-free on its repeats) — but it must still be
-            // SWALLOWED when we swallowed the keystroke that began it. macOS
-            // synthesizes repeats upstream of this tap regardless of whether the
-            // initiating keyDown was consumed, so passing them through leaked the
-            // very Return/Space we intercepted into the front app: holding Return
-            // to stop hands-free sent whatever draft was already in the composer.
-            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-                return code == lastSwallowedKeyCode ? nil : pass
-            }
-            refreshBindings()
-            let swallow = keyDown(keyCode: code,
-                                  modifiers: KeyChord.Modifiers(event.flags),
-                                  at: Double(event.timestamp) / 1_000_000_000)
-            lastSwallowedKeyCode = swallow ? code : nil
+            let swallow = receiveKeyDown(keyCode: code, modifiers: KeyChord.Modifiers(event.flags),
+                                         isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+                                         at: Double(event.timestamp) / 1_000_000_000)
             return swallow ? nil : pass
         default:
             return pass

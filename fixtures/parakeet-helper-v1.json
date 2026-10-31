@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "protocol": "Parla Parakeet helper v1",
+  "header": {
+    "bytes": 8,
+    "magicHex": "504b",
+    "version": 1,
+    "kind": "u8 closed 1...7",
+    "payloadLength": "u32 little endian; validate before allocation"
+  },
+  "kinds": {
+    "hello": 1,
+    "request": 2,
+    "pcm": 3,
+    "end": 4,
+    "terminal": 5,
+    "cancel": 6,
+    "close": 7
+  },
+  "identities": {
+    "required": [
+      "protocolVersion",
+      "adapterRevision",
+      "sdk",
+      "helperBuild",
+      "model",
+      "modelRevision",
+      "manifest",
+      "verification",
+      "compute",
+      "osScope",
+      "nonce",
+      "request",
+      "session"
+    ],
+    "additionalProperties": false
+  },
+  "sampleFormat": {
+    "rate": 16000,
+    "channels": 1,
+    "encoding": "finite Float32 little endian [-1,1]",
+    "maxSamples": 9600000,
+    "maxFrameBytes": 65536,
+    "pendingFrames": 1
+  },
+  "record": {
+    "maxBytes": 1048576,
+    "additionalProperties": false,
+    "requestFields": [
+      "identity",
+      "mode",
+      "directory",
+      "sampleCount",
+      "filter?"
+    ],
+    "helloCancelCloseFields": [
+      "identity"
+    ],
+    "terminalFields": [
+      "identity",
+      "code",
+      "text?"
+    ],
+    "terminalCodes": [
+      "completed",
+      "failed",
+      "canceled"
+    ]
+  },
+  "ordering": [
+    "request control; hello result before model entry",
+    "PCM frames then end plus EOF; exact declared count",
+    "one terminal plus EOF; actual zero exit; all IO joins"
+  ],
+  "deadlinesSeconds": {
+    "hello": 5,
+    "prepareLoad": 180,
+    "recognizeBatch": 120,
+    "cancelGrace": 2
+  },
+  "vectors": [
+    {
+      "name": "three-samples",
+      "hex": "504b01030c00000000000000000000bf0000803f",
+      "samples": [
+        0,
+        -0.5,
+        1
+      ]
+    },
+    {
+      "name": "end",
+      "hex": "504b010400000000"
+    },
+    {
+      "name": "unknown-kind",
+      "hex": "504b01ff00000000",
+      "reject": true
+    },
+    {
+      "name": "oversized-pcm",
+      "hex": "504b010304000100",
+      "reject": true
+    },
+    {
+      "name": "oversized-terminal",
+      "hex": "504b010501001000",
+      "reject": true
+    }
+  ]
+}

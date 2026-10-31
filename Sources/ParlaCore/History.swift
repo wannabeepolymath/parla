@@ -25,57 +25,311 @@ public struct PipelineMetrics: Codable, Equatable, Sendable {
 /// One recorded dictation. `cleaned` is nil when cleanup failed, was skipped
 /// (secure field), or produced text identical to `raw`. Codable Date rides the
 /// default JSONEncoder representation — roundtrips with the matching decoder.
-public struct HistoryEntry: Codable, Equatable, Sendable {
+public struct HistoryEntry: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
     public var date: Date
-    public var raw: String
+    public let raw: String
     public var cleaned: String?
     public var appName: String?
     public var metrics: PipelineMetrics?
-    public init(date: Date = Date(), raw: String, cleaned: String? = nil, appName: String? = nil,
-                metrics: PipelineMetrics? = nil) {
-        self.date = date; self.raw = raw; self.cleaned = cleaned; self.appName = appName
-        self.metrics = metrics
+    public var operation: TransformProvenance?
+    public var retries: [HistoryRetryProvenance]?
+    // Only used by the store to decide whether a legacy file needs migration.
+    var needsIDMigration = false
+    private enum CodingKeys: String, CodingKey { case id, date, raw, cleaned, appName, metrics, operation, retries }
+
+    public init(id: UUID = UUID(), date: Date = Date(), raw: String, cleaned: String? = nil, appName: String? = nil,
+                metrics: PipelineMetrics? = nil, operation: TransformProvenance? = nil, retries: [HistoryRetryProvenance]? = nil) {
+        self.id = id; self.date = date; self.raw = raw; self.cleaned = cleaned; self.appName = appName
+        self.metrics = metrics; self.operation = operation; self.retries = retries
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedID = try c.decodeIfPresent(UUID.self, forKey: .id)
+        id = decodedID ?? UUID()
+        needsIDMigration = decodedID == nil
+        date = try c.decode(Date.self, forKey: .date)
+        raw = try c.decode(String.self, forKey: .raw)
+        cleaned = try c.decodeIfPresent(String.self, forKey: .cleaned)
+        appName = try c.decodeIfPresent(String.self, forKey: .appName)
+        metrics = try c.decodeIfPresent(PipelineMetrics.self, forKey: .metrics)
+        operation = try c.decodeIfPresent(TransformProvenance.self, forKey: .operation)
+        retries = try c.decodeIfPresent([HistoryRetryProvenance].self, forKey: .retries)
+    }
+
+    func identified(by id: UUID) -> Self {
+        Self(id: id, date: date, raw: raw, cleaned: cleaned, appName: appName, metrics: metrics, operation: operation, retries: retries)
+    }
+
     /// What to paste/show: the polished text when we have it, else the raw.
     public var best: String { cleaned ?? raw }
 }
 
-/// Local-only dictation log at ~/Library/Application Support/Parla/history.json.
-/// Newest-first ring buffer, oldest dropped past the cap. Same save style as
-/// SettingsStore. ponytail: no index, no async — a 50-entry array is nothing.
-public final class HistoryStore {
-    public static let cap = 50 // ponytail: bump if users want a deeper log
+/// Synchronous, main-thread store shared by the interpreter, Hub and menu.
+/// Committed rows change only after an atomic write succeeds. Unsaved results
+/// live separately in memory until explicitly saved, discarded or cleared.
+public final class HistoryStore: NSObject {
+    public static let cap = 50 // legacy/default count
+    public static let countRange = 1...1000
+    public static let didChange = Notification.Name("ParlaHistoryDidChange")
+    public static func boundedCount(_ count: Int) -> Int { min(max(count, countRange.lowerBound), countRange.upperBound) }
+
+    /// Injectable disk boundary. writeAtomically must leave old bytes untouched
+    /// on failure; the production implementation uses Foundation's atomic write.
+    public struct Persistence {
+        public var read: (URL) throws -> Data
+        public var writeAtomically: (Data, URL) throws -> Void
+        public init(read: @escaping (URL) throws -> Data = { try Data(contentsOf: $0) },
+                    writeAtomically: @escaping (Data, URL) throws -> Void = { data, url in
+                        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try data.write(to: url, options: .atomic)
+                    }) {
+            self.read = read; self.writeAtomically = writeAtomically
+        }
+    }
+
     public let url: URL
-    private var items: [HistoryEntry] // oldest first internally
+    /// nil defers retention until settings provide a valid policy.
+    public private(set) var countLimit: Int?
+    private enum Failure {
+        case load, migration, save, delete, clear, trim
+        var message: String {
+            switch self {
+            case .load: return "Couldn't load history. Original file is unchanged. Repair it, then Retry Load."
+            case .migration: return "Couldn't migrate history. Retry Load before changing rows."
+            case .save: return "Couldn't save result. Saved text is unchanged; retry explicitly."
+            case .delete: return "Couldn't delete text. Saved text is unchanged; retry explicitly."
+            case .clear: return "Couldn't clear text history. Saved text is unchanged; retry explicitly."
+            case .trim: return "Couldn't trim history. Count policy has not been applied; retry explicitly."
+            }
+        }
+    }
+    private var failure: Failure?
+    public var lastError: String? {
+        guard let failure else { return nil }
+        return failure.message + (loadBlocked && failure != .load && failure != .migration
+            ? " Retry Load before changing rows." : "")
+    }
+    public private(set) var loadBlocked = false
+    public private(set) var pendingEntries: [HistoryEntry] = [] // newest first, never silently evicted
+    private var items: [HistoryEntry] = [] // oldest first
+    private let persistence: Persistence
+    private var diskData: Data?
+    private var rowVersions: [UUID: UUID] = [:]
+    private var versionRows: [UUID: HistoryEntry] = [:]
+    private enum PersistenceError: Error { case changedOnDisk }
 
-    public init(url: URL? = nil) {
-        self.url = url ?? FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    public init(url: URL? = nil, countLimit: Int? = HistoryStore.cap, persistence: Persistence = .init()) {
+        self.url = url ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Parla/history.json")
-        items = (try? Data(contentsOf: self.url))
-            .flatMap { try? JSONDecoder().decode([HistoryEntry].self, from: $0) } ?? []
+        self.countLimit = countLimit.map(Self.boundedCount)
+        self.persistence = persistence
+        super.init()
+        reload()
     }
 
-    /// Newest first.
+    public convenience init(settings: SettingsStore, url: URL? = nil) {
+        let current = settings.load()
+        self.init(url: url, countLimit: settings.lastError == nil ? current.historyTextCount : nil)
+    }
+
     public var entries: [HistoryEntry] { items.reversed() }
+    public var needsAttention: Bool { lastError != nil || !pendingEntries.isEmpty }
 
-    public func append(_ entry: HistoryEntry) {
-        items.append(entry)
-        if items.count > Self.cap { items.removeFirst(items.count - Self.cap) }
-        save()
+    /// A missing file is a new log. Every other read/decode failure blocks ALL
+    /// writes until an explicit successful reload, preserving the original bytes.
+    @discardableResult public func reload(countLimit: Int? = nil) -> Bool {
+        if let countLimit { self.countLimit = Self.boundedCount(countLimit) }
+        defer { changed() }
+        let mutationFailure = failure == .save || failure == .delete || failure == .clear ? failure : nil
+        do {
+            let data: Data
+            do { data = try persistence.read(url) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                items = []; diskData = nil; loadBlocked = false
+                failure = mutationFailure
+                return true
+            }
+            let decoded = try JSONDecoder().decode([HistoryEntry].self, from: data)
+            var seen = Set<UUID>()
+            var migration = false
+            let normalized = decoded.map { entry -> HistoryEntry in
+                // Preserve the first occurrence; reidentify subsequent collisions.
+                // No row ever aliases another row, even in a hand-edited file.
+                var id = entry.id
+                if seen.contains(id) { repeat { id = UUID() } while seen.contains(id) }
+                seen.insert(id)
+                migration = migration || entry.needsIDMigration || id != entry.id
+                return entry.identified(by: id)
+            }
+            if diskData != data { rowVersions.removeAll() }
+            diskData = data
+            loadBlocked = false
+            let retained = self.countLimit.map { Array(normalized.suffix($0)) } ?? normalized
+            if migration || retained.count != normalized.count {
+                do { try write(retained) }
+                catch {
+                    // Rows read successfully remain readable; failed migrations
+                    // are blocked so their temporary IDs cannot become addresses.
+                    items = normalized
+                    loadBlocked = loadBlocked || migration
+                    failure = mutationFailure ?? (migration ? .migration : .trim)
+                    return false
+                }
+            }
+            items = retained; loadBlocked = false
+            // Merely opening Hub must not erase a failed menu Delete/Clear or
+            // Save. A successful repair/migration/trim resolves its own error.
+            failure = mutationFailure
+            // A reopened file may contain a previously pending save. Reconcile IDs.
+            pendingEntries.removeAll { pending in items.contains(pending) }
+            var used = Set(items.map(\.id))
+            pendingEntries = pendingEntries.map { pending in
+                var id = pending.id
+                if used.contains(id) { repeat { id = UUID() } while used.contains(id) }
+                used.insert(id)
+                return pending.identified(by: id)
+            }
+            return true
+        } catch {
+            loadBlocked = true
+            failure = mutationFailure ?? .load
+            return false
+        }
     }
 
-    public func clear() {
-        items = []
-        save()
+    /// Identical ID+content is idempotent. A conflicting ID is reidentified;
+    /// returned results are never overwritten, including pending results.
+    @discardableResult public func append(_ entry: HistoryEntry) -> Bool {
+        if items.contains(entry) { return true }
+        if pendingEntries.contains(entry) { return retrySave(entry.id) }
+        let collision = items.contains { $0.id == entry.id } || pendingEntries.contains { $0.id == entry.id }
+        let entry = collision ? entry.identified(by: UUID()) : entry.identified(by: entry.id)
+        pendingEntries.insert(entry, at: 0)
+        return retrySave(entry.id)
     }
 
-    private func save() {
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? enc.encode(items).write(to: url, options: .atomic)
+    /// Explicit reviewed-result storage. The caller owns unsaved text and retry
+    /// authority; failure must never create an ordinary pending Save escape.
+    @discardableResult public func appendReviewed(_ entry: HistoryEntry) -> Bool {
+        defer { changed() }
+        guard !loadBlocked else { failure = .save; return false }
+        if let existing = items.first(where: { $0.id == entry.id }) {
+            guard existing == entry else { failure = .save; return false }
+            // Even an idempotent click must not endorse a stale disk projection.
+            return commit(items, action: .save)
+        }
+        guard !pendingEntries.contains(where: { $0.id == entry.id }) else { failure = .save; return false }
+        return commit(items + [entry.identified(by: entry.id)], action: .save)
+    }
+
+    /// A process-local identity for this exact committed row. External reloads
+    /// invalidate identities even if a replacement happens to reuse ID+content.
+    public func version(of id: UUID) -> UUID? { rowVersions[id] }
+    public func matches(_ expected: HistoryEntry, version: UUID) -> Bool {
+        rowVersions[expected.id] == version && items.first { $0.id == expected.id } == expected
+    }
+    public enum UpdateOutcome { case saved, stale, failed }
+    /// Conditional UPDATE only. Failure never creates a pending APPEND.
+    @discardableResult public func updateResult(expected: HistoryEntry, version: UUID,
+                                               text: String, retry: HistoryRetryProvenance) -> UpdateOutcome {
+        defer { changed() }
+        guard matches(expected, version: version), let index = items.firstIndex(where: { $0.id == expected.id }) else { return .stale }
+        if let countLimit, index < items.count - countLimit { return .stale }
+        var next = items
+        next[index].cleaned = text
+        next[index].retries = (expected.retries ?? []) + [retry]
+        return commit(next, action: .save) ? .saved : .failed
+    }
+
+    /// Storage only: no ASR, cleanup, insertion or metrics collection on retry.
+    @discardableResult public func retrySave(_ id: UUID) -> Bool {
+        defer { changed() }
+        guard let entry = pendingEntries.first(where: { $0.id == id }) else { return false }
+        let next = items + [entry]
+        guard commit(next, action: .save) else { return false }
+        pendingEntries.removeAll { $0.id == id }
+        return true
+    }
+
+    public func discard(_ id: UUID) {
+        pendingEntries.removeAll { $0.id == id }
+        if pendingEntries.isEmpty, !loadBlocked, failure == .save { failure = nil }
+        changed()
+    }
+
+    @discardableResult public func delete(_ id: UUID) -> Bool {
+        defer { changed() }
+        guard items.contains(where: { $0.id == id }) else { return false }
+        return commit(items.filter { $0.id != id }, action: .delete)
+    }
+
+    /// Failed clear retains both committed rows AND unsaved results. Successful
+    /// clear discards the current pending set; later new results remain new.
+    @discardableResult public func clear() -> Bool {
+        defer { changed() }
+        guard commit([], action: .clear) else { return false }
+        pendingEntries = []
+        return true
+    }
+
+    @discardableResult public func applyCountLimit(_ count: Int) -> Bool {
+        defer { changed() }
+        let limit = Self.boundedCount(count)
+        countLimit = limit
+        if items.count > limit { return commit(Array(items.suffix(limit)), action: .trim) }
+        if !loadBlocked, failure == .trim { failure = nil }
+        return !loadBlocked
+    }
+
+    @discardableResult private func commit(_ next: [HistoryEntry], action: Failure) -> Bool {
+        guard !loadBlocked else {
+            failure = action
+            return false
+        }
+        do {
+            // Any successful mutation also satisfies the configured count. A
+            // later Delete must not hide an earlier failed trim while still
+            // leaving too many committed rows.
+            let retained = countLimit.map { Array(next.suffix($0)) } ?? next
+            try write(retained)
+            items = retained; failure = nil
+            return true
+        } catch {
+            failure = action
+            return false
+        }
+    }
+
+    private func write(_ entries: [HistoryEntry]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(entries)
+        // Refuse to overwrite external edits/deletions or a now-unreadable file
+        // with a cached array. Retry Load explicitly reconciles disk and memory.
+        do {
+            let current: Data?
+            do { current = try persistence.read(url) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { current = nil }
+            guard current == diskData else { throw PersistenceError.changedOnDisk }
+        } catch {
+            loadBlocked = true
+            throw error
+        }
+        try persistence.writeAtomically(data, url)
+        diskData = data
+    }
+
+    private func changed() {
+        var versions: [UUID: UUID] = [:]
+        var rows: [UUID: HistoryEntry] = [:]
+        for entry in items {
+            versions[entry.id] = versionRows[entry.id] == entry ? (rowVersions[entry.id] ?? UUID()) : UUID()
+            rows[entry.id] = entry
+        }
+        rowVersions = versions; versionRows = rows
+        NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 }
 

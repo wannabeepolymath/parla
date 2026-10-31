@@ -1,0 +1,3 @@
+# category: terminal
+# bundle: com.mitchellh.ghostty
+Run git status; git diff --staged.

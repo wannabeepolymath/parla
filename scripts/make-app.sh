@@ -5,12 +5,41 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BUNDLE_ID=io.github.wannabeepolymath.parla
+NATIVE_INTENTS=${PARLA_NATIVE_INTENTS:-0}
+PARAKEET_PRODUCT=${PARLA_PARAKEET_PRODUCT:-0}
+case "$NATIVE_INTENTS/$PARAKEET_PRODUCT" in
+  0/0|1/0) ;;
+  0/1|1/1)
+    [ -n "${PARLA_PARAKEET_OUTPUT_ROOT:-}" ] && [ -n "${PARLA_PARAKEET_POLICY:-}" ] && \
+      [ -n "${PARLA_PARAKEET_SDK_SOURCE:-}" ] && [ -n "${PARLA_SIGN_IDENTITY:-}" ] || \
+      { echo "Optional product requires explicit output, owner/source/tool policy, SDK source and signing identity" >&2; exit 1; }
+    [ "${PARLA_NATIVE_ARCHITECTURES:-universal}" = universal ] || \
+      { echo "Optional product requires the isolated universal main" >&2; exit 1; }
+    exec python3 scripts/build-parakeet-app.py --output-root "$PARLA_PARAKEET_OUTPUT_ROOT" \
+      --policy "$PARLA_PARAKEET_POLICY" --sdk-source "$PARLA_PARAKEET_SDK_SOURCE" \
+      --signing-identity "$PARLA_SIGN_IDENTITY" --architectures universal --native-metadata "$NATIVE_INTENTS"
+    ;;
+  *) echo "PARLA_NATIVE_INTENTS and PARLA_PARAKEET_PRODUCT must be 0 or 1" >&2; exit 1 ;;
+esac
 # The update check compares this against the latest GitHub release tag, so it
 # must come from the tag, not a hand-edited string that drifts behind it.
 VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)
 VERSION=${VERSION#v}
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 SIGN_ID=${PARLA_SIGN_IDENTITY:-}
+# Native metadata is an experimental STATIC preview, off by default.
+# This branch owns the fresh compiler invocation and consumes its exact outputs.
+# No receipt supplied by an external caller may substitute for that invocation.
+case "$NATIVE_INTENTS" in
+  0) ;;
+  1)
+    [ -z "${PARLA_APPINTENTS_INPUTS:-}" ] || { echo "External native receipts are not accepted by packaging" >&2; exit 1; }
+    [ -n "${PARLA_NATIVE_OUTPUT_ROOT:-}" ] || { echo "Set PARLA_NATIVE_OUTPUT_ROOT to a new absolute isolated output root" >&2; exit 1; }
+    exec python3 scripts/build-app-intents.py --package \
+      --output-root "$PARLA_NATIVE_OUTPUT_ROOT" --architectures "${PARLA_NATIVE_ARCHITECTURES:-host}"
+    ;;
+  *) echo "PARLA_NATIVE_INTENTS must be 0 or 1" >&2; exit 1 ;;
+esac
 ARCHS=""
 [ -n "$SIGN_ID" ] && ARCHS="--arch arm64 --arch x86_64"
 swift build -c release --product Parla $ARCHS
@@ -44,6 +73,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+echo "Native intents metadata omitted; Shortcuts support remains unqualified."
 if [ -n "$SIGN_ID" ]; then
   # Inside-out: the framework first, so the app's seal covers its final signature.
   codesign --force --timestamp --options runtime -s "$SIGN_ID" "$APP/Contents/Frameworks/whisper.framework"

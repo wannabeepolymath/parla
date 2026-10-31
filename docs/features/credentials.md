@@ -1,0 +1,19 @@
+# Provider credentials
+
+AI Cleanup stores credentials in a local, nonsynchronizing macOS Keychain generic-password namespace (`com.parla.provider-credentials.v1`). Anthropic has a fixed identity. OpenAI-compatible identities include scheme, normalized host, effective port and base path. Default ports and trailing slashes normalize to the same request base. Changing provider, host, scheme, port or path never moves or removes another scope's key. Userinfo, query strings and fragments are refused.
+
+In Hub → AI Cleanup, the key draft starts blank and never displays an existing key. Enter a new value and choose **Save / Replace**, or choose **Remove** explicitly. A blank draft preserves the stored value. Switching provider or endpoint clears the draft. The status reports missing, present, denied/locked, canceled or unavailable credentials. Unlock Keychain or retry an explicit action after access failures.
+
+A nonempty `ANTHROPIC_API_KEY` overrides Anthropic storage. For compatible services, the nonempty variable named by `cleanup.apiKeyEnvVar` overrides that endpoint's storage. Overrides skip stored-key resolution and stay provider-specific. Save/Replace and Remove still affect the displayed Keychain scope while an override is active; the environment continues to win. A genuinely missing compatible credential permits keyless servers. Denied, canceled and unreadable credentials produce a controlled failure and ordinary dictation's existing raw fallback, rather than an unauthenticated request.
+
+## Existing settings
+
+Legacy `anthropicApiKey` and `cleanup.apiKey` fields still decode for migration. Explicit startup/Hub/CLI lifecycle boundaries and the common settings-save boundary migrate both fields, including an inactive provider. Compatible migration uses the saved endpoint. Missing or invalid endpoints leave migration pending. Environment overrides do not discard legacy values.
+
+Migration writes and reads back the scoped key noninteractively before atomically removing the matching legacy JSON fields. A different existing key is a visible conflict, resolved through explicit Replace or Remove. Access, verification and settings-write failures preserve the original settings bytes; unrelated settings saves and vocabulary imports are blocked until migration succeeds. A retry recognizes an already verified value after a settings-write failure or duplicate-add race. An authoritative byte comparison immediately before removal protects external edits made during Keychain I/O. Settings encoding excludes credentials, and the save boundary refuses to silently redact an unverified sole source.
+
+Configuration checks, Hub rendering and endpoint warmup never retrieve a secret or permit a prompt. Warm HEAD requests remain unauthenticated. Deliberate requests resolve credentials through the same boundary in dictation, intentional transforms, history retry and `parla-eval`. Raw, exact snippets, disabled cleanup and local-only retry paths avoid request credential resolution. A history retry privately retains its prepared credential and endpoint across later edits; neither the credential nor environment enters Settings or retry provenance. Known resolved keys are removed from provider error descriptions and usage model labels. Transcript and vocabulary exports retain their existing explicit field selections; deliberately dictated content is not automatically redacted.
+
+## Qualification
+
+Model-free tests use injected backends, Security functions, HTTP posters and temporary settings files. They do not qualify macOS Keychain ACL behavior. Fresh/relaunch migration, locked/denied/canceled access, signed and ad-hoc updates, separate CLI identity, and explicit replace/remove still require native qualification. No signing defaults, entitlements, access groups or trusted-binary lists were changed for this feature.

@@ -1,94 +1,246 @@
 import Foundation
 
-// Each provider resolves its key from its own fields only — anthropic never
-// reads cleanup.apiKey/apiKeyEnvVar, so switching providers can't leak a stale
-// key across, and settings for both providers may coexist.
-private func anthropicKey(settings: Settings, env: [String: String]) -> String? {
-    if let v = env["ANTHROPIC_API_KEY"], !v.isEmpty { return v }
-    if let k = settings.anthropicApiKey, !k.isEmpty { return k }
-    return nil
+private func environmentKey(settings: Settings, env: [String: String]) -> String? {
+    let name: String?
+    switch settings.cleanup.provider {
+    case "", "anthropic": name = "ANTHROPIC_API_KEY"
+    case "openai-compatible": name = settings.cleanup.apiKeyEnvVar
+    default: name = nil
+    }
+    guard let name, let value = env[name], !value.isEmpty else { return nil }
+    return value
 }
 
-private func openAICompatKey(settings: Settings, env: [String: String]) -> String? {
-    let c = settings.cleanup
-    if let name = c.apiKeyEnvVar, let v = env[name], !v.isEmpty { return v }
-    if let k = c.apiKey, !k.isEmpty { return k }
-    return nil
+/// Private request material, never persisted in Settings or History.
+public final class ResolvedCredential: CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate let scope: CredentialScope
+    fileprivate let key: String?
+    public var description: String { "Resolved provider credential" }
+    public var debugDescription: String { description }
+    fileprivate init(scope: CredentialScope, key: String?) { self.scope = scope; self.key = key }
+    func redacting(_ value: String) -> String {
+        guard let key, !key.isEmpty else { return value }
+        return value.replacingOccurrences(of: key, with: "[redacted]")
+    }
 }
 
-/// Base URL usable for cleanup: parses, http(s) scheme, has a host, no query
-/// or fragment. Anything else is misconfiguration — callers must refuse it up
-/// front, never hand it to a client that would build a request URL from it.
-private func validBaseURL(_ raw: String?) -> URL? {
-    guard let raw, !raw.isEmpty, let url = URL(string: raw),
-          ["http", "https"].contains(url.scheme?.lowercased()), url.host != nil,
-          url.query == nil, url.fragment == nil else { return nil }
-    return url
+/// Prepared access is request material, never a synthetic local credential scope.
+public enum CleanupAccess {
+    case network(ResolvedCredential)
+    case onDevice(LocalCleanupConfiguration)
+    func redacting(_ text: String) -> String {
+        if case .network(let credential) = self { return credential.redacting(text) }
+        return text
+    }
+}
+public func prepareCleanupAccess(settings: Settings, env: @autoclosure () -> [String: String],
+                                 credentials: @autoclosure () -> CredentialStore) throws -> CleanupAccess {
+    if settings.usesAppleIntelligence { return .onDevice(LocalCleanupConfiguration(settings: settings)) }
+    return .network(try resolveCleanupCredential(settings: settings, env: env(), credentials: credentials()))
 }
 
-/// True when the user has set cleanup up at all — a key for anthropic, a
-/// non-empty baseURL for openai-compatible, or an unknown provider value.
-/// Callers use this to tell "cleanup off" (skip the polish leg silently)
-/// from "cleanup broken" (attempt it and surface the failure as raw-fallback).
-public func cleanupIsConfigured(settings: Settings, env: [String: String]) -> Bool {
+/// Shared deliberate request boundary, also used by CLI and frozen retries.
+public func resolveCleanupCredential(settings: Settings, env: [String: String],
+                                     credentials: CredentialStore) throws -> ResolvedCredential {
+    let scope = try CredentialScope.selected(settings)
+    if let key = environmentKey(settings: settings, env: env) { return ResolvedCredential(scope: scope, key: key) }
+    // Inline values are migration input only; they cannot drift to an edited endpoint.
+    if (scope == .anthropic ? settings.anthropicApiKey : settings.cleanup.apiKey).map({ !$0.isEmpty }) == true {
+        throw CredentialFailure("Legacy credential migration pending. Open AI Cleanup and retry migration before making a request.")
+    }
+    switch credentials.read(scope, interactive: true) {
+    case .value(let key): return ResolvedCredential(scope: scope, key: key)
+    case .missing:
+        if scope == .anthropic { throw CredentialFailure("No API key. Save one in AI Cleanup or set ANTHROPIC_API_KEY.") }
+        return ResolvedCredential(scope: scope, key: nil)
+    case let result: throw CredentialFailure(result.status.message, status: result.status)
+    }
+}
+
+/// Eligible B21 only: same precedence, with no interactive credential prompt.
+func resolveOrdinaryFailoverPrimaryCredential(settings: Settings, env: [String: String],
+                                     credentials: CredentialStore) throws -> ResolvedCredential {
+    let scope = try CredentialScope.selected(settings)
+    if let key = environmentKey(settings: settings, env: env) { return ResolvedCredential(scope: scope, key: key) }
+    // Inline values are migration input only; they cannot drift to an edited endpoint.
+    if (scope == .anthropic ? settings.anthropicApiKey : settings.cleanup.apiKey).map({ !$0.isEmpty }) == true {
+        throw CredentialFailure("Legacy credential migration pending. Open AI Cleanup and retry migration before making a request.")
+    }
+    switch credentials.read(scope, interactive: false) {
+    case .value(let key): return ResolvedCredential(scope: scope, key: key)
+    case .missing:
+        if scope == .anthropic { throw CredentialFailure("No API key. Save one in AI Cleanup or set ANTHROPIC_API_KEY.") }
+        return ResolvedCredential(scope: scope, key: nil)
+    case let result: throw CredentialFailure(result.status.message, status: result.status)
+    }
+}
+
+/// No secret reads or interactive access. Broken/inaccessible remains configured.
+public func cleanupIsConfigured(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> Bool {
+    if settings.usesAppleIntelligence { return settings.cleanupEnabled }
+    guard settings.cleanupEnabled else { return false }
+    switch settings.cleanup.provider {
+    case "openai-compatible": return !(settings.cleanup.baseURL ?? "").isEmpty
+    case "", "anthropic":
+        return environmentKey(settings: settings, env: env()) != nil
+            || !(settings.anthropicApiKey ?? "").isEmpty || credentials().status(.anthropic) != .missing
+    default: return true
+    }
+}
+
+public func cleanupConfigurationIssue(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> String? {
+    if settings.usesAppleIntelligence { return LocalCleanupConfiguration(settings: settings).validatedLocale == nil ? LocalCleanupReason.unknownLanguage.message : nil }
+    do {
+        let scope = try CredentialScope.selected(settings)
+        if environmentKey(settings: settings, env: env()) != nil { return nil }
+        if (scope == .anthropic ? settings.anthropicApiKey : settings.cleanup.apiKey).map({ !$0.isEmpty }) == true {
+            return "Legacy credential migration pending. Retry migration or explicitly replace the stored key."
+        }
+        switch credentials().status(scope) {
+        case .present: return nil
+        case .missing: return scope == .anthropic ? "No API key is set." : nil
+        case let state: return state.message
+        }
+    } catch { return "Invalid provider or cleanup.baseURL. Use http(s) without userinfo, query or fragment." }
+}
+
+public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> String {
+    if settings.usesAppleIntelligence { return "Apple Intelligence · on-device; no endpoint or API key." }
+    if environmentKey(settings: settings, env: env()) != nil {
+        return "Environment override active. Save/Replace and Remove affect Keychain only; environment still wins."
+    }
+    guard let scope = try? CredentialScope.selected(settings) else { return "Choose a valid provider and endpoint before saving a key." }
+    return credentials().status(scope).message
+}
+
+/// Warm requests carry no credentials, and cannot authorize a Keychain prompt.
+public func cleanupWarmURL(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> URL? {
+    if settings.usesAppleIntelligence { return nil }
+    guard cleanupIsConfigured(settings: settings, env: env(), credentials: credentials()) else { return nil }
+    return (try? CredentialScope.selected(settings)).flatMap { URL(string: $0.baseURL) }
+}
+
+public func makeCleanupClient(
+    settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore,
+    access: CleanupAccess? = nil, http: @autoclosure () -> HTTPPosting = URLSessionPoster(),
+    localRuntime: LocalCleanupRuntime = LocalCleanupRuntime(),
+    executionPolicy: HistoryRetryExecutionPolicy? = nil,
+    usage: @escaping CleanupUsageSink = recordCleanupUsage, redactUsage: Bool = true
+) throws -> CleanupProviding {
+    if settings.usesAppleIntelligence {
+        let config = LocalCleanupConfiguration(settings: settings)
+        if let access {
+            guard case .onDevice(let frozen) = access, frozen == config else { throw LocalCleanupReason.unavailable.error }
+        }
+        return AppleIntelligenceCleanup(configuration: config, runtime: localRuntime, usage: usage, executionPolicy: executionPolicy)
+    }
+    let scope = try CredentialScope.selected(settings)
+    let prepared = try access ?? prepareCleanupAccess(settings: settings, env: env(), credentials: credentials())
+    guard case .network(let resolved) = prepared else { throw CredentialFailure("Provider access changed. Prepare a new request.") }
+    let safeUsage: CleanupUsageSink = { model, input, output in usage(redactUsage ? resolved.redacting(model) : model, input, output) }
+    guard resolved.scope == scope else { throw CredentialFailure("Credential endpoint changed. Prepare a new request.") }
+    let poster = http()
+    guard executionPolicy == nil || poster is HistoryRetryHTTP else { throw SegmentedRetryFailure.configuration }
     switch settings.cleanup.provider {
     case "openai-compatible":
-        return !(settings.cleanup.baseURL ?? "").isEmpty
-    case "", "anthropic":
-        return anthropicKey(settings: settings, env: env) != nil
+        let trimmed = settings.cleanup.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CredentialSafeProvider(base: OpenAICompatClient(baseURL: scope.baseURL, apiKey: resolved.key,
+                                  model: (trimmed?.isEmpty ?? true) ? nil : trimmed, http: poster, usage: safeUsage, executionPolicy: executionPolicy), access: resolved)
     default:
-        return true
-    }
-}
-
-/// Provider URL to pre-warm, or nil when cleanup is not configured.
-public func cleanupWarmURL(settings: Settings, env: [String: String]) -> URL? {
-    let c = settings.cleanup
-    switch c.provider {
-    case "openai-compatible":
-        guard let url = validBaseURL(c.baseURL) else { return nil }
-        return url
-    case "", "anthropic":
-        guard anthropicKey(settings: settings, env: env) != nil else { return nil }
-        return URL(string: "https://api.anthropic.com")
-    default:
-        return nil
-    }
-}
-
-/// Builds the cleanup client for the configured provider. Any misconfiguration
-/// throws `CleanupError`, which the app surfaces as its raw-transcript fallback
-/// and parla-eval surfaces as exit 2.
-public func makeCleanupClient(
-    settings: Settings, env: [String: String], http: HTTPPosting = URLSessionPoster()
-) throws -> CleanupProviding {
-    let c = settings.cleanup
-
-    switch c.provider {
-    case "openai-compatible":
-        guard let baseURL = c.baseURL, !baseURL.isEmpty else {
-            throw CleanupError(description: "cleanup.baseURL required for openai-compatible provider")
-        }
-        guard validBaseURL(baseURL) != nil else {
-            throw CleanupError(description: "cleanup.baseURL is not a valid http(s) URL: \(baseURL)")
-        }
-        // model optional: nil ⇒ the client asks the server for its first model
-        let trimmedModel = c.model?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = (trimmedModel?.isEmpty ?? true) ? nil : trimmedModel
-        return OpenAICompatClient(
-            baseURL: baseURL,
-            apiKey: openAICompatKey(settings: settings, env: env),
-            model: model, http: http)
-    case "", "anthropic":
-        guard let key = anthropicKey(settings: settings, env: env) else {
-            throw CleanupError(description: "no API key (set ANTHROPIC_API_KEY or anthropicApiKey)")
-        }
-        // Hub placeholder implies cleared means the built-in default.
+        guard let key = resolved.key else { throw CredentialFailure("No API key is set.") }
         let model = settings.cleanupModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? Settings().cleanupModel : settings.cleanupModel
-        return CleanupClient(apiKey: key, model: model, http: http)
-    default:
-        throw CleanupError(
-            description: "unknown cleanup.provider '\(c.provider)' (valid: anthropic, openai-compatible)")
+        return CredentialSafeProvider(base: CleanupClient(apiKey: key, model: model, http: poster, usage: safeUsage, executionPolicy: executionPolicy), access: resolved)
+    }
+}
+
+/// Provider bodies and transport errors are untrusted and may echo Authorization.
+/// Preserve fallback categories, but never pass the resolved key to logs/status.
+private struct CredentialSafeProvider: CleanupProviding, DiagnosticModelObserving {
+    let base: CleanupProviding
+    let access: ResolvedCredential
+    func observing(_ diagnostics: DiagnosticOperation) -> CleanupProviding {
+        CredentialSafeProvider(base: (base as? DiagnosticModelObserving)?.observing(diagnostics) ?? base, access: access)
+    }
+    func clean(transcript: String, context: CleanupContext) async throws -> String {
+        do { return try await base.clean(transcript: transcript, context: context) }
+        catch let error as CleanupError {
+            throw CleanupError(description: access.redacting(error.description), userMessage: access.redacting(error.userMessage), statusCode: error.statusCode, stopReason: error.stopReason)
+        } catch let error as URLError { throw URLError(error.code) }
+        catch let error as SegmentedRetryFailure { throw error }
+        catch let error as CleanupFailoverFailure { throw error }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw CredentialFailure("Provider request failed.") }
+    }
+}
+
+/// Pinned lazy backup access. No status lookup, interactive read or source fallback.
+func resolveCleanupBackupCredential(_ backup: CleanupBackup, settings: Settings, env: [String: String], credentials: CredentialStore) throws -> ResolvedCredential {
+    try backup.validate()
+    let scope = try CredentialScope.selected(settings)
+    guard !(settings.anthropicApiKey.map { !$0.isEmpty } ?? false), !(settings.cleanup.apiKey.map { !$0.isEmpty } ?? false) else {
+        throw CredentialFailure("Legacy credential migration pending. Review AI Cleanup before making a backup request.")
+    }
+    let key: String?
+    switch backup.source {
+    case .namedEnvironment:
+        guard let name = backup.environmentName, let value = env[name], !value.isEmpty else { throw CleanupFailoverFailure.credential }
+        key = value
+    case .scopedKeychain:
+        guard case .value(let value) = credentials.read(scope, interactive: false), !value.isEmpty else { throw CleanupFailoverFailure.credential }
+        key = value
+    case .keylessCompatible:
+        guard backup.provider == "openai-compatible" else { throw CleanupFailoverFailure.configuration }; key = nil
+    }
+    return ResolvedCredential(scope: scope, key: key)
+}
+
+/// Only actual ordinary capture callers may supply this explicit origin and grant.
+/// Ineligible/off/paused routes retain the primitive and its original defaults.
+public func makeOrdinaryCleanupClient(settings: Settings, origin: CleanupFailoverOrigin,
+    grant: CleanupFailoverGrant?, operationID: UUID, store: SettingsStore,
+    env: [String: String], credentials: CredentialStore, http: HTTPPosting = URLSessionPoster(),
+    primaryDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
+    backupDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
+    now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+    sleep: ((TimeInterval) async throws -> Void)? = nil,
+    run: CleanupFailoverRun, shouldContinue: @escaping () -> Bool,
+    usage: @escaping CleanupUsageSink = recordCleanupUsage) throws -> CleanupProviding {
+    guard settings.outputMode == .cleanup, settings.cleanupEnabled, !settings.usesAppleIntelligence,
+          let policy = settings.cleanupFailover, policy.isReviewed(for: settings), let grant,
+          grant.operationID == operationID, grant.revision == policy.review?.revision, grant.digest == policy.review?.digest else {
+        return try makeCleanupClient(settings: settings, env: env, credentials: credentials, http: http, usage: usage)
+    }
+    let budget = HistoryRetryExecutionPolicy(planned: 1 + policy.backups.count, budget: 15, now: now,
+        sleep: sleep ?? HistoryRetryExecutionPolicy.defaultSleep)
+    return OrdinaryFailoverProvider(settings: settings, environment: env, credentials: credentials, store: store,
+        grant: grant, operationID: operationID, policy: budget, primaryDriver: primaryDriver, backupDriver: backupDriver,
+        run: run, shouldContinue: shouldContinue)
+}
+
+/// An independently admitted context PRIMARY. B21's admission type is only a
+/// mechanical carrier; no backup grant or primary-survival semantics are used.
+public func makeSurroundingTextCleanupClient(settings: Settings, access: CleanupAccess,
+    grant: SurroundingTextGrant, operationID: UUID, store: SettingsStore,
+    run: SurroundingTextRun, policy: HistoryRetryExecutionPolicy,
+    driver: @escaping HistoryRetryHTTP.Driver, shouldContinue: @escaping () -> Bool) throws -> CleanupProviding {
+    func check() throws {
+        try policy.check(); try run.check()
+        guard shouldContinue(), try CleanupChainIdentity.primary(settings) == grant.policy.primary else { throw SurroundingTextFailure.refused }
+    }
+    // Refuse an oversized borrowed credential before constructing header copies.
+    // HistoryRetryHTTP still checks the exact aggregate serialized header budget.
+    guard case .network(let credential) = access,
+          (credential.key?.utf8.count ?? 0) <= 16 * 1024 else { throw SurroundingTextFailure.refused }
+    let admission = CleanupFailoverHTTPAdmission(enter: { action in
+        try store.withSurroundingTextGrant(grant, operationID: operationID) { try check(); try action() }
+    }, subscribe: { cancel in
+        try store.subscribeSurroundingText(grant, operationID: operationID) { run.revoke(); cancel() }
+    }, started: {})
+    return try store.withSurroundingTextGrant(grant, operationID: operationID) {
+        try check()
+        return try makeCleanupClient(settings: settings, env: [:], credentials: store.credentials, access: access,
+            http: HistoryRetryHTTP(policy: policy, driver: driver, failoverAdmission: admission), executionPolicy: policy,
+            usage: { model, _, _ in run.observeModel(model, requested: grant.policy.primary.model) }, redactUsage: false)
     }
 }

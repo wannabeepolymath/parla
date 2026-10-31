@@ -1,0 +1,278 @@
+[
+  {
+    "name": "FluidVoice",
+    "url": "https://github.com/altic-dev/FluidVoice",
+    "sha": "6150956bef129fc1a413684db4c0eac61da078a5",
+    "commitDate": "2026-10-27T02:25:56-07:00"
+  },
+  {
+    "name": "Handy",
+    "url": "https://github.com/cjpais/Handy",
+    "sha": "7bfb2e2c934b798bcf6e3627653aed2439996f89",
+    "commitDate": "2026-10-27T17:22:57+08:00"
+  },
+  {
+    "name": "Sayboard",
+    "url": "https://github.com/ElishaAz/Sayboard",
+    "sha": "0f1ee1845a9f26f3bad82493e8cfdf849b4039f3",
+    "commitDate": "2025-07-01T21:00:26+03:00"
+  },
+  {
+    "name": "VoiceInk",
+    "url": "https://github.com/Beingpax/VoiceInk",
+    "sha": "1027ea3c25e329cd42e7bbe18c746224ad664f7b",
+    "commitDate": "2026-10-27T21:52:27+05:45"
+  },
+  {
+    "name": "amical",
+    "url": "https://github.com/amicalhq/amical",
+    "sha": "d5604ef548816d8729b1170696d315a35c00391a",
+    "commitDate": "2026-10-26T10:26:24+05:30"
+  },
+  {
+    "name": "android_transcribe_app",
+    "url": "https://github.com/notune/android_transcribe_app",
+    "sha": "7abe07a2125733d008a21eb5a039e8204d3c6572",
+    "commitDate": "2026-10-17T23:27:08+02:00"
+  },
+  {
+    "name": "dictus-android",
+    "url": "https://github.com/getdictus/dictus-android",
+    "sha": "6c2eafa0a14d1a97a8d43d10d81d7055f5096bd2",
+    "commitDate": "2026-10-27T17:05:12+01:00"
+  },
+  {
+    "name": "dictus-ios",
+    "url": "https://github.com/getdictus/dictus-ios",
+    "sha": "0fd7badf47e1f98f3e3757dc84a2b1d4720d9ed8",
+    "commitDate": "2026-09-24T22:22:05+02:00"
+  },
+  {
+    "name": "epicenter",
+    "url": "https://github.com/EpicenterHQ/epicenter",
+    "sha": "7cc869b4a1295e2566b61e1a4d5967a89f413b9b",
+    "commitDate": "2026-10-17T00:38:05-04:00"
+  },
+  {
+    "name": "hyprwhspr",
+    "url": "https://github.com/goodroot/hyprwhspr",
+    "sha": "0d2ec746a37229b0de8d21ddfffd2c0e62d45546",
+    "commitDate": "2026-10-24T20:13:13-07:00"
+  },
+  {
+    "name": "macparakeet",
+    "url": "https://github.com/moona3k/macparakeet",
+    "sha": "590b6c253bd27bc55723f0e8c8394b64467c09de",
+    "commitDate": "2026-10-23T09:59:37Z"
+  },
+  {
+    "name": "muesli",
+    "url": "https://github.com/Muesli-HQ/muesli",
+    "sha": "6c223cd4b3ac7ea1332ddc9e49463f01fd97140c",
+    "commitDate": "2026-10-27T18:03:49+05:30"
+  },
+  {
+    "name": "murmure",
+    "url": "https://github.com/Kieirra/murmure",
+    "sha": "2218c1bab463d17ace34258a3842b9f230d60ca3",
+    "commitDate": "2026-10-22T18:14:55+02:00"
+  },
+  {
+    "name": "openwhispr",
+    "url": "https://github.com/OpenWhispr/openwhispr",
+    "sha": "ec5852811c09cd7b76992fbbddaba49cc5acb523",
+    "commitDate": "2026-10-27T16:30:04+02:00"
+  },
+  {
+    "name": "typealoud",
+    "url": "https://github.com/hellotaotao/typealoud",
+    "sha": "9401425053f58a215fbe885dfc172e30d41d69a4",
+    "commitDate": "2026-10-20T09:51:36+10:30"
+  },
+  {
+    "name": "typewhisper-mac",
+    "url": "https://github.com/TypeWhisper/typewhisper-mac",
+    "sha": "f8443dee525a640cc9671e4f75196e57d208000b",
+    "commitDate": "2026-10-27T20:24:01+01:00"
+  },
+  {
+    "name": "vibe",
+    "url": "https://github.com/thewh1teagle/vibe",
+    "sha": "2ea5ecef989933282fca517d82d4e3128ae5fb0b",
+    "commitDate": "2026-10-06T14:28:17+03:00"
+  },
+  {
+    "name": "vocalinux",
+    "url": "https://github.com/VocaHQ/vocalinux",
+    "sha": "dbf8039196cc0cb5bad0fb7c1610334cd358c6a5",
+    "commitDate": "2026-10-26T21:40:44-07:00"
+  },
+  {
+    "name": "voquill",
+    "url": "https://github.com/voquill/voquill",
+    "sha": "a5dfbe0e3a35807271293a0ef02c91902abc0104",
+    "commitDate": "2026-09-26T11:43:24-05:00"
+  },
+  {
+    "name": "voxtype",
+    "url": "https://github.com/peteonrails/voxtype",
+    "sha": "dc499ad47444ba6ea80d8750aa3581c23120821c",
+    "commitDate": "2026-10-14T23:12:01-04:00"
+  },
+  {
+    "name": "whispaste",
+    "url": "https://github.com/whispaste/whispaste",
+    "sha": "594e7272700e2d3e827512c7e876b26eef6f1ddf",
+    "commitDate": "2026-10-17T01:08:03+02:00",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "Guided snippet sessions/composition/picker, GPU preparation crash marker and local automation transport; R1 only: pre-existing checkout; native GPU load guard, startup, engine selector, settings persistence, notifier and tests.",
+    "createdAt": "2026-03-02T22:48:42Z",
+    "pushedAtAtDiscovery": "2026-10-27T20:37:20Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "OpenSuperWhisper",
+    "url": "https://github.com/Starmel/OpenSuperWhisper",
+    "sha": "c8e6fe79d6851078940f459ab7dbc8ee39e2a97d",
+    "commitDate": "2026-09-07T20:19:49+03:00",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "Mouse trigger lifecycle, layout-aware shortcut labels, language-aware model selection and engine interface; R2 only: existing checkout, MouseButtonMonitor and callers/tests versus Parla input routing",
+    "createdAt": "2025-02-06T23:16:13Z",
+    "pushedAtAtDiscovery": "2026-10-20T08:13:21Z",
+    "defaultBranchAtDiscovery": "develop"
+  },
+  {
+    "name": "taraksh01/wisper",
+    "url": "https://github.com/taraksh01/wisper",
+    "sha": "166445cae646b947050cc6a8f5b36a8744b4c89d",
+    "commitDate": "2026-09-28T23:31:12+05:30",
+    "createdAt": "2025-12-25T07:35:24Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "Sparse static source/text; model/audio/image/binary/vendor excluded. No execution.",
+    "pushedAtAtDiscovery": "2026-09-28T18:01:13Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "hudsonbrendon/wisper",
+    "url": "https://github.com/hudsonbrendon/wisper",
+    "sha": "f5d6777d8d2c5c22617cf8ff3ac4f1d217a0dc7e",
+    "commitDate": "2026-07-31T17:33:59-03:00",
+    "createdAt": "2026-06-15T02:32:11Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "Sparse static source/text; model/audio/image/binary/vendor excluded. No execution.",
+    "pushedAtAtDiscovery": "2026-10-20T22:17:04Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "getdictus/dictus-desktop",
+    "url": "https://github.com/getdictus/dictus-desktop",
+    "sha": "e02b85d856b2cb59d7f974ce936aab404c68de68",
+    "commitDate": "2026-09-11T23:58:07+02:00",
+    "createdAt": "2026-04-05T08:49:50Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "Sparse static source/text; model/audio/image/binary/vendor excluded. No execution.",
+    "pushedAtAtDiscovery": "2026-10-27T15:22:12Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "Muhammad-Waleed381/OpenDictate",
+    "url": "https://github.com/Muhammad-Waleed381/OpenDictate",
+    "sha": "bba79e40785b4ec3ccaaf22bca72c8775bc213b1",
+    "commitDate": "2026-10-24T12:47:21+05:00",
+    "createdAt": "2026-08-15T20:00:00Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "Sparse static source/text; model/audio/image/binary/vendor excluded. No execution.",
+    "pushedAtAtDiscovery": "2026-10-24T07:47:32Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "outspoke",
+    "url": "https://github.com/minburg/outspoke",
+    "sha": "2b676cebb52f314fe3962ab6ae2a6b041381cdcb",
+    "commitDate": "2026-08-29T17:01:20+02:00",
+    "createdAt": "2026-03-24T12:49:46Z",
+    "license": "GPL-3.0",
+    "licenseFile": "LICENSE",
+    "scope": "Android correction candidates, microphone calibration, VAD and partial/final lifecycle; sparse source/text only",
+    "pushedAtAtDiscovery": "2026-08-29T15:10:33Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "phone-whisper",
+    "url": "https://github.com/kafkasl/phone-whisper",
+    "sha": "e6518cda437ed2c266f36cf476db857fa2690d87",
+    "commitDate": "2026-08-24T02:03:49-04:00",
+    "createdAt": "2026-03-12T15:52:02Z",
+    "license": "Apache-2.0",
+    "licenseFile": "LICENSE",
+    "scope": "Android local recognition adapter, capture/final delivery and derivative provenance; sparse source/text only",
+    "pushedAtAtDiscovery": "2026-08-24T06:03:49Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "audio-to-text",
+    "url": "https://github.com/b0sh-net/phone-whisper",
+    "sha": "e322ac526a3e25eccc9751c2798b89ba5b263067",
+    "commitDate": "2026-10-24T18:16:34+02:00",
+    "createdAt": "2026-04-18T13:26:34Z",
+    "license": "GPL-3.0",
+    "licenseFile": "LICENSE",
+    "scope": "Derivative: shared-file decoding/drain, streaming finalization, retained live session state; sparse source/text only",
+    "pushedAtAtDiscovery": "2026-10-24T16:16:38Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "sotto-stofll",
+    "url": "https://github.com/stofll/Sotto",
+    "sha": "26a1da6cc81811c12c85e8b0d1e336ff052d7bad",
+    "commitDate": "2026-10-26T22:05:10Z",
+    "createdAt": "2026-09-04T14:04:28Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "mic_test.rs, MicrophoneSection.tsx callers, lib registration; portable.rs/user_data.rs and unit test; overlay named controls/backend refusal; model catalog/sherpa dispatch (targeted)",
+    "pushedAtAtDiscovery": "2026-10-26T22:05:12Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "sotto-smirk",
+    "url": "https://github.com/smirk-dev/sotto",
+    "sha": "f9133a0208b06e5ba692d52918c869bffdb90f88",
+    "commitDate": "2026-07-16T17:25:46+05:30",
+    "createdAt": "2026-07-03T05:58:50Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "engine.py multilingual/script routing and DictationSession callers; config model catalog, settings UI language choices; textproc symbols and source test inventory (targeted)",
+    "pushedAtAtDiscovery": "2026-07-16T12:58:03Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "sotto-psancheti",
+    "url": "https://github.com/psancheti6666/sotto",
+    "sha": "bf7510798482438e9e9373643591706c69e05b91",
+    "commitDate": "2026-07-24T12:38:16+05:30",
+    "createdAt": "2026-07-15T10:48:31Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "app.py cancellation/undo callbacks, worker and delivery; config defaults; clean.py/Ollama guards; asr factory MLX/ONNX callers; overlay callbacks and hotkey test excerpts (targeted)",
+    "pushedAtAtDiscovery": "2026-07-24T07:09:45Z",
+    "defaultBranchAtDiscovery": "main"
+  },
+  {
+    "name": "sotto-tomoima",
+    "url": "https://github.com/tomoima525/sotto",
+    "sha": "b2bbde271fff414256b1c1781f872af690548395",
+    "commitDate": "2026-08-30T17:52:46-07:00",
+    "createdAt": "2026-06-12T05:16:09Z",
+    "license": "MIT",
+    "licenseFile": "LICENSE",
+    "scope": "pipeline.py dual transcriber/draft/refine/final callers; cleaner.py local MLX loading/gate/guards and cache implementation; config defaults; app.py model menus (targeted)",
+    "pushedAtAtDiscovery": "2026-09-02T01:34:46Z",
+    "defaultBranchAtDiscovery": "main"
+  }
+]

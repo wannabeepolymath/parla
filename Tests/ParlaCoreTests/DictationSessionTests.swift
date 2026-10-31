@@ -35,7 +35,11 @@ final class DictationSessionTests: XCTestCase {
 
     /// Logs are free-form prose; assert on them only where the content is the point.
     func quiet(_ fx: [Effect]) -> [Effect] {
-        fx.filter { if case .log = $0 { return false }; return true }
+        fx.filter {
+            // These tests assert the existing delivery flow. The production host
+            // tests separately assert final-result text, eligibility and once-only order.
+            switch $0 { case .log, .finalResult: return false; default: return true }
+        }
     }
 
     /// The session the machine currently has in the foreground.
@@ -201,7 +205,7 @@ final class DictationSessionTests: XCTestCase {
         // .applyPreferencesAndStartCapture (recorder.start, the AX focus probe
         // behind it, a possible model reload) is latency it would queue behind.
         XCTAssertEqual(m.handle(.startDictation(settings: settings(), cleanupConfigured: true, live: false)),
-                       [.trace(.fnDown), .warmCleanupEndpoint,
+                       [.captureAccepted(session), .trace(.fnDown), .warmCleanupEndpoint,
                         .applyPreferencesAndStartCapture(settings())])
         XCTAssertTrue(m.isCapturing)
         // The focus probe is an effect the machine emits after the cue, not
@@ -210,7 +214,7 @@ final class DictationSessionTests: XCTestCase {
                        [.menuBar(.recording), .hud(.listening(command: false)), .playSound(.start),
                         .sampleFocus(gen: 1)])
         XCTAssertEqual(m.handle(.focusSampled(gen: 1, focus: .editable)),
-                       [.ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: false)])
+                       [.captureAcknowledged(session), .ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: false)])
         XCTAssertTrue(m.isCapturing)
     }
 
@@ -233,7 +237,7 @@ final class DictationSessionTests: XCTestCase {
             if case .trace = effect { self.m.send(.recorderStarted(gen: 1)) { seen.append($0) } }
         }
         XCTAssertEqual(seen, [
-            .trace(.fnDown),
+            .captureAccepted(session), .trace(.fnDown),
             .warmCleanupEndpoint, .applyPreferencesAndStartCapture(settings()),  // still first
             .menuBar(.recording), .hud(.listening(command: false)), .playSound(.start),
             .sampleFocus(gen: 1),
@@ -246,11 +250,13 @@ final class DictationSessionTests: XCTestCase {
     /// ~50 ms AX probe, model load and stream loop last.
     func testFnDownRunsWarmRequestFirstAndProbesFocusBehindTheChime() {
         drive(.startDictation(settings: settings(), cleanupConfigured: true, live: false))
+        var acceptance = session
+        acceptance.focus = .none // accepted before the post-start focus sample
         XCTAssertEqual(order, [
-            .trace(.fnDown), .warmCleanupEndpoint, .applyPreferencesAndStartCapture(settings()),
+            .captureAccepted(acceptance), .trace(.fnDown), .warmCleanupEndpoint, .applyPreferencesAndStartCapture(settings()),
             .menuBar(.recording), .hud(.listening(command: false)), .playSound(.start),
             .sampleFocus(gen: 1),                                 // AX probe behind the chime
-            .ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: false),
+            .captureAcknowledged(session), .ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: false),
         ])
         XCTAssertEqual(m.state, .recording(session))
     }
@@ -271,8 +277,9 @@ final class DictationSessionTests: XCTestCase {
 
     func testMicFailureShowsWarningAndStillConsumesTheGeneration() {
         _ = m.handle(.startDictation(settings: settings(), cleanupConfigured: true, live: false))
+        let s = session
         XCTAssertEqual(m.handle(.recorderFailed(gen: 1, message: "noInputFormat")),
-                       [.menuBar(.warning), .hud(.error("Mic failed")),
+                       [.finalResult(s, .failure(.unavailable)), .menuBar(.warning), .hud(.error("Mic failed")),
                         .log("Parla mic start failed: noInputFormat")])
         XCTAssertEqual(m.state, .idle)
         XCTAssertEqual(m.gen, 1)
@@ -482,16 +489,17 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.startDictation(settings: set, cleanupConfigured: true, live: false))
         _ = m.handle(.recorderStarted(gen: 1))
         XCTAssertEqual(m.handle(.focusSampled(gen: 1, focus: .editable)),
-                       [.ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: true)])
+                       [.captureAcknowledged(session), .ensureModelLoaded, .startStreamLoop(gen: 1, dictionary: [], preview: true)])
     }
 
     // MARK: - Cancel
 
     func testCancelMidRecordingStopsErasesAndClears() {
         startDictation(live: true)
+        let operation = { if case .recording(let s) = m.state { return s.operation }; fatalError("not recording") }()
         _ = m.handle(.streamTyped(gen: 1, text: "hello"))
         XCTAssertEqual(quiet(m.handle(.cancelRequested(silent: false))),
-                       [.stopCapture(discard: true), .playSound(.cancel),
+                       [.abortOperation(operation), .stopCapture(discard: true), .playSound(.cancel),
                         .eraseTypedIfOurs(expect: "hello"), .discardStreamWindow,
                         .hud(.cancelled), .menuBar(.idle)])
         XCTAssertEqual(m.state, .idle)
@@ -500,8 +508,9 @@ final class DictationSessionTests: XCTestCase {
 
     func testShortTapDiscardsSilentlyAndNeverTranscribes() {
         startDictation()
+        let operation = { if case .recording(let s) = m.state { return s.operation }; fatalError("not recording") }()
         let fx = m.handle(.cancelRequested(silent: true))
-        XCTAssertEqual(quiet(fx), [.stopCapture(discard: true), .discardStreamWindow,
+        XCTAssertEqual(quiet(fx), [.abortOperation(operation), .stopCapture(discard: true), .discardStreamWindow,
                                    .hideHUD, .menuBar(.idle)])
         XCTAssertFalse(fx.contains { if case .transcribeFinal = $0 { return true }; return false })
         XCTAssertFalse(fx.contains { if case .transcribeCommand = $0 { return true }; return false })
@@ -606,6 +615,8 @@ final class DictationSessionTests: XCTestCase {
         case .up(let short): return short ? .cancelRequested(silent: true) : .stopRequested
         case .cancel: return .cancelRequested(silent: false)
         case .handsFree: return .handsFreeLatched
+        case .runSelectedPreset: return .startSavedPreset(settings: settings(), cleanupConfigured: true,
+                                                        selection: "the cat", target: .init(focus: .editable))
         case .pasteLast, .openScratchpad, .dismiss: return nil   // never touch dictation state
         }
     }
@@ -621,8 +632,12 @@ final class DictationSessionTests: XCTestCase {
         }
         let byFnUp = a.handle(.stopRequested)
         let byEnd = quiet(b.handle(.captureEnded(gen: 1, reason: .sampleLimit)))
-        XCTAssertEqual(byEnd, byFnUp.filter { $0 != .trace(.fnUp) })
-        XCTAssertEqual(a.state, b.state)
+        XCTAssertEqual(byEnd.dropLast(), byFnUp.filter { $0 != .trace(.fnUp) }.dropLast())
+        guard case .transcribeFinal(let stopped, let stoppedLedger) = byFnUp.last,
+              case .transcribeFinal(let ended, let endedLedger) = byEnd.last else { return XCTFail("Missing finalization") }
+        XCTAssertEqual(stopped.gen, ended.gen); XCTAssertEqual(stopped.settings, ended.settings)
+        XCTAssertEqual(stopped.recognition, ended.recognition); XCTAssertEqual(stoppedLedger, endedLedger)
+        XCTAssertEqual(a.state, .transcribing(stopped)); XCTAssertEqual(b.state, .transcribing(ended))
         XCTAssertTrue(b.handle(.captureEnded(gen: 1, reason: .sampleLimit)).isEmpty) // not twice
     }
 
@@ -646,8 +661,9 @@ final class DictationSessionTests: XCTestCase {
     func testSecureFocusRefusesAfterStartWithoutRoutingThroughCancel() {
         _ = m.handle(.startDictation(settings: settings(), cleanupConfigured: true, live: false))
         _ = m.handle(.recorderStarted(gen: 1))
+        let s = session
         let fx = m.handle(.focusSampled(gen: 1, focus: .secure))
-        XCTAssertEqual(fx, [.stopCapture(discard: true),
+        XCTAssertEqual(fx, [.finalResult(s, .failure(.secure)), .stopCapture(discard: true),
                             .secureRefusal("Not supported in password fields"), .menuBar(.idle)])
         XCTAssertFalse(fx.contains(.hideHUD))   // a queued hide would wipe the toast
         XCTAssertFalse(fx.contains { if case .startStreamLoop = $0 { return true }; return false })
@@ -704,6 +720,69 @@ final class DictationSessionTests: XCTestCase {
 
     // MARK: - Generation discipline
 
+    func testStaleEmptyTranscriptCannotHideTheNewerRecordingHUD() {
+        for live in [false, true] {
+            let old = startDictation(live: live)
+            if live { _ = m.handle(.streamTyped(gen: old.gen, text: "hel")) }
+            _ = m.handle(.stopRequested)
+            let newer = startDictation()
+
+            let fx = m.handle(.transcribed(old, raw: nil, probe: probe()))
+            let expected: [Effect] = live ? [.eraseTypedIfOurs(expect: "hel"), .flushTrace] : [.flushTrace]
+            XCTAssertEqual(quiet(fx), expected)
+            XCTAssertEqual(m.state, .recording(newer))
+            XCTAssertEqual(m.gen, newer.gen)
+            XCTAssertEqual(m.typedLedger, "")
+        }
+    }
+
+    func testStaleEmptyCommandCannotReplaceTheNewerRecordingHUD() {
+        for instruction in ["", "  \n "] {
+            let old = command()
+            let newer = startDictation()
+
+            let fx = m.handle(.commandHeard(old, instruction: instruction))
+            XCTAssertEqual(quiet(fx), [])
+            XCTAssertEqual(m.state, .recording(newer))
+            XCTAssertEqual(m.gen, newer.gen)
+        }
+    }
+
+    func testStaleUnavailableLegCannotReplaceTheNewerRecordingHUD() {
+        for isCommand in [false, true] {
+            let old: Session
+            if isCommand {
+                old = command()
+            } else {
+                old = startDictation()
+                _ = m.handle(.stopRequested)
+            }
+            let newer = startDictation()
+
+            let fx = m.handle(.legUnavailable(old, message: "No whisper model"))
+            XCTAssertEqual(quiet(fx), isCommand ? [] : [.flushTrace])
+            XCTAssertEqual(m.state, .recording(newer))
+            XCTAssertEqual(m.gen, newer.gen)
+        }
+    }
+
+    func testStaleInvalidTransformCannotReplaceTheNewerRecordingHUD() {
+        for history in [false, true] {
+            for text in ["", "  \n ", String(repeating: "x", count: 2001)] {
+                let old = command(history: history)
+                let newer = startDictation()
+
+                let fx = m.handle(.transformReady(old, text: text,
+                                                 probe: TransformProbe(focus: .editable,
+                                                                       selectionStillMatches: true, destinationStillMatches: true)))
+                // Invalid output is discarded; enabled history retains its original source.
+                XCTAssertEqual(quiet(fx), history ? [transformHistory(source: "teh cat", result: nil, outcome: .failed)] : [])
+                XCTAssertEqual(m.state, .recording(newer))
+                XCTAssertEqual(m.gen, newer.gen)
+            }
+        }
+    }
+
     /// The raw landing is deliberately NOT gen-gated — the user spoke that text,
     /// so it lands — but the menu bar and the model unload belong to whoever is
     /// recording now.
@@ -713,6 +792,7 @@ final class DictationSessionTests: XCTestCase {
         startDictation()                                  // gen 2 takes over
         let fx = m.handle(.transcribed(old, raw: "old text", probe: probe()))
         XCTAssertTrue(fx.contains(.insertText("old text")))
+        XCTAssertTrue(fx.contains(.appendHistory(raw: "old text", cleaned: nil, appName: "TextEdit")))
         XCTAssertFalse(fx.contains(.menuBar(.idle)))
         XCTAssertFalse(fx.contains(.releaseModelIfPolicyImmediate))
         XCTAssertTrue(fx.contains(.flushTrace))
@@ -782,9 +862,9 @@ final class DictationSessionTests: XCTestCase {
         let set = settings()
         XCTAssertEqual(m.handle(.startCommand(settings: set, cleanupConfigured: true,
                                               focus: .editable, selection: "teh cat")),
-                       [.applyPreferencesAndStartCapture(set)])
+                       [.captureAccepted(session), .applyPreferencesAndStartCapture(set)])
         XCTAssertEqual(m.handle(.recorderStarted(gen: 1)),
-                       [.ensureModelLoaded, .menuBar(.recording), .hud(.listening(command: true)),
+                       [.ensureModelLoaded, .captureAcknowledged(session), .menuBar(.recording), .hud(.listening(command: true)),
                         .playSound(.start)])
         let s = session
         XCTAssertEqual(quiet(m.handle(.stopRequested)),
@@ -797,8 +877,10 @@ final class DictationSessionTests: XCTestCase {
         // under a "✓ Pasted".
         let fx = quiet(m.handle(.transformReady(s, text: " \"the cat\" ",
                                                 probe: TransformProbe(focus: .editable,
-                                                                      selectionStillMatches: true))))
-        XCTAssertEqual(fx, [.insertText("\"the cat\""), .playSound(.finish), .hud(.done),
+                                                                      selectionStillMatches: true, destinationStillMatches: true))))
+        XCTAssertEqual(fx, [.insertText("\"the cat\"", historyEnabled: true),
+                            transformHistory(source: "teh cat", result: "\"the cat\"", outcome: .completed),
+                            .playSound(.finish), .hud(.done),
                             .menuBar(.idle), .releaseModelIfPolicyImmediate])
         XCTAssertFalse(fx.contains(.flushTrace))   // transforms aren't in the latency trace
         XCTAssertEqual(m.state, .idle)
@@ -818,9 +900,12 @@ final class DictationSessionTests: XCTestCase {
             let s = command(selection: "teh cat")
             let fx = m.handle(.transformReady(s, text: text,
                                               probe: TransformProbe(focus: .editable,
-                                                                    selectionStillMatches: true)))
-            XCTAssertEqual(quiet(fx).first, .hud(.error("Transform failed")), text.prefix(8).description)
+                                                                    selectionStillMatches: true, destinationStillMatches: true)))
+            XCTAssertEqual(quiet(fx), [.hud(.error("Transform failed")),
+                                       transformHistory(source: "teh cat", result: nil, outcome: .failed),
+                                       .menuBar(.idle), .releaseModelIfPolicyImmediate], text.prefix(8).description)
             XCTAssertFalse(fx.contains { if case .insertText = $0 { return true }; return false })
+            XCTAssertEqual(m.state, .idle)
         }
     }
 
@@ -829,8 +914,8 @@ final class DictationSessionTests: XCTestCase {
         let s = command(selection: String(repeating: "a", count: 500))   // ceiling = 3000
         XCTAssertTrue(m.handle(.transformReady(s, text: long,
                                                probe: TransformProbe(focus: .editable,
-                                                                     selectionStillMatches: true)))
-            .contains(.insertText(long)))
+                                                                     selectionStillMatches: true, destinationStillMatches: true)))
+            .contains(.insertText(long, historyEnabled: true)))
     }
 
     func testTransformParksWhenTheSelectionChanged() {
@@ -838,16 +923,16 @@ final class DictationSessionTests: XCTestCase {
         let fx = quiet(m.handle(.transformReady(s, text: "the cat",
                                                 probe: TransformProbe(focus: .editable,
                                                                       selectionStillMatches: false))))
-        XCTAssertEqual(fx, [.appendHistory(raw: "the cat", cleaned: nil, appName: nil),
-                            .hud(.savedToHistory), .menuBar(.idle), .releaseModelIfPolicyImmediate])
+        XCTAssertEqual(fx, [.hud(.savedToHistory), transformHistory(source: "teh cat", result: "the cat", outcome: .parked),
+                            .menuBar(.idle), .releaseModelIfPolicyImmediate])
     }
 
     func testTransformParksWhenFocusMovedToASecureField() {
         let s = command()
         let fx = quiet(m.handle(.transformReady(s, text: "the cat",
                                                 probe: TransformProbe(focus: .secure,
-                                                                      selectionStillMatches: true))))
-        XCTAssertEqual(fx.first, .appendHistory(raw: "the cat", cleaned: nil, appName: nil))
+                                                                      selectionStillMatches: true, destinationStillMatches: true))))
+        XCTAssertTrue(fx.contains(transformHistory(source: "teh cat", result: "the cat", outcome: .parked)))
         XCTAssertFalse(fx.contains { if case .insertText = $0 { return true }; return false })
     }
 
@@ -855,7 +940,7 @@ final class DictationSessionTests: XCTestCase {
         let s = command(history: false)
         let fx = quiet(m.handle(.transformReady(s, text: "the cat",
                                                 probe: TransformProbe(focus: .secure,
-                                                                      selectionStillMatches: true))))
+                                                                      selectionStillMatches: true, destinationStillMatches: true))))
         XCTAssertEqual(fx.first, .hud(.error("History off — text discarded")))
         XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
     }
@@ -868,9 +953,14 @@ final class DictationSessionTests: XCTestCase {
         startDictation()                                   // gen 2
         let fx = quiet(m.handle(.transformReady(s, text: "the cat",
                                                 probe: TransformProbe(focus: .editable,
-                                                                      selectionStillMatches: true))))
-        XCTAssertEqual(fx, [.appendHistory(raw: "the cat", cleaned: nil, appName: nil)])
+                                                                      selectionStillMatches: true, destinationStillMatches: true))))
+        XCTAssertEqual(fx, [transformHistory(source: "teh cat", result: "the cat", outcome: .parked)])
         XCTAssertEqual(m.state, .recording(session))
+    }
+
+    private func transformHistory(source: String, result: String?, outcome: TransformProvenance.Outcome) -> Effect {
+        .appendTransformHistory(raw: source, cleaned: result, appName: nil,
+                                operation: .init(origin: .spoken, outcome: outcome), metrics: nil)
     }
 
     /// fn-down → mic live, in command mode. Leaves the machine transcribing.
@@ -890,7 +980,7 @@ final class DictationSessionTests: XCTestCase {
         let s = startDictation()
         _ = m.handle(.stopRequested)
         XCTAssertEqual(m.handle(.legUnavailable(s, message: "No whisper model")),
-                       [.hud(.error("No whisper model")), .flushTrace, .menuBar(.idle),
+                       [.finalResult(s, .failure(.unavailable)), .hud(.error("No whisper model")), .flushTrace, .menuBar(.idle),
                         .releaseModelIfPolicyImmediate])
         let c = command()
         XCTAssertEqual(m.handle(.legUnavailable(c, message: "Cleanup not configured")),
@@ -962,8 +1052,8 @@ final class DictationSessionTests: XCTestCase {
             }
         }
         XCTAssertEqual(uses, [
-            "HubModel.swift: func copy(_ text: String) { → NSPasteboard.general.clearContents()",
-            "HubModel.swift: func copy(_ text: String) { → NSPasteboard.general.setString(text, forType: .string)",
+            "HubModel.swift: static func writeExplicitCopy(_ text: String) { → NSPasteboard.general.clearContents()",
+            "HubModel.swift: static func writeExplicitCopy(_ text: String) { → NSPasteboard.general.setString(text, forType: .string)",
         ])
     }
 }

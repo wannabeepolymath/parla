@@ -21,6 +21,7 @@ struct GeneralPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
+            Button("Safe Start controls · \(model.preparationSnapshot.status.rawValue)") { model.requestedPage = .safeStart }
             HubSection("Permissions") {
                 permissionRow("Microphone", granted: model.micGranted,
                               pane: "Privacy_Microphone", detail: micDetail)
@@ -33,6 +34,28 @@ struct GeneralPage: View {
             if let problem = model.downloadError {
                 HubBanner(text: problem)
             }
+            HubSection("Recognition engine", footer: model.recognitionCapabilityDetail) {
+                HubRow("Engine", detail: "Whisper remains the default. Apple Speech requires macOS 26 and an exact supported locale.") {
+                    Picker("", selection: $model.settings.recognitionEngine) {
+                        Text("Whisper").tag(RecognitionEngine.whisper)
+                        Text("Apple Speech · batch").tag(RecognitionEngine.appleSpeech)
+                        if model.settings.recognitionEngine == .parakeet || model.parakeetChoiceRefusal == nil {
+                    Text("Parakeet · local batch").tag(RecognitionEngine.parakeet)
+                }
+                if model.settings.recognitionEngine == .invalid { Text("Invalid configuration").tag(RecognitionEngine.invalid) }
+                    }.labelsHidden()
+                }
+                if model.settings.recognitionEngine == .parakeet { ParakeetGlobalControls(model: model) }
+                else {
+                    DisclosureGroup("Parakeet installation") { ParakeetControls(model: model) }
+                }
+                if let reason = model.parakeetChoiceRefusal { Text(reason.message).font(.caption) }
+                if model.settings.recognitionEngine == .appleSpeech {
+                    TextField("Exact locale, for example en-US", text: optBinding($model.settings.appleSpeechLocale)).hubField()
+                    AppleSpeechControls(model: model)
+                }
+            }
+            if model.settings.recognitionEngine == .whisper {
             HubSection("Whisper model", footer: model.modelPath) {
                 ForEach(ModelCatalog.all) { m in
                     if m.id != ModelCatalog.all.first?.id { HubDivider() }
@@ -53,6 +76,25 @@ struct GeneralPage: View {
                 }
             }
 
+            }
+            HubSection("Energy/activity shadow", footer: "Off by default. For future ordinary physical dictations only. Bounded energy proxy facts stay in RAM Diagnostics until Clear or quit; review and export explicitly. Accuracy is unqualified; energy is not speech proof. Rejection and edge suggestions are NOT APPLIED. Adds analysis work; no speed or resource benefit is established.") {
+                HubRow("Enable energy/activity shadow", detail: "Suggestions NOT APPLIED · no audio or text in shadow facts") {
+                    Toggle("", isOn: $model.settings.energyActivityShadowEnabled).toggleStyle(.switch).labelsHidden()
+                }
+            }
+            HubSection("Speculative HUD preview", footer: "Global preview only; the final model still follows the global or start profile selection. Both choices must be installed catalog Whisper models. Drafts are speculative and never become final text. English-only choices have limited auto-language previews and refuse pinned non-English. This experiment adds model loads and can delay the final result after stop; quality, speed and memory benefits are unqualified. Changes apply to the next capture.") {
+                HubRow("Show recording preview", detail: "A separate model requires both this switch and an explicit choice below.") {
+                    Toggle("", isOn: $model.settings.streamPreviewEnabled).labelsHidden()
+                }
+                HubDivider()
+                HubRow("Global preview model", detail: "Installed choices only. No model is downloaded or prepared here.") {
+                    Picker("", selection: optBinding($model.settings.recognitionPreviewModelID)) {
+                        Text("Same final-model stream (default)").tag("")
+                        ForEach(model.recognitionPreviewChoices) { entry in Text(entry.displayName).tag(entry.id) }
+                        if let id = model.recognitionPreviewUnavailableID { Text("Unavailable · \(id)").tag(id) }
+                    }.labelsHidden().frame(width: 240)
+                }
+            }
             HubSection("App") {
                 HubRow("Launch at Login", detail: "Start Parla when you log in") {
                     Toggle("", isOn: Binding(
@@ -75,7 +117,7 @@ struct GeneralPage: View {
                         Text("Medium").tag("medium")
                         Text("Large").tag("large")
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                     .labelsHidden()
                     .frame(width: 210)
                 }
@@ -109,7 +151,7 @@ struct GeneralPage: View {
             if let problem = model.hotkeyError {
                 HubBanner(text: problem)
             }
-            HubSection("Shortcuts", footer: "Press Change, then the keys you want. Esc keeps the current one.") {
+            HubSection("Shortcuts", footer: "Press Change, then the keys you want. Esc keeps the current one. Labels follow your keyboard layout. “Physical key” means its layout label is unavailable; shortcuts keep the same key positions.") {
                 shortcutRow("Push to talk", "Hold to say something short",
                             \.pushToTalk, modifierOnly: true)
                 HubDivider()
@@ -118,12 +160,38 @@ struct GeneralPage: View {
                             \.handsFree)
                 HubDivider()
                 HubRow("Command mode", detail: "Transform selected text by voice") {
-                    ShortcutPill(text: "⇧ " + model.settings.hotkeys.pushToTalk.display)
+                    ShortcutPill(text: model.commandShortcutDisplay)
                 }
                 HubDivider()
                 shortcutRow("Paste last transcript", "Paste the last thing you dictated", \.pasteLast)
                 HubDivider()
                 shortcutRow("Open Scratchpad", "A safe place to dictate and edit", \.openScratchpad)
+                HubDivider()
+                HubRow("Run selected preset", detail: "Transform selected text in the destination app; no recording") {
+                    ShortcutRecorder(model: model, optionalPath: \.runSelectedPreset)
+                }
+                HubDivider()
+                HubRow("Mouse push to talk", detail: model.settings.mouseBinding.map {
+                    $0.buttonNumber == 2 ? "Hold Middle to dictate. Its click is used by Parla."
+                        : "Hold \($0.display) to dictate. Its normal action, including Back/Forward navigation, is consumed."
+                } ?? "Optional. Left and right clicks are always available.") {
+                    Picker("Mouse push to talk", selection: Binding(
+                        get: { model.settings.mouseBinding?.buttonNumber ?? 0 },
+                        set: { model.settings.mouseBinding = MouseButtonBinding(buttonNumber: $0) })) {
+                        Text("Off").tag(0)
+                        Text("Middle").tag(2)
+                        ForEach(3...15, id: \.self) { number in Text("Button \(number + 1)").tag(number) }
+                    }
+                    .labelsHidden().frame(width: 170)
+                }
+                if let problem = model.settings.mouseBindingProblem { Text(problem).font(.caption).foregroundStyle(.secondary) }
+                if model.settings.mouseBinding != nil {
+                    HStack {
+                        Text(model.inputTapStatus.message + " Native mouse, remapper, browser navigation and secure-input checks are pending.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if model.inputTapStatus != .ready { Button("Retry") { model.onRetryInput() } }
+                    }
+                }
                 HubDivider()
                 HubRow("Cancel", detail: "Dismiss dictation and notifications") {
                     ShortcutPill(text: "Esc")
@@ -144,14 +212,11 @@ struct GeneralPage: View {
     /// The catalog's English-only models carry it in their name. A model of the
     /// user's own is unknown, so the picker stays live for it.
     private var englishOnlyModel: Bool {
-        ModelCatalog.model(atPath: model.modelPath)?.id.contains(".en") ?? false
+        model.recognitionCapabilities.modelLanguages == .englishOnly
     }
 
     private var languageDetail: String {
-        englishOnlyModel
-            ? "The selected model only understands English"
-            : "Auto-detect follows whichever language you speak; the first dictation after "
-                + "you switch takes longer. Pick one to always use it"
+        model.recognitionCapabilityDetail + (englishOnlyModel ? "" : " Auto follows the speaker; choose a language to pin it.")
     }
 
     /// Live input devices, plus the saved device if it's currently unplugged —
@@ -172,8 +237,26 @@ struct GeneralPage: View {
     /// render is exactly ghost-pepper #163.
     @ViewBuilder
     private func modelControl(_ m: ModelCatalog.Model) -> some View {
-        if model.downloadingModel == m, let progress = model.downloadProgress {
-            ProgressView(value: progress).frame(width: 160)
+        if let row = model.catalogDownloads[m.id], row.phase != .installed || ModelCatalog.isInstalled(m) {
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(row.phase.rawValue).font(.caption).foregroundStyle(.secondary)
+                if row.active { ProgressView(value: Double(row.percent) / 100).frame(width: 120) }
+                HStack {
+                    ForEach(row.actions, id: \.rawValue) { action in
+                        Button(action.rawValue) { model.onCatalogDownloadAction(action, m) }
+                            .buttonStyle(HubButtonStyle())
+                            .disabled(!row.active && model.downloadingModel != nil)
+                    }
+                }
+                if row.phase == .installed {
+                    if model.isSelected(m) {
+                        StatusChip(text: model.modelLoaded ? "In use" : "Selected",
+                                   color: model.modelLoaded ? Theme.success : Theme.danger)
+                    } else {
+                        Button("Use") { model.selectModel(m) }.buttonStyle(HubButtonStyle())
+                    }
+                }
+            }
         } else if !ModelCatalog.isInstalled(m) {
             if model.downloadingModel == nil {
                 Button("Download") { model.onDownloadModel(m) }
@@ -206,30 +289,46 @@ struct GeneralPage: View {
 /// the duration or it swallows the very chords being re-recorded.
 struct ShortcutRecorder: View {
     @ObservedObject var model: HubModel
-    let path: WritableKeyPath<HotkeyBindings, KeyChord>
+    let path: WritableKeyPath<HotkeyBindings, KeyChord>?
+    let optionalPath: WritableKeyPath<HotkeyBindings, KeyChord?>?
     /// Push to talk is *held*, so it records a bare modifier off flagsChanged;
     /// every other binding waits for a real key press.
     var modifierOnly = false
+    @State private var lease: CaptureAdmission.Lease?
     @State private var monitor: Any?
-    /// Stops whichever recorder is armed. One at a time: two armed rows share
-    /// the single `HotkeyMonitor.suspended` flag, so the first to finish used to
-    /// switch the global tap back on underneath the other. Main thread only.
+    /// One armed row at a time. The invocation host owns its admission and
+    /// hotkey suspension tokens, so a late row stop cannot release another owner.
     private static var disarm: (() -> Void)?
 
-    private var chord: KeyChord { model.settings.hotkeys[keyPath: path] }
-    private var original: KeyChord { HotkeyBindings()[keyPath: path] }
+    init(model: HubModel, path: WritableKeyPath<HotkeyBindings, KeyChord>, modifierOnly: Bool = false) {
+        self.model = model; self.path = path; optionalPath = nil; self.modifierOnly = modifierOnly
+    }
+
+    init(model: HubModel, optionalPath: WritableKeyPath<HotkeyBindings, KeyChord?>) {
+        self.model = model; path = nil; self.optionalPath = optionalPath
+    }
+
+    private var chord: KeyChord? {
+        if let path { return model.settings.hotkeys[keyPath: path] }
+        if let optionalPath { return model.settings.hotkeys[keyPath: optionalPath] }
+        return nil
+    }
+    private var original: KeyChord? { path.map { HotkeyBindings()[keyPath: $0] } }
+
+    var label: String { monitor == nil ? model.shortcutDisplay(chord) : "Press keys…" }
 
     var body: some View {
         HStack(spacing: 8) {
-            ShortcutPill(text: monitor == nil ? chord.display : "Press keys…")
+            ShortcutPill(text: label)
             Button(monitor == nil ? "Change" : "Cancel") {
                 if monitor == nil { start() } else { stop() }
             }
             .buttonStyle(HubButtonStyle())
             if chord != original {
-                Button("Reset") {
+                Button(optionalPath == nil ? "Reset" : "Clear") {
                     stop()
-                    model.setHotkey(path, to: original)
+                    if let path, let original { model.setHotkey(path, to: original) }
+                    if let optionalPath { model.setOptionalHotkey(optionalPath, to: nil) }
                 }
                 .buttonStyle(HubButtonStyle())
             }
@@ -247,9 +346,12 @@ struct ShortcutRecorder: View {
 
     private func start() {
         Self.disarm?()
+        guard let acquired = model.onShortcutBegin() else {
+            model.hotkeyError = "Finish the microphone test or current capture first."; return
+        }
+        lease = acquired
         Self.disarm = { stop() }
         model.hotkeyError = nil
-        HotkeyMonitor.suspended = true
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             let code = UInt16(event.keyCode)
             let mods = KeyChord.Modifiers(event.modifierFlags)
@@ -271,7 +373,8 @@ struct ShortcutRecorder: View {
 
     private func commit(_ chord: KeyChord) {
         stop()
-        model.setHotkey(path, to: chord)
+        if let path { model.setHotkey(path, to: chord) }
+        if let optionalPath { model.setOptionalHotkey(optionalPath, to: chord) }
     }
 
     /// No-op unless this row is the armed one — every row hears onDisappear and
@@ -281,7 +384,7 @@ struct ShortcutRecorder: View {
         NSEvent.removeMonitor(monitor)
         self.monitor = nil
         Self.disarm = nil
-        HotkeyMonitor.suspended = false
+        if let lease { model.onShortcutEnd(lease) }; lease = nil
     }
 }
 
@@ -290,28 +393,10 @@ struct ShortcutRecorder: View {
 struct CleanupPage: View {
     @ObservedObject var model: HubModel
 
-    private var isAnthropic: Bool { model.settings.cleanup.provider != "openai-compatible" }
+    private var isAnthropic: Bool { ["", "anthropic"].contains(model.settings.cleanup.provider) }
+    private var isLocal: Bool { model.settings.usesAppleIntelligence }
 
-    // Same validation the dictation path runs (makeCleanupClient), so this
-    // warning can never disagree with what actually happens. nil = cleanup
-    // will run. Keyless openai-compatible is valid (local servers) — the
-    // factory allows it, so no banner there.
-    private var configIssue: String? {
-        do {
-            _ = try makeCleanupClient(settings: model.settings,
-                                      env: ProcessInfo.processInfo.environment)
-            return nil
-        } catch let error as CleanupError {
-            if error.description.contains("required") { return "no base URL is set" }
-            if error.description.contains("not a valid") { return "the base URL isn't a valid http(s) URL" }
-            if error.description.contains("unknown cleanup.provider") {
-                return "settings.json names an unknown provider"
-            }
-            return "no API key is set"
-        } catch {
-            return "\(error)"
-        }
-    }
+    private var configIssue: String? { model.credentialIssue }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -324,14 +409,32 @@ struct CleanupPage: View {
                     Picker("", selection: $model.settings.cleanup.provider) {
                         Text("Anthropic").tag("anthropic")
                         Text("OpenAI-compatible").tag("openai-compatible")
+                        Text("Apple Intelligence · on-device").tag("apple-intelligence")
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
                     .labelsHidden()
-                    .frame(width: 260)
+                    .frame(width: 300)
                 }
             }
 
-            if isAnthropic {
+            if isLocal {
+                HubSection("Apple Intelligence · on-device", footer: "No endpoint or API key. Apple manages system assets and may use its own network for downloads/updates. This adapter sends no transcript request to a server.") {
+                    Text(model.localCleanupStatus?.message ?? "Availability checked: eligible for a new request; each request checks again.")
+                        .font(.caption).padding(12)
+                    HubRow("Declared source locale", detail: "Explicit intent, separate from speech recognition. Unknown refuses local generation.") {
+                        TextField("Locale identifier, e.g. en or hi", text: optBinding($model.settings.cleanup.localSourceLocale)).hubField().frame(width: 240)
+                    }
+                    Button("Recheck availability", action: model.recheckLocalCleanup).padding(12)
+                    Text("Only confidently identified single-language text is admitted. Short, mixed, code, names or uncertain text may be refused. Ordinary cleanup keeps raw text with your literal rules on failure. Translation and spoken commands are unavailable; saved rewrites require explicit same-language confirmation. No remote fallback.")
+                        .font(.caption).foregroundStyle(.secondary).padding(12)
+                    Text("8 KiB source/instruction/selection; 16 KiB full prompt; 32 KiB response. The 15-second logical acceptance deadline requests cancellation, then waits for actual exit; it does not guarantee a 15-second return.")
+                        .font(.caption).foregroundStyle(.secondary).padding(12)
+                }
+                HubSection("Saved network credentials", footer: "A separate deliberate action for retained legacy network keys. Availability and local requests never migrate them.") {
+                    Button("Migrate saved network credentials", action: model.retryCredentialMigration).padding(12)
+                    if let message = model.credentialMessage { Text(message).font(.caption) }
+                }
+            } else if isAnthropic {
                 HubSection("Anthropic",
                            footer: "The ANTHROPIC_API_KEY environment variable takes precedence over the key stored here (terminal launches only).") {
                     HubRow("Model") {
@@ -339,11 +442,7 @@ struct CleanupPage: View {
                             .hubField().frame(width: 260)
                     }
                     HubDivider()
-                    HubRow("API key", detail: "Stored in settings.json — hover to reveal") {
-                        SecretField(placeholder: "sk-ant-…",
-                                    text: optBinding($model.settings.anthropicApiKey))
-                            .frame(width: 260)
-                    }
+
                 }
             } else {
                 HubSection("Endpoint",
@@ -360,15 +459,26 @@ struct CleanupPage: View {
                             .hubField().frame(width: 260)
                     }
                     HubDivider()
-                    // cleanup.apiKeyEnvVar still works via settings.json — just
-                    // not advertised here; it only functions on terminal launches.
-                    HubRow("API key", detail: "Stored in settings.json — hover to reveal") {
-                        SecretField(placeholder: "key…",
-                                    text: optBinding($model.settings.cleanup.apiKey))
-                            .frame(width: 260)
-                    }
+
                 }
             }
+
+            if !isLocal {
+            HubSection("Credential", footer: model.credentialStatus) {
+                HubRow("API key", detail: "Blank preserves the stored key. Keys stay in Keychain.") {
+                    SecureField("New key…", text: $model.credentialDraft).hubField().frame(width: 260)
+                }
+                HStack {
+                    Button("Save / Replace", action: model.saveCredential).disabled(model.credentialDraft.isEmpty)
+                    Button("Remove", action: model.removeCredential)
+                    Button("Refresh / Retry migration", action: model.retryCredentialMigration)
+                }
+                if let message = model.credentialMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
+            }
+
+            }
+
+            CleanupFailoverSection(model: model)
 
             // Absent until the first cleanup with usage reported — an empty card
             // saying nothing is worse than no card.
@@ -379,9 +489,8 @@ struct CleanupPage: View {
     @ViewBuilder
     private func costSection(_ est: CleanupCostEstimate) -> some View {
         HubSection("Estimated cost",
-                   footer: "An estimate from published list prices, not a bill. Parla only keeps "
-                       + "the last \(HistoryStore.cap) dictations, so this covers the period shown "
-                       + "and nothing before it; discounts and cached input aren't counted.") {
+                   footer: "An estimate from published list prices, not a bill. Configured text limit: \(model.settings.historyTextCount). "
+                       + "This covers priced producer usage in retained original dictations, not all-attempt spend. Experimental failover models are unpriced; failed or discarded attempts and retry requests are excluded. Discounts and cached input aren't counted.") {
             HubRow("Cleanup spend",
                    detail: "\(est.dictations) dictation\(est.dictations == 1 ? "" : "s") since "
                        + est.since.formatted(date: .abbreviated, time: .shortened)
@@ -437,7 +546,7 @@ struct DictionaryPage: View {
                 }
             }
             HubSection("Words",
-                       footer: "Names and jargon spelled exactly as they should appear, e.g. “Parla”, “whisper.cpp”.") {
+                       footer: "Top words have priority. ASR gets up to 2,048 UTF-8 bytes; cleanup gets 8,192. Each hint must fit in 256 bytes. Omitted words stay saved.") {
                 if model.words.isEmpty {
                     EmptyHint(text: "No dictionary entries yet")
                 } else {
@@ -445,6 +554,10 @@ struct DictionaryPage: View {
                         HStack(spacing: 8) {
                             TextField("word or phrase", text: $row.text)
                                 .hubField()
+                            Button { model.moveWord(row.id, by: -1) } label: { Image(systemName: "arrow.up") }
+                                .buttonStyle(.plain).help("Higher priority")
+                            Button { model.moveWord(row.id, by: 1) } label: { Image(systemName: "arrow.down") }
+                                .buttonStyle(.plain).help("Lower priority")
                             Button {
                                 model.words.removeAll { $0.id == row.id }
                             } label: {
@@ -459,12 +572,15 @@ struct DictionaryPage: View {
                     }
                 }
             }
+            Text("Currently selected: \(VocabularyHints.select(model.words.map(\.text), byteLimit: VocabularyHints.asrBytes).count) ASR hints; \(VocabularyHints.select(model.words.map(\.text), byteLimit: VocabularyHints.cleanupBytes).count) cleanup hints of \(model.words.count) saved rows.")
+                .font(.system(size: 12)).foregroundStyle(Theme.muted)
             Button {
                 model.words.append(.init())
             } label: {
                 Label("Add word", systemImage: "plus")
             }
             .buttonStyle(HubButtonStyle(kind: .primary))
+            HubVocabularyView(model: model)
         }
         .onAppear { proposals = DictionaryLearner.Store.shared.pending }
     }
@@ -543,14 +659,7 @@ struct HistoryPage: View {
     @State private var query = ""
     @State private var confirmClear = false
 
-    private var filtered: [HistoryEntry] {
-        guard !query.isEmpty else { return model.historyEntries }
-        return model.historyEntries.filter {
-            $0.raw.localizedCaseInsensitiveContains(query)
-                || ($0.cleaned?.localizedCaseInsensitiveContains(query) ?? false)
-                || ($0.appName?.localizedCaseInsensitiveContains(query) ?? false)
-        }
-    }
+    private var filtered: [HistoryEntry] { model.filteredHistory(query) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -570,19 +679,51 @@ struct HistoryPage: View {
 
                 Spacer()
 
+                Button("Export Filtered (\(filtered.count))…") { model.prepareFilteredHistoryExport(query) }
+                    .buttonStyle(HubButtonStyle(kind: .normal))
+                    .disabled(filtered.isEmpty)
+
                 Button("Clear History") { confirmClear = true }
                     .buttonStyle(HubButtonStyle(kind: .danger))
-                    .disabled(model.historyEntries.isEmpty)
-                    .confirmationDialog("Delete all \(model.historyEntries.count) dictations?",
+                    .disabled((model.historyEntries.isEmpty && model.pendingHistory.isEmpty) || model.history.loadBlocked)
+                    .confirmationDialog("Delete all saved and unsaved text? Recording files are managed separately.",
                                         isPresented: $confirmClear) {
                         Button("Delete All", role: .destructive) { model.clearHistory() }
                     }
             }
 
+            HistoryStatus(model: model)
+            if let request = model.historyExport {
+                HistoryExportReview(model: model, request: request)
+            }
+            if let message = model.historyExportMessage {
+                Text(message).font(.caption).foregroundStyle(Theme.muted)
+            }
+            Text("Deleting or clearing removes text only. Recording files are managed separately; audio recovery follows its independent lifetime policy.")
+                .font(.system(size: 11)).foregroundStyle(Theme.muted)
+
+            if let message = model.historyRetryMessage {
+                Text(message).font(.caption).foregroundStyle(Theme.muted)
+            }
+            ForEach(model.historyRetries.values.sorted { $0.original.date > $1.original.date }) { preview in
+                HistoryRetryReview(model: model, preview: preview)
+            }
+
+            ForEach(model.pendingHistory) { entry in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Unsaved result — available until Parla quits").font(.system(size: 12, weight: .semibold))
+                    historyRow(entry, pending: true)
+                    HStack {
+                        Button("Retry Save") { model.retryHistorySave(entry.id) }.disabled(model.history.loadBlocked)
+                        Button("Discard", role: .destructive) { model.discardHistory(entry.id) }
+                    }
+                }
+            }
+
             if filtered.isEmpty {
                 VStack(spacing: 0) {
                     EmptyHint(text: model.historyEntries.isEmpty
-                        ? "No dictations yet — hold fn and speak"
+                        ? (model.pendingHistory.isEmpty ? "No dictations yet — hold fn and speak" : "No saved text yet — unsaved results are above")
                         : "No matches for “\(query)”")
                 }
                 .frame(maxWidth: .infinity)
@@ -591,22 +732,37 @@ struct HistoryPage: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
             } else {
                 VStack(spacing: 10) {
-                    ForEach(Array(filtered.enumerated()), id: \.offset) { _, entry in
-                        historyRow(entry)
+                    ForEach(filtered) { entry in
+                        historyRow(entry, pending: false)
                     }
                 }
             }
         }
     }
 
-    private func historyRow(_ entry: HistoryEntry) -> some View {
+    private func historyRow(_ entry: HistoryEntry, pending: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let retry = entry.retries?.last {
+                Text(retry.configuration.retryMode == .segmentedV1 ? "Result: experimental segmented cleanup" : retry.configuration.kind == .cleanup ? "Result: retried ordinary cleanup" : "Result: explicitly applied preset")
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.muted)
+            }
+            if let operation = entry.operation {
+                Text("Initial operation: " + operation.label).font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.muted)
+            }
             Text(entry.best)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.text)
                 .lineLimit(4)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+            DisclosureGroup(entry.operation?.origin == .selection ? "Original source / Result" : "Original / Result") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Original").font(.caption).foregroundStyle(Theme.muted)
+                    Text(entry.raw).textSelection(.enabled)
+                    Text("Result").font(.caption).foregroundStyle(Theme.muted)
+                    Text(entry.best).textSelection(.enabled)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(spacing: 8) {
                 if let app = entry.appName {
                     Text(app)
@@ -625,15 +781,21 @@ struct HistoryPage: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Spacer()
-                Button {
-                    model.copy(entry.best)
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.muted)
+                Button("Copy Original") { model.copyOriginal(entry) }.buttonStyle(.plain)
+                Button("Copy Result") { model.copyResult(entry) }.buttonStyle(.plain)
+                if !pending {
+                    if entry.operation == nil {
+                        Button("Review segmented cleanup (experimental)…") { model.prepareSegmentedHistoryRetry(entry.id) }
+                            .buttonStyle(.plain)
+                    }
+                    Button("Export…") { model.prepareHistoryExport(rowID: entry.id) }.buttonStyle(.plain)
+                    Button(entry.operation == nil ? "Review Retry Cleanup" : "Review Selected Preset") {
+                        model.prepareHistoryRetry(entry.id, applyPreset: entry.operation != nil)
+                    }.buttonStyle(.plain).disabled(model.loadError != nil || model.saveError != nil || model.history.loadBlocked)
+                    Button("Delete", role: .destructive) { model.deleteHistory(entry.id) }
+                        .buttonStyle(.plain).disabled(model.history.loadBlocked)
+                        .help("Deletes text only; recording files are managed separately")
                 }
-                .buttonStyle(.plain)
-                .help("Copy")
             }
         }
         .padding(14)
@@ -649,71 +811,75 @@ struct HistoryPage: View {
 struct PrivacyPage: View {
     @ObservedObject var model: HubModel
     @State private var confirmClear = false
-    @State private var confirmClearRecordings = false
-    /// Read on appear rather than published: the dictation path writes this
-    /// folder, and this page is the only thing that ever shows it.
-    @State private var recordings = RecordingStore.Summary(count: 0, bytes: 0)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             HubSection("History",
-                       footer: "Secure-field and cancelled dictations are never recorded, regardless of this setting.") {
+                       footer: "Off stops saving newly started sessions; in-flight sessions keep their starting permission. Existing text stays readable and copyable. Secure-field and cancelled dictations are never recorded. Text limits do not change audio retention.") {
                 HubRow("Keep local history",
-                       detail: "Last \(HistoryStore.cap) dictations, on this Mac only") {
+                       detail: "Save new sessions on this Mac only") {
                     Toggle("", isOn: $model.settings.historyEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
                 }
                 HubDivider()
+                HubRow("Saved text limit", detail: "1–1,000 saved entries. Unsaved results require Save or Discard.") {
+                    Stepper(value: $model.settings.historyTextCount, in: HistoryStore.countRange) {
+                        Text("\(model.settings.historyTextCount)").monospacedDigit()
+                    }.frame(width: 130)
+                }
+                HubDivider()
                 HubRow("Clear history",
-                       detail: "\(model.historyEntries.count) dictations stored") {
+                       detail: "\(model.historyEntries.count) saved, \(model.pendingHistory.count) unsaved. Removes text only.") {
                     Button("Clear…") { confirmClear = true }
                         .buttonStyle(HubButtonStyle(kind: .danger))
-                        .disabled(model.historyEntries.isEmpty)
-                        .confirmationDialog("Delete all \(model.historyEntries.count) dictations?",
+                        .disabled((model.historyEntries.isEmpty && model.pendingHistory.isEmpty) || model.history.loadBlocked)
+                        .confirmationDialog("Delete all saved and unsaved text? Recording files are managed separately.",
                                             isPresented: $confirmClear) {
                             Button("Delete All", role: .destructive) { model.clearHistory() }
                         }
                 }
-            }
+            }.disabled(model.loadError != nil)
+            HistoryStatus(model: model)
 
-            if RecordingStore.shared.keepAll {
-                HubBanner(text: "PARLA_KEEP_RECORDINGS=1 — every dictation's audio is being kept "
-                    + "for \(RecordingStore.retentionDays) days, not just the failed ones.")
+            HubSection("Clipboard restore experiment",
+                       footer: "Off by default. Observes requests for clipboard data, never paste acceptance or every reader. Local only; known remote clients keep the fixed delay. Requests restoration within 8 seconds, with a 0.8-second floor and 0.3-second quiet period; a stalled app or IPC can exceed that deadline. Oversized or unreadable clipboards are refused. One full original snapshot stays in RAM until settlement; a failed restore retains it and can prevent quit or restart. Force quit cannot preserve promises.") {
+                HubRow("Observe clipboard data requests", detail: "Experimental; paste remains unverified") {
+                    Toggle("", isOn: $model.settings.clipboardReceiptRestoreEnabled).toggleStyle(.switch).labelsHidden()
+                }
+            }.disabled(model.loadError != nil)
+
+            HubSection("Undo accidental cancellation",
+                       footer: "Off by default. Keep at most 10 seconds of canceled audio in RAM for a fixed 3-second Undo window. Undo opens a temporary raw transcript for 30 seconds; only an explicit Copy writes it to the clipboard. No app audio files or history. New capture, Discard, disable, security refusal, expiry or quit clears it. Native work may retain copies until it exits; this does not promise physical erasure or prevent OS swap.") {
+                HubRow("Undo capture cancellation", detail: "Temporary transcript and explicit Copy only; no field insertion") {
+                    Toggle("", isOn: $model.settings.canceledCaptureUndoEnabled).toggleStyle(.switch).labelsHidden()
+                }
             }
-            HubSection("Recordings",
-                       footer: "Parla saves each dictation's audio just before transcribing it, so a "
-                           + "crash mid-transcription can't take what you said with it, and deletes it "
-                           + "the moment a transcript comes back. Only dictations that failed are left "
-                           + "behind. Audio from a password field is never kept.") {
-                HubRow("Deleted after \(RecordingStore.retentionDays) days",
-                       detail: recordings.count == 0 ? "Nothing stored"
-                           : "\(recordings.count) recording\(recordings.count == 1 ? "" : "s") · "
-                               + ByteCountFormatter.string(fromByteCount: Int64(recordings.bytes),
-                                                           countStyle: .file)) {
-                    Button("Show in Finder") {
-                        // The folder may not exist yet — nothing has ever failed.
-                        try? FileManager.default.createDirectory(
-                            at: RecordingStore.shared.directory, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(RecordingStore.shared.directory)
-                    }
-                    .buttonStyle(HubButtonStyle())
+            HubSection("Brief Original copy",
+                       footer: "Opt in to keep one ordinary dictation Original in RAM for 30 seconds from paste dispatch, up to 64 KiB of UTF-8. Works with history off. Only an explicit Copy Original writes it to the clipboard; no transcript preview. Paste acceptance is unverified. Guarded Undo / Restore Raw remain unavailable pending native qualification.") {
+                HubRow("Keep last Original briefly", detail: "Off by default; new capture, insertion, disable, expiry or quit clears it") {
+                    Toggle("", isOn: $model.settings.keepLastOriginalEnabled).toggleStyle(.switch).labelsHidden()
                 }
                 HubDivider()
-                HubRow("Delete recordings",
-                       detail: "16 kHz mono WAV — the format eval/cases uses") {
-                    Button("Delete…") { confirmClearRecordings = true }
-                        .buttonStyle(HubButtonStyle(kind: .danger))
-                        .disabled(recordings.count == 0)
-                        .confirmationDialog("Delete all \(recordings.count) recordings?",
-                                            isPresented: $confirmClearRecordings) {
-                            Button("Delete All", role: .destructive) {
-                                RecordingStore.shared.clear()
-                                recordings = RecordingStore.shared.summary()
-                            }
-                        }
+                HubRow("Copy Original", detail: model.originalCopyStatus.message) {
+                    Button("Copy Original") { model.copyLastOriginal() }.buttonStyle(HubButtonStyle())
+                        .disabled(model.originalCopyStatus.token == nil || model.loadError != nil)
                 }
-            }
+            }.disabled(model.loadError != nil)
+
+            HubSection("Automation source preview",
+                       footer: "Native Shortcuts actions are pending. When enabled, one final result can live in RAM for up to 5 minutes (64 KiB maximum), until a new capture, Clear, disable or quit. History and recording retention still follow their normal settings. Returned text cannot be retracted.") {
+                HubRow("Enable automation", detail: "Result-only dictation; no automatic paste or copy") {
+                    Toggle("", isOn: $model.settings.automationEnabled).toggleStyle(.switch).labelsHidden()
+                }
+                HubDivider()
+                HubRow("Clear last result", detail: "Also prevents a held completion from repopulating retrieval") {
+                    Button("Clear Last Result") { model.onClearAutomationResult() }.buttonStyle(HubButtonStyle())
+                }
+            }.disabled(model.loadError != nil)
+
+            HubRecoveryView(model: model)
+            HubDiagnosticsView(model: model)
 
             HubSection("How Parla handles your data") {
                 HubRow("Transcription is on-device",
@@ -725,16 +891,115 @@ struct PrivacyPage: View {
                 HubRow("Password fields are protected",
                        detail: "Dictation is refused in secure fields — nothing is typed, stored, or sent to the cleanup model") { EmptyView() }
                 HubDivider()
-                HubRow("Cleanup sends text only",
+                HubRow("Optional on-device cleanup", detail: "Apple Intelligence uses the system model on this Mac. Apple manages downloads and updates; Parla’s local adapter sends no transcript request to a server.") { EmptyView() }
+                HubDivider()
+                HubRow("Endpoint cleanup sends text only",
                        detail: "The transcript, selected text for voice commands, dictionary, snippets, and a fixed formatting hint — never audio, app names, or browser URLs") { EmptyView() }
             }
         }
-        // Prune before summarising, not just for tidiness: the sweep otherwise
-        // only runs when the next dictation is stashed, so this page could list
-        // — and total up — files it is simultaneously claiming are deleted.
-        .onAppear {
-            RecordingStore.shared.prune()
-            recordings = RecordingStore.shared.summary()
+        .onAppear { model.refreshRecovery(); model.refreshOriginalCopy() }
+        .onDisappear { model.stopRecoveryPlayback() }
+    }
+}
+
+/// Shared persistence status on History and Privacy, including settings-save
+/// failures separately from a count policy whose trim could not be written.
+struct HistoryStatus: View {
+    @ObservedObject var model: HubModel
+    var body: some View {
+        if let error = model.historyError {
+            VStack(alignment: .leading, spacing: 8) {
+                HubBanner(text: error)
+                if model.history.loadBlocked {
+                    Button("Retry Load") { model.reloadHistory() }
+                } else if let limit = model.history.countLimit, model.historyEntries.count > limit {
+                    Button("Apply Saved Text Limit") { model.retryHistoryTrim() }
+                }
+                Text("Retry Delete or Clear with the corresponding action. Unsaved results can be copied, retried or discarded in History.")
+                    .font(.caption).foregroundStyle(Theme.muted)
+            }
         }
+    }
+}
+
+
+private struct CleanupFailoverSection: View {
+    @ObservedObject var model: HubModel
+    var body: some View {
+        HubSection("Backup cleanup · experiment", footer: "Ordinary keyboard, mouse and result-only Shortcuts only. Presets, transforms, history, eval and Apple Intelligence never use backups.") {
+            Text(model.failoverState).font(.headline)
+            Text("After a transient failure, try up to two reviewed network destinations in order. Each may receive the same transcript and context and may charge you. Loopback is still network transport and cannot prove that a server keeps text on-device.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(model.failoverBackups.indices, id: \.self) { index in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Backup \(index + 1)").font(.headline)
+                    Picker("Provider", selection: $model.failoverBackups[index].provider) {
+                        Text("Anthropic").tag("anthropic")
+                        Text("OpenAI-compatible").tag("openai-compatible")
+                    }
+                    .onChange(of: model.failoverBackups[index].provider) { provider in
+                        if provider == "anthropic" { model.failoverBackups[index].baseURL = nil }
+                    }
+                    TextField("Base URL (blank for Anthropic)", text: optBinding($model.failoverBackups[index].baseURL)).hubField()
+                    TextField("Exact model identifier", text: $model.failoverBackups[index].model).hubField()
+                    Picker("Credential source", selection: $model.failoverBackups[index].source) {
+                        Text("Named environment variable only").tag(CleanupBackupSource.namedEnvironment)
+                        Text("Keychain key for this endpoint").tag(CleanupBackupSource.scopedKeychain)
+                        Text("Explicitly keyless compatible server").tag(CleanupBackupSource.keylessCompatible)
+                    }
+                    .onChange(of: model.failoverBackups[index].source) { source in
+                        if source != .namedEnvironment { model.failoverBackups[index].environmentName = nil }
+                    }
+                    if model.failoverBackups[index].source == .namedEnvironment {
+                        TextField("Environment variable name", text: optBinding($model.failoverBackups[index].environmentName)).hubField()
+                    }
+                    if model.failoverBackups[index].source == .scopedKeychain {
+                        Text("This Keychain entry is shared by models at the same provider and endpoint, including the primary when it uses Keychain. Replacing or removing it affects every model using the entry. Environment credentials are unchanged.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        SecureField("New key for this endpoint", text: Binding(get: { model.failoverKeyDraft(index) }, set: { model.setFailoverKeyDraft(index, $0) })).hubField()
+                        HStack {
+                            Button("Save / Replace key") { model.changeFailoverKey(index) }.disabled(model.failoverKeyDraft(index).isEmpty)
+                            Button("Remove key") { model.changeFailoverKey(index, remove: true) }
+                        }
+                    }
+                    Text("A missing selected source stops cleanup; it never falls through to another source.").font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Move up") { model.moveFailoverBackup(index, by: -1) }.disabled(index == 0)
+                        Button("Move down") { model.moveFailoverBackup(index, by: 1) }.disabled(index + 1 == model.failoverBackups.count)
+                        Button("Remove backup") { model.failoverBackups.remove(at: index) }
+                    }
+                }.padding(12)
+            }
+            HStack {
+                Button("Add backup") { model.failoverBackups.append(CleanupBackup()) }.disabled(model.failoverBackups.count >= 2)
+                Button("Load saved chain", action: model.loadFailoverDraft)
+                Button("Save disabled draft", action: model.saveFailoverDraft)
+                Button("Review complete chain", action: model.reviewFailover)
+                Button("Disable backups", action: model.disableFailover)
+            }
+            if let review = model.failoverReview {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Confirm these exact destinations").font(.headline)
+                    identity(review.primary, label: "Primary")
+                    ForEach(review.policy.backups.indices, id: \.self) { index in
+                        if let value = try? review.policy.backups[index].identity() { identity(value, label: "Backup \(index + 1)") }
+                    }
+                    Text("The primary keeps its credential precedence and uses noninteractive access with bounded HTTP. Each backup uses only its selected source. Keyless means no credential is sent by this adapter. Review again to accept this result deadline and drain contract.").font(.caption)
+                    Button("Confirm and enable for new captures", action: model.confirmFailover)
+                }.padding(12)
+            }
+            Text("One 15-second cleanup result budget begins before primary credential setup. Under executor progress, expiry returns raw text with local rules once, while canceled work drains. Capture, recognition and entry preparation are outside this timer. New ordinary starts stay busy until actual exit. A recording already in progress is preserved; after stopping it waits for prior cleanup and can be discarded. Actual exit and queued recognition may wait indefinitely. All chain prompts over 16 KiB stop without truncation. A backup needs at least 3 seconds remaining. Disable revokes backups; frozen primary intent remains until deadline, discard or lifecycle abort. Quit/restart cancel the operation and await drain; finish or cancel an existing recording first. Producer tokens exclude other attempts; remote processing and billing may continue.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let message = model.failoverMessage { Text(message).font(.caption) }
+        }
+    }
+    private func identity(_ value: CleanupChainIdentity, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label + " · " + value.provider).bold()
+            Text(value.endpoint).textSelection(.enabled)
+            Text("Exact model: " + value.model)
+            Text("Credential policy: " + value.source)
+            Text("Access: " + value.access)
+        }.font(.caption)
     }
 }

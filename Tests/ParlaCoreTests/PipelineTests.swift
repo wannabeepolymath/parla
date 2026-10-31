@@ -100,9 +100,9 @@ final class PipelineTests: XCTestCase {
             cleanup: { t, _ in t },
             settings: { Settings() },
             frontBundleID: { nil })
-        XCTAssertNil(p.transcript(samples: [Float](repeating: 0.1, count: 6_399)))
+        recognitionAssertNil(await p.transcript(samples: [Float](repeating: 0.1, count: 6_399)))
         // syn-quiet.wav: 1.6s @16kHz at rms 8.3e-5.
-        XCTAssertNil(p.transcript(samples: [Float](repeating: 8.3e-5, count: 25_600)))
+        recognitionAssertNil(await p.transcript(samples: [Float](repeating: 8.3e-5, count: 25_600)))
         let out = await p.process(samples: [Float](repeating: 8.3e-5, count: 25_600))
         XCTAssertNil(out) // and nothing reaches cleanup either
     }

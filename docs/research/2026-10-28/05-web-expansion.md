@@ -1,0 +1,65 @@
+# Web expansion: 13 additional source trees, nine new entries
+
+On 2026-10-28, a fresh web search and primary GitHub screening found additional candidates beyond the first 20 repositories. Fifteen repositories were screened; 13 received targeted source inspection, bringing the corpus to **33 distinct repository trees**. This is not 33 independently originated products: one Android project explicitly derives from another, and Dictus Desktop retains upstream attribution. Similarly named Wisper and Sotto projects are identified by owner. “Additional” means newly covered in this research, not newly launched.
+
+The expansion adds **B49–B57**, bringing the canonical backlog to **57 entries**. Most other source distinctions strengthen existing entries instead of creating duplicates. The original app/site profiles, cleanup reliability, quality evaluation and app qualification remain valuable; discovering more model catalogs does not establish a reason to replace Parla's default engine.
+
+## What deserves attention
+
+| Order | Opportunity | Evidence and boundary |
+|---|---|---|
+| First corrective action | **B49: older completion feedback must not replace a newer recording HUD** | Root located the relevant symbols; a blind audit and a separate neutral refutation confirmed reachable source paths. State/menu remain protected. This is a narrow presentation ownership finding, with runtime reproduction still outstanding |
+| Daily workflow decision | **B50: explicitly discard a result while recognition or cleanup is pending** | Current cancellation intentionally stops active capture only; existing tests/comments enforce that contract. A processing-stage action would extend it, rather than fix a secretly broken cancel button |
+| Small usability work | **B54: layout-aware shortcut display** | Keep physical key matching and canonical persisted chord names; the competitor display resolver itself has an ANSI-only boundary |
+| Diagnostics | **B55: selected-microphone listening/signal check, plus optional Android route comparison** | Parla already has a waveform, input selection and an isolated ASR tryout. The additional capability works without a loaded recognizer. Calibration proxies are not accuracy evidence |
+| Input preference | **B52: opt-in mouse-button recording** | Actual event-tap/settings/caller wiring exists upstream. Preserve Parla's missed-release, permission and session safeguards |
+| Repeatable forms | **B51: guided field templates** | Separate spoken takes compose into a reviewed template. Static snippets/selected-text transforms already exist. Upstream completion re-captures focus, so retain Parla's stronger destination checks |
+| Native resilience experiment | **B53: reversible model-preparation safe-start** | WhisPaste marks load through first inference and handles interrupted preparation on restart. False attribution and failed persistence limit the policy; no Parla GPU incident was reproduced |
+| Recognition experiment | **B56: separate preview/final ASR models** | Existing Parla previews use the same recognizer. A second model could change responsiveness but also memory and stop latency; measure before adopting |
+| Optional recovery experiment | **B57: short RAM-only Undo after accidental cancellation** | Distinct from failed-audio recovery and undoing delivered text. Retaining canceled audio is a deliberate opt-in product change; never silently paste into a later field |
+
+Every entry has effort and acceptance criteria in the [backlog](BACKLOG.md#web-expansion-additions-b49b57). Most are feature experiments, not confirmed defects. B49 is the only newly promoted corrective finding; the source witness and counterevidence are in [the cancellation/feedback audit](10-cancellation-and-feedback.md). No fix was made.
+
+## Sources inspected
+
+Exact HEADs are in [sources.json](sources.json). GitHub repository creation, push activity and selected commit times are different facts; creation is not a launch date and a recent push does not make the default branch commit equally recent. Root license notices below do not cover every model/dependency.
+
+| Repository | Pinned commit date | Root notice | Focus |
+|---|---|---|---|
+| [whispaste/whispaste](https://github.com/whispaste/whispaste/tree/594e7272700e2d3e827512c7e876b26eef6f1ddf) | 2026-10-17T01:08:03+02:00 | [MIT](https://github.com/whispaste/whispaste/blob/594e7272700e2d3e827512c7e876b26eef6f1ddf/LICENSE) | Guided snippet sessions/composition/picker, GPU preparation crash marker and local automation transport; R1 only: pre-existing checkout; native GPU load guard, startup, engine selector, settings persistence, notifier and tests. |
+| [Starmel/OpenSuperWhisper](https://github.com/Starmel/OpenSuperWhisper/tree/c8e6fe79d6851078940f459ab7dbc8ee39e2a97d) | 2026-09-07T20:19:49+03:00 | [MIT](https://github.com/Starmel/OpenSuperWhisper/blob/c8e6fe79d6851078940f459ab7dbc8ee39e2a97d/LICENSE) | Mouse trigger lifecycle, layout-aware shortcut labels, language-aware model selection and engine interface; R2 only: existing checkout, MouseButtonMonitor and callers/tests versus Parla input routing |
+| [taraksh01/wisper](https://github.com/taraksh01/wisper/tree/166445cae646b947050cc6a8f5b36a8744b4c89d) | 2026-09-28T23:31:12+05:30 | [MIT](https://github.com/taraksh01/wisper/blob/166445cae646b947050cc6a8f5b36a8744b4c89d/LICENSE) | Sparse static source/text; model/audio/image/binary/vendor excluded. No execution. |
+| [hudsonbrendon/wisper](https://github.com/hudsonbrendon/wisper/tree/f5d6777d8d2c5c22617cf8ff3ac4f1d217a0dc7e) | 2026-07-31T17:33:59-03:00 | [MIT](https://github.com/hudsonbrendon/wisper/blob/f5d6777d8d2c5c22617cf8ff3ac4f1d217a0dc7e/LICENSE) | Sparse static source/text; model/audio/image/binary/vendor excluded. No execution. |
+| [getdictus/dictus-desktop](https://github.com/getdictus/dictus-desktop/tree/e02b85d856b2cb59d7f974ce936aab404c68de68) | 2026-09-11T23:58:07+02:00 | [MIT](https://github.com/getdictus/dictus-desktop/blob/e02b85d856b2cb59d7f974ce936aab404c68de68/LICENSE) | Sparse static source/text; model/audio/image/binary/vendor excluded. No execution. |
+| [Muhammad-Waleed381/OpenDictate](https://github.com/Muhammad-Waleed381/OpenDictate/tree/bba79e40785b4ec3ccaaf22bca72c8775bc213b1) | 2026-10-24T12:47:21+05:00 | [MIT](https://github.com/Muhammad-Waleed381/OpenDictate/blob/bba79e40785b4ec3ccaaf22bca72c8775bc213b1/LICENSE) | Sparse static source/text; model/audio/image/binary/vendor excluded. No execution. |
+| [minburg/outspoke](https://github.com/minburg/outspoke/tree/2b676cebb52f314fe3962ab6ae2a6b041381cdcb) | 2026-08-29T17:01:20+02:00 | [GPL-3.0](https://github.com/minburg/outspoke/blob/2b676cebb52f314fe3962ab6ae2a6b041381cdcb/LICENSE) | Android correction candidates, microphone calibration, VAD and partial/final lifecycle; sparse source/text only |
+| [kafkasl/phone-whisper](https://github.com/kafkasl/phone-whisper/tree/e6518cda437ed2c266f36cf476db857fa2690d87) | 2026-08-24T02:03:49-04:00 | [Apache-2.0](https://github.com/kafkasl/phone-whisper/blob/e6518cda437ed2c266f36cf476db857fa2690d87/LICENSE) | Android local recognition adapter, capture/final delivery and derivative provenance; sparse source/text only |
+| [b0sh-net/phone-whisper](https://github.com/b0sh-net/phone-whisper/tree/e322ac526a3e25eccc9751c2798b89ba5b263067) | 2026-10-24T18:16:34+02:00 | [GPL-3.0](https://github.com/b0sh-net/phone-whisper/blob/e322ac526a3e25eccc9751c2798b89ba5b263067/LICENSE) | Derivative: shared-file decoding/drain, streaming finalization, retained live session state; sparse source/text only |
+| [stofll/Sotto](https://github.com/stofll/Sotto/tree/26a1da6cc81811c12c85e8b0d1e336ff052d7bad) | 2026-10-26T22:05:10Z | [MIT](https://github.com/stofll/Sotto/blob/26a1da6cc81811c12c85e8b0d1e336ff052d7bad/LICENSE) | mic_test.rs, MicrophoneSection.tsx callers, lib registration; portable.rs/user_data.rs and unit test; overlay named controls/backend refusal; model catalog/sherpa dispatch (targeted) |
+| [smirk-dev/sotto](https://github.com/smirk-dev/sotto/tree/f9133a0208b06e5ba692d52918c869bffdb90f88) | 2026-07-16T17:25:46+05:30 | [MIT](https://github.com/smirk-dev/sotto/blob/f9133a0208b06e5ba692d52918c869bffdb90f88/LICENSE) | engine.py multilingual/script routing and DictationSession callers; config model catalog, settings UI language choices; textproc symbols and source test inventory (targeted) |
+| [psancheti6666/sotto](https://github.com/psancheti6666/sotto/tree/bf7510798482438e9e9373643591706c69e05b91) | 2026-07-24T12:38:16+05:30 | [MIT](https://github.com/psancheti6666/sotto/blob/bf7510798482438e9e9373643591706c69e05b91/LICENSE) | app.py cancellation/undo callbacks, worker and delivery; config defaults; clean.py/Ollama guards; asr factory MLX/ONNX callers; overlay callbacks and hotkey test excerpts (targeted) |
+| [tomoima525/sotto](https://github.com/tomoima525/sotto/tree/b2bbde271fff414256b1c1781f872af690548395) | 2026-08-30T17:52:46-07:00 | [MIT](https://github.com/tomoima525/sotto/blob/b2bbde271fff414256b1c1781f872af690548395/LICENSE) | pipeline.py dual transcriber/draft/refine/final callers; cleaner.py local MLX loading/gate/guards and cache implementation; config defaults; app.py model menus (targeted) |
+
+## Deep evidence
+
+- [Four desktop competitors](06-additional-desktop.md): both Wisper repositories, Dictus Desktop and OpenDictate; actual engine/caller paths, Indic decoding, vocabulary ownership, transforms, typed imports and model-preparation refutation R1.
+- [Three Android trees](07-additional-android.md): Outspoke, Phone Whisper and Audio To Text; microphone calibration, user-selected word candidates, VAD/final drain, file decoding, archive ownership and trigger refutation R2.
+- [Four Sotto projects](08-sotto-projects.md): independent owners and mechanisms, signal monitor, two-model recognition, accidental-cancel Undo, local cleanup boundaries, and guided-template refutation R3.
+- [WhisPaste and OpenSuperWhisper](09-templates-triggers-recovery.md): templates, picker, mouse triggers, native restart recovery, shortcut display and guarded automation references.
+- [Blind cancellation audit plus independent check](10-cancellation-and-feedback.md): deliberate post-capture contract, stale feedback witness, timing/serialization counterarguments and protections already present.
+
+These audits were conducted against the initial B01–B48 baseline; their temporary candidate labels are mapped to B49–B57 above. Historical references to the initial 48 in the audit text describe the comparison baseline, not the final backlog count.
+
+## Screening and rejected conclusions
+
+[discovery.json](discovery.json) retains GitHub metadata for all 15 candidates. **buluma/sotto** was screened but not promoted as independently novel coverage: API license classification was NOASSERTION, while its [LICENSE](https://raw.githubusercontent.com/buluma/sotto/master/LICENSE) carries MacParakeet attribution and GPLv3 text. That is a provenance signal requiring further ancestry inspection, not a conclusion of licensing trouble. **evertjr/Sotto** was a valid MIT-labeled discovery, deferred after prioritizing other mechanisms; it was not deeply audited or judged inferior. These two supplementary screening references are not part of the 33 pinned source trees.
+
+Audio To Text explicitly identifies itself as a [Phone Whisper derivative](https://github.com/b0sh-net/phone-whisper/blob/e322ac526a3e25eccc9751c2798b89ba5b263067/README.md#L9), even though GitHub reports fork=false. Shared engine wrappers are counted once as mechanisms. Its added decoder/archive behavior is inspected separately.
+
+Rejected conclusions include: “1600-language catalog entry proves usable quality,” “an unused local-SLM enum is an implemented local model,” “silence proves denied mic permission,” “spectral score proves best recognition,” “separate mic/system tracks prove diarization,” “a source VAD wrapper proves live VAD is wired,” “current focus recapture preserves the original destination,” and “catch_unwind catches native process death.” Each relevant dossier supplies code-level distinctions.
+
+## Method and resources
+
+Five read-only delegated runs used **gpt-6.1-sol, high effort, through Codex · pritam**: three source audits, one blind cancellation audit and a separate neutral feedback check. Root performed discovery, two additional source inspections, symbol-based confirmation, deduplication and link validation. Candidate reviews explicitly hunted alternative Parla paths, missing upstream wiring, deliberate policies and counterarguments. Source testimony is bounded; no performance or compatibility multiplier was accepted.
+
+No builds, tests, model downloads, dependency installs, cleanup-provider calls, browser sessions or application-code changes. Source/text sparse checkouts excluded model/audio/image/binary/vendor artifacts. All new temporary resources are under `/tmp/wisper-competitive-expansion-2026-10-28/`; original research resources remain under `/tmp/wisper-competitive-2026-10-28/`. No task-created app/server/database process is left running. Sizes and final link-validation totals are recorded in SOURCES.md.

@@ -5,6 +5,10 @@
 # either exported APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID or
 # scripts/setup-notary.sh. Usually run via scripts/release.sh, which tags first.
 set -euo pipefail
+case "${PARLA_PARAKEET_PRODUCT:-0}" in
+  0) ;;
+  *) echo "Optional isolated product distribution is not supported; refusing before legacy app/notarization" >&2; exit 1 ;;
+esac
 cd "$(dirname "$0")/.."
 # The version is read from the tag, so the tag must be on exactly what ships.
 [ -z "$(git status --porcelain)" ] || { echo "Uncommitted changes — commit before releasing." >&2; exit 1; }

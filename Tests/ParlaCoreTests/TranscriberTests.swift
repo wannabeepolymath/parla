@@ -2,17 +2,17 @@ import XCTest
 @testable import ParlaCore
 
 final class TranscriberTests: XCTestCase {
-    func testTranscribeSilenceProducesNoCrash() throws {
+    func testTranscribeSilenceProducesNoCrash() async throws {
         let path = WhisperTranscriber.defaultModelPath()
         try XCTSkipUnless(FileManager.default.fileExists(atPath: path),
                           "no whisper model — run scripts/download-model.sh")
         let t = try WhisperTranscriber(modelPath: path)
         // 1s of silence: must not crash; output may be empty or hallucinated punctuation.
-        let out = t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: "Kubernetes")
+        let out = await t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: "Kubernetes")
         XCTAssertNotNil(out)
         // Both prompt branches run under the language withCString, and only the prompted
         // one is covered above — a nil prompt takes the other path to whisper_full.
-        XCTAssertNotNil(t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil))
+        recognitionAssertNotNil(await t.transcribe([Float](repeating: 0, count: 16_000), initialPrompt: nil))
     }
 
     /// The decode used to be pinned to English, and a multilingual model told
@@ -22,7 +22,7 @@ final class TranscriberTests: XCTestCase {
     /// whisper's own detect-then-decode gives, at half its cost when nothing
     /// switched. Local only: it needs the multilingual model and macOS's Hindi
     /// voice, and CI has neither.
-    func testMultilingualModelFollowsTheSpeakerLikeWhisperAutoDetect() throws {
+    func testMultilingualModelFollowsTheSpeakerLikeWhisperAutoDetect() async throws {
         let model = ModelCatalog.path(for: ModelCatalog.all.first { $0.id.hasPrefix("large") }!)
         try XCTSkipUnless(FileManager.default.fileExists(atPath: model), "no multilingual model installed")
         func speak(_ voice: String, _ text: String) throws -> [Float] {
@@ -41,10 +41,11 @@ final class TranscriberTests: XCTestCase {
 
         let t = try WhisperTranscriber(modelPath: model)
         // A switch each way: the first guess is English, the second is Hindi.
-        let heard = [hindi, english].map { clip -> String? in
-            let text = t.transcribe(clip, initialPrompt: nil)
+        var heard: [String?] = []
+        for clip in [hindi, english] {
+            let text = await t.transcribe(clip, initialPrompt: nil)
             XCTAssertEqual(text, t.decode(clip, initialPrompt: nil, language: "auto"))
-            return text
+            heard.append(text)
         }
         let devanagari = heard[0]?.unicodeScalars.contains { (0x0900...0x097F).contains($0.value) }
         XCTAssertEqual(devanagari, true, "got: \(heard[0] ?? "nil")")

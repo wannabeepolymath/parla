@@ -122,6 +122,8 @@ final class RecordingStoreTests: XCTestCase {
         let s = store()
         let old = try XCTUnwrap(s.stash(tone()))
         let fresh = try XCTUnwrap(s.stash(tone()))
+        s.resolve(old, transcript: nil, secure: false)
+        s.resolve(fresh, transcript: nil, secure: false)
         try FileManager.default.setAttributes(
             [.modificationDate: Date().addingTimeInterval(-Double(RecordingStore.retentionDays + 1) * 86_400)],
             ofItemAtPath: old.path)
@@ -135,6 +137,7 @@ final class RecordingStoreTests: XCTestCase {
     func testPruneKeepsAFileExactlyAtTheBoundary() throws {
         let s = store()
         let url = try XCTUnwrap(s.stash(tone()))
+        s.resolve(url, transcript: nil, secure: false)
         let now = Date()
         try FileManager.default.setAttributes(
             [.modificationDate: now.addingTimeInterval(-Double(RecordingStore.retentionDays) * 86_400)],
@@ -145,7 +148,7 @@ final class RecordingStoreTests: XCTestCase {
     func testSummaryCountsAndSizesWhatIsThere() throws {
         let s = store()
         XCTAssertEqual(s.summary(), RecordingStore.Summary(count: 0, bytes: 0))
-        _ = s.stash(tone())
+        s.resolve(s.stash(tone()), transcript: nil, secure: false)
         let summary = s.summary()
         XCTAssertEqual(summary.count, 1)
         XCTAssertGreaterThan(summary.bytes, 3200) // 1600 frames × 16-bit + header
@@ -153,8 +156,8 @@ final class RecordingStoreTests: XCTestCase {
 
     func testClearEmptiesTheFolder() throws {
         let s = store()
-        _ = s.stash(tone())
-        _ = s.stash(tone())
+        s.resolve(s.stash(tone()), transcript: nil, secure: false)
+        s.resolve(s.stash(tone()), transcript: nil, secure: false)
         s.clear()
         XCTAssertTrue(s.recordings().isEmpty)
         XCTAssertEqual(s.summary().count, 0)

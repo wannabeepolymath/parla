@@ -17,11 +17,25 @@ public enum Inserter {
     /// The last paste's clipboard restore hasn't run yet — not safe to restart.
     public static var clipboardRestorePending: Bool { clipboard.isRestorePending }
 
+    public static var clipboardRestoreFailed: Bool { clipboard.restoreFailed }
+    public static func beginClipboardShutdown(_ reply: @escaping (Bool) -> Void) { clipboard.beginShutdown(reply) }
+    public static func cancelClipboardShutdown() { clipboard.cancelShutdown() }
+    public static func clipboardPolicy(mode: ClipboardRestoreMode, bundleID: String?) -> (mode: ClipboardRestoreMode, delay: TimeInterval) {
+        let remote = ["com.microsoft.rdc.macos", "com.microsoft.windowsapp", "com.citrix.receiver.nomas",
+                      "com.vmware.horizon", "com.anydesk.AnyDesk", "com.teamviewer.TeamViewer"].contains(bundleID ?? "")
+        return remote ? (.remoteExcluded, 5) : (mode, 0.8)
+    }
+
     /// Deliver one native paste so rich editors receive the whole transcript,
     /// including paragraph breaks. The user's clipboard is restored afterwards.
     /// A posted event is not proof that an opaque third-party app accepted it.
     @discardableResult
-    public static func insert(_ text: String) -> Bool {
+    public static func insert(_ text: String, diagnostics: DiagnosticOperation? = nil,
+                              restoreMode: ClipboardRestoreMode = .fixed, willPost: () -> Void = {}) -> Bool {
+        DiagnosticDispatch.paste(diagnostics: diagnostics) { postPaste(text, mode: restoreMode, diagnostics: diagnostics, willPost: willPost) }
+    }
+
+    private static func postPaste(_ text: String, mode: ClipboardRestoreMode, diagnostics: DiagnosticOperation?, willPost: () -> Void) -> Bool {
         guard !text.isEmpty, AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
               classifyFocus() != .secure else { return false }
         let src = CGEventSource(stateID: .privateState)
@@ -30,10 +44,9 @@ public enum Inserter {
         down.flags = .maskCommand
         up.flags = .maskCommand
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        let remote = ["com.microsoft.rdc.macos", "com.microsoft.windowsapp", "com.citrix.receiver.nomas",
-                      "com.vmware.horizon", "com.anydesk.AnyDesk", "com.teamviewer.TeamViewer"]
-            .contains(bundleID ?? "")
-        return clipboard.paste(text, restoreAfter: remote ? 5 : 0.8) {
+        let policy = clipboardPolicy(mode: mode, bundleID: bundleID)
+        return clipboard.paste(text, restoreAfter: policy.delay, mode: policy.mode, diagnostics: diagnostics) {
+            willPost()
             post(down); post(up)
         }
     }
@@ -63,7 +76,10 @@ public enum Inserter {
     /// ships 200 against Slack/Discord/VS Code, so the practical ceiling is far
     /// above 20. The 1ms sleep stays rather than going to zero — openless and
     /// OpenWhispr both document literal 0ms dropping characters in Chromium apps.
-    public static func typeUnicode(_ text: String) {
+    public static func typeUnicode(_ text: String, diagnostics: DiagnosticOperation? = nil) {
+        guard !text.isEmpty else { return }
+        var posted = false
+        defer { DiagnosticDispatch.eventsPosted(posted, diagnostics: diagnostics) }
         let src = CGEventSource(stateID: .combinedSessionState)
         for chunk in chunkUTF16(Array(text.utf16)) {
             if let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true),
@@ -77,6 +93,7 @@ public enum Inserter {
                 up.flags = []
                 post(down)
                 post(up)
+                posted = true
             }
             usleep(1_000)
         }
@@ -84,8 +101,10 @@ public enum Inserter {
 
     /// Post `n` Delete (backspace) keystrokes — used by live streaming to erase a
     /// diverging tail before retyping. Same event-posting style as typeUnicode.
-    public static func typeBackspaces(_ n: Int) {
+    public static func typeBackspaces(_ n: Int, diagnostics: DiagnosticOperation? = nil) {
         guard n > 0 else { return }
+        var posted = false
+        defer { DiagnosticDispatch.eventsPosted(posted, diagnostics: diagnostics) }
         let src = CGEventSource(stateID: .combinedSessionState)
         let delKey: CGKeyCode = 51 // kVK_Delete
         for _ in 0..<n {
@@ -95,6 +114,7 @@ public enum Inserter {
                 up.flags = []
                 post(down)
                 post(up)
+                posted = true
             }
             usleep(5_000)
         }
@@ -243,6 +263,11 @@ public enum Inserter {
             original.matches(Self.capture())
         }
 
+        /// Call only after the secure-focus probe, before querying selection.
+        public func isCurrentSelection() -> Bool {
+            original.matchesSelection(Self.capture())
+        }
+
         private static func capture() -> InsertionDestination<AXIdentity> {
             let app = NSWorkspace.shared.frontmostApplication
             let element = Inserter.focusedElement()
@@ -280,17 +305,31 @@ public enum Inserter {
         }
     }
 
-    private static func classifyFocus() -> FocusTarget {
+    /// Existing focus lookup/classifier, without paste's opaque fallback or AX
+    /// wake-up. Copy needs security evidence, not an editable field or its value.
+    /// Called only by the opted-in Original action/dispatch adapter; never prompts.
+    public static func securityFocusTarget() -> FocusTarget {
+        if IsSecureEventInputEnabled() { return .secure }
+        guard AXIsProcessTrusted() else { return .none }
+        return classifyFocus(securityOnly: true)
+    }
+
+    private static func classifyFocus(securityOnly: Bool = false) -> FocusTarget {
         guard let element = focusedElement() else { return .none }
         var roleRef: CFTypeRef?
-        let role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success
-            ? roleRef as? String : nil
+        let roleRead = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let role = roleRead == .success ? roleRef as? String : nil
         var subroleRef: CFTypeRef?
-        let subrole = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success
-            ? subroleRef as? String : nil
+        let subroleRead = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+        let subrole = subroleRead == .success ? subroleRef as? String : nil
         // Password field: standards report role AXTextField + subrole
         // AXSecureTextField; bail BEFORE editable heuristics, which also match.
         if role == "AXSecureTextField" || subrole == "AXSecureTextField" { return .secure }
+        if securityOnly {
+            guard let role, !role.isEmpty,
+                  (subroleRead == .success && subrole != nil) || subroleRead == .attributeUnsupported || subroleRead == .noValue else { return .none }
+            return .unknown // known nonsecure role; no value/range read or editability claim
+        }
         if let role, ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"].contains(role) {
             return .editable
         }

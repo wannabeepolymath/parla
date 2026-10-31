@@ -1,0 +1,215 @@
+{
+  "schema": 1,
+  "sdk_commit": "503b4bd1bbf7220882de39fe8ae6716aae4132da",
+  "model_repo": "FluidInference/parakeet-tdt-0.6b-v3-coreml",
+  "model_revision": "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe",
+  "precision_api": "int4",
+  "components": [
+    "Preprocessor.mlmodelc/",
+    "EncoderInt4.mlmodelc/",
+    "Decoder.mlmodelc/",
+    "JointDecisionv3.mlmodelc/"
+  ],
+  "runtime_files": [
+    {
+      "path": "Decoder.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "4238c4e81ecd0dc94bd7dfbb60f7e2cc824107c1ffe0387b8607b72833dba350",
+      "git_blob_sha1": "edd7f2bab7cba54194e30024ddc915e87267a566",
+      "payload_sha256": "4238c4e81ecd0dc94bd7dfbb60f7e2cc824107c1ffe0387b8607b72833dba350",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Decoder.mlmodelc/coremldata.bin",
+      "bytes": 554,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "18647af085d87bd8f3121c8a9b4d4564c1ede038dab63d295b4e745cf2d7fb99",
+      "git_blob_sha1": "4197eba04300de1a1f967a64bd98fcd93fa2de76",
+      "payload_sha256": "18647af085d87bd8f3121c8a9b4d4564c1ede038dab63d295b4e745cf2d7fb99",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Decoder.mlmodelc/metadata.json",
+      "bytes": 3427,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "781350d40ed83511afc3bc31a804e6a543e69d04",
+      "git_blob_sha1": "781350d40ed83511afc3bc31a804e6a543e69d04",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Decoder.mlmodelc/model.mil",
+      "bytes": 13110,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "95328ba81ca8dceb16c039e62f1a7d447ede43c2",
+      "git_blob_sha1": "95328ba81ca8dceb16c039e62f1a7d447ede43c2",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Decoder.mlmodelc/weights/weight.bin",
+      "bytes": 23604992,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "48adf0f0d47c406c8253d4f7fef967436a39da14f5a65e66d5a4b407be355d41",
+      "git_blob_sha1": "082a9f641c6a61223b00416c504d89e8b3b26463",
+      "payload_sha256": "48adf0f0d47c406c8253d4f7fef967436a39da14f5a65e66d5a4b407be355d41",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "EncoderInt4.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "c296e0229ab5e32412fda92f8dcf47f0e63f0c34e343c0e2654f6c37649d2d79",
+      "git_blob_sha1": "da8a5a4777e63d429517ad4ae9913d676449acfe",
+      "payload_sha256": "c296e0229ab5e32412fda92f8dcf47f0e63f0c34e343c0e2654f6c37649d2d79",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "EncoderInt4.mlmodelc/coremldata.bin",
+      "bytes": 512,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "3e6539cd5d5f1c3bd5a01921cd94af85eab609d49d47e1436a16faac958754d6",
+      "git_blob_sha1": "e62f05597439c0074f64424d0a06c41759abc758",
+      "payload_sha256": "3e6539cd5d5f1c3bd5a01921cd94af85eab609d49d47e1436a16faac958754d6",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "EncoderInt4.mlmodelc/metadata.json",
+      "bytes": 2954,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "3f3b994be82e93196572b4d7c2c054aefd48f1ad",
+      "git_blob_sha1": "3f3b994be82e93196572b4d7c2c054aefd48f1ad",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "EncoderInt4.mlmodelc/model.mil",
+      "bytes": 874445,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "bf620dded63605d789a724012251649b1a33f5a6",
+      "git_blob_sha1": "bf620dded63605d789a724012251649b1a33f5a6",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "EncoderInt4.mlmodelc/weights/weight.bin",
+      "bytes": 297912320,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "6fcf5596562948c7482e116bdb3f364279bed970893b86737b67fe89f36367d9",
+      "git_blob_sha1": "3f67cfeac36e12ac74fadd704ea5d1ef57dba869",
+      "payload_sha256": "6fcf5596562948c7482e116bdb3f364279bed970893b86737b67fe89f36367d9",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "JointDecisionv3.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "26def4bf73dd56d29dee21c8ef97cb8969e62f6120ed1adc91e46828e2737b6c",
+      "git_blob_sha1": "d7a1bac08799aa773df5ec191ad8fc393e507a35",
+      "payload_sha256": "26def4bf73dd56d29dee21c8ef97cb8969e62f6120ed1adc91e46828e2737b6c",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "JointDecisionv3.mlmodelc/coremldata.bin",
+      "bytes": 521,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "f5fc08b741400f0088492c9e839418b1e18522f19cba28d361dd030c5f398342",
+      "git_blob_sha1": "61f5e3200acbf214334d3855e6a97016d315aba7",
+      "payload_sha256": "f5fc08b741400f0088492c9e839418b1e18522f19cba28d361dd030c5f398342",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "JointDecisionv3.mlmodelc/metadata.json",
+      "bytes": 3453,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "0461ef9e55ba8e8ba0d2cb33b6e1a031b0d481d7",
+      "git_blob_sha1": "0461ef9e55ba8e8ba0d2cb33b6e1a031b0d481d7",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "JointDecisionv3.mlmodelc/model.mil",
+      "bytes": 11775,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "0a80fde4b1ec61093a03fc0fc3431172db34a4d2",
+      "git_blob_sha1": "0a80fde4b1ec61093a03fc0fc3431172db34a4d2",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "JointDecisionv3.mlmodelc/weights/weight.bin",
+      "bytes": 12642764,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "4e0e63d840032f7f07ddb1d64446051166281e5491bf22da8a945c41f6eedb3e",
+      "git_blob_sha1": "c1a3fa5de42a5ba65d48961f246a54760e859785",
+      "payload_sha256": "4e0e63d840032f7f07ddb1d64446051166281e5491bf22da8a945c41f6eedb3e",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Preprocessor.mlmodelc/analytics/coremldata.bin",
+      "bytes": 243,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "c9beeb989c8d66f8be11df59bc6df277ec76cee404f6865b46243835ef562f6d",
+      "git_blob_sha1": "cadf776b6eddc28eae76654cdff21b7c61efbd78",
+      "payload_sha256": "c9beeb989c8d66f8be11df59bc6df277ec76cee404f6865b46243835ef562f6d",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Preprocessor.mlmodelc/coremldata.bin",
+      "bytes": 486,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "dbde3f2300842c1fd51ef3ff948a0bcffe65ffd2dca10707f2509f32c1d65b1d",
+      "git_blob_sha1": "c86b363f1bbf6a4f38ec5757390b7ac17e99adda",
+      "payload_sha256": "dbde3f2300842c1fd51ef3ff948a0bcffe65ffd2dca10707f2509f32c1d65b1d",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Preprocessor.mlmodelc/metadata.json",
+      "bytes": 2841,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "06162c58cf2f5343a0e60f36f843bcdf3cc58527",
+      "git_blob_sha1": "06162c58cf2f5343a0e60f36f843bcdf3cc58527",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Preprocessor.mlmodelc/model.mil",
+      "bytes": 28181,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "f987e2479228436c49189aa47edb376db74dcff5",
+      "git_blob_sha1": "f987e2479228436c49189aa47edb376db74dcff5",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "Preprocessor.mlmodelc/weights/weight.bin",
+      "bytes": 491072,
+      "expected_hash_kind": "lfs-object-sha256",
+      "expected_hash": "129b76e3aeafa8afa3ea76d995b964b145fe83700d579f6ff42c4c38fa0968ea",
+      "git_blob_sha1": "47be051f50981bc166d0bcf6111cff47dd0db117",
+      "payload_sha256": "129b76e3aeafa8afa3ea76d995b964b145fe83700d579f6ff42c4c38fa0968ea",
+      "qualification": "remote metadata only; payload not fetched/verified"
+    },
+    {
+      "path": "parakeet_vocab.json",
+      "bytes": 151122,
+      "expected_hash_kind": "git-blob-sha1",
+      "expected_hash": "c684822ec3b671ebc449c433a7012398d39b8bb0",
+      "git_blob_sha1": "c684822ec3b671ebc449c433a7012398d39b8bb0",
+      "payload_sha256": null,
+      "qualification": "remote metadata only; payload not fetched/verified"
+    }
+  ],
+  "total_bytes": 335745501,
+  "file_count": 21,
+  "lfs_sha256_count": 12,
+  "metadata_manifest_sha256": "ce1b4b64fc5616121f3a888b0e760f17e912fa550fbfb0d8e5379b015b793b8f",
+  "digest_definition": "SHA256 of UTF-8 compact sorted-key JSON array runtime_files, sorted by path; hashes remote declarations, not model payloads",
+  "terms": "CoreML card frontmatter cc-by-4.0 conflicts with Apache-2.0 bottom prose; applicability unresolved",
+  "excluded_runtime_config": {
+    "rfilename": "config.json",
+    "blobId": "b6a1d442c414a219be5332e5b9a011631aff1515",
+    "size": 475
+  }
+}

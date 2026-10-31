@@ -15,6 +15,7 @@ public final class AudioRecorder {
         /// ObjC exception on one of those, which Swift cannot catch — so refuse
         /// first. Seen when a route change lands mid-build (FluidVoice #752).
         case noInputFormat
+        case captureBusy
     }
 
     /// Hard ceiling on one capture: 10 minutes at 16 kHz (~38 MB of Float).
@@ -26,7 +27,37 @@ public final class AudioRecorder {
     /// each rebuild provokes the next one. Only the last scheduled rebuild runs.
     static let rebuildDebounce: TimeInterval = 0.5
 
-    private var engine = AVAudioEngine()
+    private var engine: AVAudioEngine?
+    private let testEngine: MicrophoneCaptureEngine?
+    public let admission: CaptureAdmission
+    private var captureLease: CaptureAdmission.Lease?
+    private enum UnsavedPurpose: Equatable { case microphoneTest(UUID), guidedTemplate(session: UUID, capture: UUID) }
+    private var unsavedPurpose: UnsavedPurpose?
+    private var diagnosticID: UUID? {
+        get { if case .microphoneTest(let id) = unsavedPurpose { return id }; return nil }
+        set { unsavedPurpose = newValue.map(UnsavedPurpose.microphoneTest) }
+    }
+    private var guidedScope: (session: UUID, lease: CaptureAdmission.Lease)?
+    private let guidedDrain: (() -> Result<[Float], GuidedTemplateFailure>)?
+    public var onGuidedEnd: ((UUID, UUID, EndReason) -> Void)?
+    private var diagnosticRequestedUID: String?
+    private var warmthSuspended = false
+    private var captureOperationID: UUID?
+    private var captureStartedAt: TimeInterval = 0
+    private var postStartPCM = false
+    private var canceledCaptureDisrupted = false
+    private var captureFormat: AVAudioFormat?
+    private var transferring = false
+    private let captureClock: () -> TimeInterval
+    private var engineEpoch = UUID() // under lock, rejects old engine callbacks
+    private var localRoute = MicrophoneRoute()
+    private var latestLevel: Float = 0
+    private var hasSignal = false
+    private var sampleCeiling = AudioRecorder.maxSamples
+    private var cancelRebuild: (() -> Void)?
+    private let scheduleRoute: CaptureDiagnosticCoordinator.Schedule
+    private let conversion: ((AVAudioPCMBuffer) -> [Float]?)?
+    private var engineRunning: Bool { testEngine?.isRunning ?? engine?.isRunning ?? false }
     private var samples: [Float] = []
     private var failedBuffers = 0
     private var ended: EndReason?
@@ -39,6 +70,11 @@ public final class AudioRecorder {
     private var preRoll = PreRollRing()
     /// When the tap last delivered a buffer, live or pre-roll. Under `lock`.
     private var lastFeed: TimeInterval?
+    private var captureDiagnostics: CaptureDiagnosticState?
+
+    public func diagnosticSnapshot(for operationID: UUID) -> CaptureDiagnosticState? {
+        lock.withLock { captureDiagnostics?.operationID == operationID ? captureDiagnostics : nil }
+    }
 
     /// Engine-side state. Only ever touched on the main thread: prepare/start/
     /// stop are called from the hotkey handler and the notification observer is
@@ -71,7 +107,19 @@ public final class AudioRecorder {
     /// ⇒ system default input. Applied at each start() while the engine is idle.
     public var inputDeviceUID: String?
 
-    public init() {}
+    public init(engine: MicrophoneCaptureEngine? = nil, admission: CaptureAdmission = CaptureAdmission(),
+                conversion: ((AVAudioPCMBuffer) -> [Float]?)? = nil,
+                guidedDrain: (() -> Result<[Float], GuidedTemplateFailure>)? = nil,
+                captureClock: @escaping () -> TimeInterval = { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000 },
+                scheduleRoute: @escaping CaptureDiagnosticCoordinator.Schedule = { delay, action in
+                    let work = DispatchWorkItem(block: action)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+                    return { work.cancel() }
+                }) {
+        self.guidedDrain = guidedDrain
+        self.captureClock = captureClock
+        self.testEngine = engine; self.admission = admission; self.conversion = conversion; self.scheduleRoute = scheduleRoute
+    }
 
     // MARK: - Input device selection (macOS Core Audio HAL)
 
@@ -256,7 +304,9 @@ public final class AudioRecorder {
         guard ended == nil else { lock.unlock(); return }
         ended = reason
         lock.unlock()
-        onEnd?(reason)
+        let purpose = lock.withLock { unsavedPurpose }
+        if case .guidedTemplate(let session, let capture) = purpose { onGuidedEnd?(session, capture, reason) }
+        else if purpose == nil { onEnd?(reason) }
     }
 
     /// Tap-side accumulate. nil chunk = the converter dropped that buffer.
@@ -265,8 +315,16 @@ public final class AudioRecorder {
     func append(_ chunk: [Float]?) {
         lock.lock()
         guard ended == nil else { lock.unlock(); return }
-        if let chunk { samples.append(contentsOf: chunk) } else { failedBuffers += 1 }
-        let hitCap = samples.count >= AudioRecorder.maxSamples
+        if let chunk {
+            if unsavedPurpose != nil {
+                let rms = Self.rms(chunk)
+                if rms.isFinite {
+                    samples.append(contentsOf: chunk.prefix(max(0, sampleCeiling - samples.count)))
+                    latestLevel = rms; hasSignal = hasSignal || rms > 0.0001
+                } else { failedBuffers += 1; latestLevel = 0 }
+            } else { samples.append(contentsOf: chunk) }
+        } else { failedBuffers += 1 }
+        let hitCap = samples.count >= sampleCeiling
         lock.unlock()
         if hitCap { endCapture(.sampleLimit) }
     }
@@ -295,6 +353,7 @@ public final class AudioRecorder {
     /// shouldTeardown finalizes normally and its trailing warmUp() is a no-op.
     public func setWarm(_ on: Bool) {
         warm = on
+        guard unsavedPurpose == nil, guidedScope == nil, !warmthSuspended else { return }
         guard !on else { return warmUp() }
         lock.lock()
         let live = capturing
@@ -305,16 +364,16 @@ public final class AudioRecorder {
     /// Idempotent build of the warm engine, subject to the permission and
     /// Bluetooth gates.
     private func warmUp() {
-        guard warm, !engine.isRunning else { return }
+        guard warm, !warmthSuspended, unsavedPurpose == nil, guidedScope == nil, !engineRunning else { return }
         // An input unit started before TCC grants the mic runs happily and
         // delivers zeros; the later grant never reaches a unit that is already
         // going. Without this, a fresh install would latch a permanently silent
         // warm engine at launch and every dictation until relaunch would hear
         // nothing. start()'s cold path is unaffected, and the stop() after the
         // first dictation re-warms for real.
-        guard AudioRecorder.micAuthorized() else { return }
-        let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
-        guard !AudioRecorder.isBluetooth(device) else { return }
+        guard testEngine != nil || AudioRecorder.micAuthorized() else { return }
+        let device = testEngine == nil ? inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:)) : nil
+        guard testEngine != nil || !AudioRecorder.isBluetooth(device) else { return }
         // A warm engine is a nicety; failing to get one just means the next
         // start() pays the cold open it always used to.
         try? build(device: device)
@@ -366,7 +425,16 @@ public final class AudioRecorder {
     }
 
     private func build(device: AudioDeviceID?) throws {
-        engine = AVAudioEngine() // fresh: a reused engine caches the old device's format
+        let epoch = UUID()
+        lock.withLock { engineEpoch = epoch; lastFeed = nil }
+        if let testEngine {
+            try testEngine.start(requestedUID: unsavedPurpose == nil ? inputDeviceUID : diagnosticRequestedUID, receive: { [weak self] buffer in
+                self?.receive(buffer, epoch: epoch)
+            }, changed: { [weak self] in self?.configurationChanged(epoch: epoch) })
+            updateDiagnosticRoute(); return
+        }
+        let engine = AVAudioEngine() // fresh: a reused engine caches the old device's format
+        self.engine = engine
         let input = engine.inputNode
         // Point the AUHAL input unit at the chosen device before reading its
         // format. An unresolvable UID leaves the unit on the system default.
@@ -382,15 +450,7 @@ public final class AudioRecorder {
         resamplerLock.lock(); resampler.reset(); resamplerLock.unlock()
         lock.lock(); lastFeed = nil; lock.unlock() // this engine has not fed anything yet
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in
-            guard let self else { return }
-            self.resamplerLock.lock()
-            let chunk = self.resampler.convert(buf, to: AudioRecorder.targetFormat)
-            self.resamplerLock.unlock()
-            guard self.route(chunk) else { return }
-            // Stamped only for live chunks: a warm tap is already running when
-            // fn goes down, so stamping pre-roll would report ~0 ms every time.
-            Trace.mark(.firstPCM) // disabled: one bool test, no alloc, no lock
-            self.onLevel?(chunk.map(AudioRecorder.rms) ?? 0)
+            self?.receive(buf, epoch: epoch)
         }
         // Read *before* the start that may raise the TCC prompt: whatever the
         // user answers afterwards cannot reach a unit that is already running.
@@ -405,24 +465,96 @@ public final class AudioRecorder {
         }
         boundDevice = device
         builtAuthorized = authorized
+        updateDiagnosticRoute()
         observeConfigChanges()
+    }
+
+    /// Read the bound input AU, not the requested UID/default device. No labels
+    /// or identifiers leave this method; HAL failure means unknown.
+    private func updateDiagnosticRoute() {
+        if let testEngine {
+            lock.withLock { localRoute = testEngine.route }
+            return
+        }
+        var device = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var route = DiagnosticRoute.unknown
+        var evidence = DiagnosticRouteEvidence.unknown
+        if let unit = engine?.inputNode.audioUnit,
+           AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, &size) == noErr,
+           device != kAudioObjectUnknown, let transport = AudioRecorder.transportRaw(of: device) {
+            evidence = .inputAudioUnit
+            switch transport {
+            case kAudioDeviceTransportTypeBuiltIn: route = .builtIn
+            case kAudioDeviceTransportTypeUSB: route = .usb
+            case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE: route = .bluetooth
+            case kAudioDeviceTransportTypeVirtual: route = .virtual
+            case kAudioDeviceTransportTypeAggregate: route = .aggregate
+            case kAudioDeviceTransportTypeUnknown: route = .unknown
+            default: route = .other
+            }
+        }
+        let actualUID = device == kAudioObjectUnknown ? nil : Self.stringProperty(device, kAudioDevicePropertyDeviceUID)
+        let name = device == kAudioObjectUnknown ? nil : Self.stringProperty(device, kAudioObjectPropertyName)
+        let requestedUID = unsavedPurpose == nil ? inputDeviceUID : diagnosticRequestedUID
+        lock.withLock {
+            localRoute = MicrophoneRoute(name: name, fallback: actualUID.map { requestedUID != nil && requestedUID != $0 })
+            if capturing { captureDiagnostics?.route = route; captureDiagnostics?.routeEvidence = evidence }
+        }
+    }
+
+    private func receive(_ buffer: AVAudioPCMBuffer, epoch: UUID) {
+        let receivedAt = Self.nowSeconds()
+        resamplerLock.lock()
+        guard lock.withLock({ engineEpoch == epoch }) else { resamplerLock.unlock(); return }
+        lock.withLock {
+            if capturing {
+                if let captureFormat, captureFormat != buffer.format { canceledCaptureDisrupted = true }
+                captureFormat = buffer.format
+            }
+        }
+        let chunk: [Float]?
+        if let conversion { chunk = conversion(buffer) }
+        else { chunk = resampler.convert(buffer, to: Self.targetFormat) }
+        if lock.withLock({ if case .guidedTemplate = unsavedPurpose { return captureClock() - captureStartedAt >= 30 || captureClock() < captureStartedAt }; return false }) {
+            endCapture(.sampleLimit)
+        }
+        let live = route(chunk, hasPCM: buffer.frameLength > 0, receivedAt: receivedAt)
+        let diagnostic = lock.withLock { unsavedPurpose != nil }
+        resamplerLock.unlock()
+        if live, !diagnostic {
+            Trace.mark(.firstPCM)
+            onLevel?(chunk.map(Self.rms) ?? 0)
+        }
     }
 
     /// Tap-side fan-out. Returns true when the chunk joined the dictation, false
     /// when it went to the pre-roll ring (warm engine, no capture in flight).
-    private func route(_ chunk: [Float]?) -> Bool {
+    private func route(_ chunk: [Float]?, hasPCM: Bool, receivedAt: TimeInterval) -> Bool {
         let now = AudioRecorder.nowSeconds()
         lock.lock()
         let live = capturing
         lastFeed = now
-        if !live, let chunk { preRoll.write(chunk, now: now) }
+        if live, hasPCM, receivedAt >= captureStartedAt, let chunk, !chunk.isEmpty { postStartPCM = true }
+        if live { captureDiagnostics?.input(hasPCM: hasPCM, conversionFailed: chunk == nil, now: receivedAt) }
+        if !live, unsavedPurpose == nil, guidedScope == nil, let chunk { preRoll.write(chunk, now: now) }
         lock.unlock()
         guard live else { return false }
         append(chunk)
         return true
     }
 
+    private func configurationChanged(epoch: UUID) {
+        guard lock.withLock({ engineEpoch == epoch }) else { return }
+        lock.withLock { if capturing { canceledCaptureDisrupted = true } }
+        if lock.withLock({ if case .guidedTemplate = unsavedPurpose { return true }; return false }) {
+            endCapture(.deviceLost); return
+        }
+        scheduleRebuild()
+    }
+
     private func observeConfigChanges() {
+        let epoch = lock.withLock { engineEpoch }
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
@@ -430,7 +562,7 @@ public final class AudioRecorder {
             // The route moved (device swapped, AirPods connected, rate changed)
             // and the engine has stopped itself. Idle or mid-dictation, the
             // answer is a rebuild once the burst ends — see scheduleRebuild.
-            self?.scheduleRebuild()
+            self?.configurationChanged(epoch: epoch)
         }
     }
 
@@ -440,16 +572,22 @@ public final class AudioRecorder {
     private func scheduleRebuild() {
         rebuildGeneration &+= 1
         let generation = rebuildGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + AudioRecorder.rebuildDebounce) { [weak self] in
+        cancelRebuild?()
+        cancelRebuild = scheduleRoute(AudioRecorder.rebuildDebounce) { [weak self] in
             guard let self, self.rebuildGeneration == generation else { return }
             self.lock.lock()
             let live = self.capturing
             let fed = AudioRecorder.recentlyFed(lastFeed: self.lastFeed, now: AudioRecorder.nowSeconds())
             self.lock.unlock()
-            switch AudioRecorder.rebuildAction(live: live, engineRunning: self.engine.isRunning && fed,
+            if self.unsavedPurpose != nil {
+                self.updateDiagnosticRoute()
+                if !self.engineRunning || !fed { self.endCapture(.deviceLost) }
+                return // diagnostic capture never rebuilds/warms behind its owner
+            }
+            switch AudioRecorder.rebuildAction(live: live, engineRunning: self.engineRunning && fed,
                                                resumes: self.resumes) {
             case .none:
-                break
+                self.updateDiagnosticRoute()
             case .endCapture:
                 NSLog("Parla recorder: route would not settle, ending the capture")
                 self.endCapture(.deviceLost)
@@ -481,8 +619,18 @@ public final class AudioRecorder {
     /// own: the AUHAL unit stays bound, which keeps a headset in the 16 kHz HFP
     /// profile, so the unit is explicitly pointed at kAudioObjectUnknown.
     private func teardown() {
+        rebuildGeneration &+= 1
+        cancelRebuild?(); cancelRebuild = nil
+        // Serialize invalidation with the converter; a queued tap cannot feed a new run.
+        resamplerLock.withLock { lock.withLock { engineEpoch = UUID() } }
+        if let testEngine {
+            testEngine.stop()
+            lock.withLock { preRoll.discard() }
+            return
+        }
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = nil
+        guard let engine else { lock.withLock { preRoll.discard() }; return }
         let input = engine.inputNode
         input.removeTap(onBus: 0)
         engine.stop()
@@ -492,6 +640,7 @@ public final class AudioRecorder {
                                  kAudioUnitScope_Global, 0, &unknown,
                                  UInt32(MemoryLayout<AudioDeviceID>.size))
         }
+        self.engine = nil
         boundDevice = nil
         builtAuthorized = false // describes the built engine, and there is none now
         lock.lock(); preRoll.reset(); lock.unlock()
@@ -499,8 +648,20 @@ public final class AudioRecorder {
 
     // MARK: - Capture
 
-    public func start() throws {
-        let device = inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:))
+    public func start(diagnosticOperation: UUID? = nil) throws {
+        guard unsavedPurpose == nil, guidedScope == nil, !transferring else { throw RecorderError.captureBusy }
+        // A new ordinary press deliberately replaces the current ordinary capture.
+        // Auxiliary owners must release their own lease before dictation can enter.
+        guard let lease = captureLease ?? admission.acquire(.dictation), admission.owns(lease) else { throw RecorderError.captureBusy }
+        captureLease = lease
+        warmthSuspended = false
+        sampleCeiling = Self.maxSamples
+        do { try startCapture(diagnosticOperation: diagnosticOperation) }
+        catch { teardown(); admission.release(lease); captureLease = nil; throw error }
+    }
+
+    private func startCapture(diagnosticOperation: UUID? = nil) throws {
+        let device = testEngine == nil ? inputDeviceUID.flatMap(AudioRecorder.deviceID(forUID:)) : nil
         // Behind the trace gate so a normal start pays no extra HAL queries.
         if Trace.enabled { Trace.setTransport(AudioRecorder.transport(of: device)) }
         // A warm engine bound to some other mic is worse than no warm engine — and
@@ -511,13 +672,16 @@ public final class AudioRecorder {
         lock.lock()
         let wedged = preRoll.isStale(now: AudioRecorder.nowSeconds())
         lock.unlock()
-        if engine.isRunning && (boundDevice != device || wedged) { teardown() }
+        if engineRunning && (boundDevice != device || wedged) { teardown() }
 
         // The ring is claimed before `capturing` flips so the splice has no gap
         // and no overlap: every chunk lands on exactly one side of it.
-        let mediaPlaying = engine.isRunning ? AudioRecorder.mediaPlaying() : false
+        let mediaPlaying = testEngine == nil && engineRunning ? AudioRecorder.mediaPlaying() : false
         lock.lock()
         let preRolled = preRoll.take(now: AudioRecorder.nowSeconds(), mediaPlaying: mediaPlaying)
+        captureOperationID = diagnosticOperation; captureStartedAt = captureClock(); postStartPCM = false
+        canceledCaptureDisrupted = false; captureFormat = nil
+        captureDiagnostics = diagnosticOperation.map { CaptureDiagnosticState(operationID: $0, started: AudioRecorder.nowSeconds()) }
         samples = preRolled
         failedBuffers = 0
         ended = nil
@@ -525,7 +689,7 @@ public final class AudioRecorder {
         lock.unlock()
         resumes = 0
 
-        if !engine.isRunning {
+        if !engineRunning {
             // Cold path — what every press used to pay. Also the Bluetooth path:
             // the gate refuses to *hold* a headset open, not to record from one.
             do { try build(device: device) } catch {
@@ -533,6 +697,7 @@ public final class AudioRecorder {
                 throw error
             }
         }
+        updateDiagnosticRoute()
         Trace.mark(.recorderStartReturned)
     }
 
@@ -541,10 +706,182 @@ public final class AudioRecorder {
     public func snapshot() -> [Float] {
         lock.lock()
         defer { lock.unlock() }
-        return samples
+        // Guided PCM is available only through its exact owned capture API.
+        if case .guidedTemplate = unsavedPurpose { return [] }
+        return guidedScope == nil ? samples : []
+    }
+
+    /// Copy under the recorder lock; a stale capture cannot sample its successor.
+    /// Array(slice) owns just the suffix, rather than retaining the full recording.
+    public func previewSuffix(operationID: UUID) -> RecognitionPreviewSuffix? {
+        lock.withLock {
+            guard unsavedPurpose == nil, guidedScope == nil, capturing, captureOperationID == operationID else { return nil }
+            return RecognitionPreviewSuffix(copying: samples)
+        }
+    }
+
+
+    /// Exact whole-session ownership suspends warmth even when no take exists.
+    public func reserveGuidedTemplate(session: UUID, lease: CaptureAdmission.Lease) throws {
+        guard lease.owner == .guidedTemplate, admission.owns(lease), guidedScope == nil,
+              unsavedPurpose == nil, captureLease == nil, !lock.withLock({ capturing }) else { throw RecorderError.captureBusy }
+        guidedScope = (session, lease); warmthSuspended = true
+        teardown(); resamplerLock.withLock { resampler.discard() }
+        lock.withLock { samples = []; preRoll.discard() }
+    }
+    private func ownsGuided(_ session: UUID, _ lease: CaptureAdmission.Lease) -> Bool {
+        guidedScope?.session == session && guidedScope?.lease == lease && lease.owner == .guidedTemplate && admission.owns(lease)
+    }
+    public func startGuidedTemplate(session: UUID, capture: UUID, lease: CaptureAdmission.Lease, inputUID: String?) throws {
+        guard ownsGuided(session, lease), unsavedPurpose == nil else { throw RecorderError.captureBusy }
+        teardown(); resamplerLock.withLock { resampler.discard() }
+        lock.withLock {
+            unsavedPurpose = .guidedTemplate(session: session, capture: capture)
+            diagnosticRequestedUID = inputUID; localRoute = MicrophoneRoute()
+            samples = []; preRoll.discard(); sampleCeiling = 480_000
+            captureStartedAt = captureClock(); captureFormat = nil; canceledCaptureDisrupted = false
+            postStartPCM = false; failedBuffers = 0; ended = nil; latestLevel = 0; hasSignal = false; capturing = true
+        }
+        do { try build(device: testEngine == nil ? inputUID.flatMap(Self.deviceID(forUID:)) : nil) }
+        catch { clearGuidedTemplate(session: session, capture: capture, lease: lease); throw error }
+    }
+    public func stopGuidedTemplate(session: UUID, capture: UUID, lease: CaptureAdmission.Lease) -> GuidedCaptureResult? {
+        guard ownsGuided(session, lease), unsavedPurpose == .guidedTemplate(session: session, capture: capture) else { return nil }
+        teardown() // joins in-flight conversion and invalidates old tap epochs
+        return resamplerLock.withLock {
+            defer { resampler.discard() }
+            let drain = guidedDrain?() ?? resampler.flushResult()
+            return lock.withLock {
+                capturing = false
+                var complete = ended == nil && failedBuffers == 0 && !canceledCaptureDisrupted
+                let elapsed = captureClock() - captureStartedAt
+                complete = complete && elapsed >= 0 && elapsed < 30
+                switch drain {
+                case .failure: complete = false
+                case .success(let tail):
+                    if !tail.allSatisfy(\.isFinite) || tail.count > sampleCeiling - samples.count { complete = false }
+                    samples.append(contentsOf: tail.prefix(max(0, sampleCeiling - samples.count)))
+                }
+                complete = complete && samples.count < sampleCeiling && samples.allSatisfy(\.isFinite)
+                let output = GuidedCaptureResult(samples: complete ? samples : [], route: localRoute, complete: complete)
+                samples = []; preRoll.discard(); unsavedPurpose = nil; captureFormat = nil; diagnosticRequestedUID = nil
+                latestLevel = 0; hasSignal = false; postStartPCM = false
+                return output
+            }
+        }
+    }
+    public func clearGuidedTemplate(session: UUID, capture: UUID, lease: CaptureAdmission.Lease) {
+        _ = stopGuidedTemplate(session: session, capture: capture, lease: lease)
+    }
+    public func releaseGuidedTemplate(session: UUID, lease: CaptureAdmission.Lease) {
+        guard ownsGuided(session, lease), unsavedPurpose == nil else { return }
+        guidedScope = nil // warmth remains suspended until an existing explicit entry
+    }
+
+    public static let microphoneTestMaxSamples = 160_000
+
+    /// Explicit entry only. Closing a test never silently reopens the input.
+    public func resumeWarmthOnExplicitEntry() {
+        guard unsavedPurpose == nil, guidedScope == nil else { return }
+        warmthSuspended = false; warmUp()
+    }
+
+    public func startMicrophoneTest(operation: UUID, lease: CaptureAdmission.Lease) throws {
+        guard admission.owns(lease), lease.owner == .microphoneTest, unsavedPurpose == nil, guidedScope == nil,
+              captureLease == nil else { throw RecorderError.captureBusy }
+        warmthSuspended = true
+        teardown() // also closes an already-warm normal engine and drops its pre-roll
+        resamplerLock.withLock { resampler.discard() }
+        lock.withLock {
+            diagnosticID = operation; diagnosticRequestedUID = inputDeviceUID; localRoute = MicrophoneRoute()
+            samples = []; samples.reserveCapacity(Self.microphoneTestMaxSamples)
+            sampleCeiling = Self.microphoneTestMaxSamples
+            latestLevel = 0; hasSignal = false; failedBuffers = 0; ended = nil
+            captureDiagnostics = CaptureDiagnosticState(operationID: operation, started: Self.nowSeconds())
+            capturing = true
+        }
+        do { try build(device: testEngine == nil ? inputDeviceUID.flatMap(Self.deviceID(forUID:)) : nil) }
+        catch { clearMicrophoneTest(operation: operation); throw error }
+    }
+
+    public func microphoneTestSnapshot(operation: UUID) -> MicrophoneCaptureSnapshot? {
+        // Route queries belong on the control thread, never in the tap.
+        if diagnosticID == operation, engineRunning { updateDiagnosticRoute() }
+        return lock.withLock {
+            guard diagnosticID == operation else { return nil }
+            return MicrophoneCaptureSnapshot(facts: captureDiagnostics, route: localRoute,
+                sampleCount: samples.count, level: latestLevel, hasSignal: hasSignal,
+                conversionFailures: failedBuffers, ended: ended)
+        }
+    }
+
+    public func stopMicrophoneTest(operation: UUID) -> [Float] {
+        guard diagnosticID == operation, lock.withLock({ capturing }) else { return [] }
+        teardown() // stop first; invalidate taps and pending route work before flushing
+        let tail = resamplerLock.withLock { () -> [Float] in
+            defer { resampler.discard() }
+            return resampler.flush()
+        }
+        return lock.withLock {
+            capturing = false
+            samples.append(contentsOf: tail.prefix(max(0, sampleCeiling - samples.count)))
+            let result = samples
+            samples = [] // transfer sole logical ownership to controller, no recorder alias
+            preRoll.discard()
+            captureDiagnostics?.stop(sampleCount: result.count, rms: Self.rms(result), deviceLost: ended == .deviceLost)
+            latestLevel = 0
+            return result
+        }
+    }
+
+    public func clearMicrophoneTest(operation: UUID) {
+        guard diagnosticID == operation else { return }
+        _ = stopMicrophoneTest(operation: operation)
+        resamplerLock.withLock { resampler.discard() }
+        lock.withLock {
+            samples = []; preRoll.discard(); captureDiagnostics = nil
+            diagnosticID = nil; diagnosticRequestedUID = nil; localRoute = MicrophoneRoute(); latestLevel = 0; hasSignal = false
+        }
+    }
+
+    /// Scalar storage inspection for disposal fixtures; no sample data leaves this view.
+    public var retainedAudioCounts: (samples: Int, preRoll: Int, converter: Bool) {
+        resamplerLock.withLock { lock.withLock { (samples.count, preRoll.count, resampler.hasStorage) } }
+    }
+
+    /// Dictation-only owned disposal. No warm-up; stale owners cannot stop a new capture.
+    /// Teardown invalidates tap/rebuild epochs before drain. Both locks always nest
+    /// resampler → samples. Scalar canceled diagnostics survive the move.
+    public func stopCanceledCapture(operationID: UUID, retain: Bool) -> [Float]? {
+        guard !transferring, unsavedPurpose == nil, guidedScope == nil, captureOperationID == operationID,
+              let lease = captureLease, lease.owner == .dictation, admission.owns(lease) else { return nil }
+        transferring = true
+        defer { transferring = false }
+        warmthSuspended = true
+        teardown()
+        let result = resamplerLock.withLock { () -> [Float]? in
+            defer { resampler.discard() }
+            let tail = resampler.flush()
+            return lock.withLock {
+                capturing = false
+                samples.append(contentsOf: tail)
+                let elapsed = captureClock() - captureStartedAt
+                let accepted = retain && ended == nil && resumes == 0 && !canceledCaptureDisrupted
+                    && CanceledCaptureLimits.accepts(samples, elapsed: elapsed, postStartPCM: postStartPCM)
+                captureDiagnostics?.stop(sampleCount: samples.count, rms: Self.rms(samples), deviceLost: ended == .deviceLost)
+                let moved = accepted ? samples : nil
+                samples = []; preRoll.discard(); postStartPCM = false; captureOperationID = nil; captureFormat = nil
+                latestLevel = 0; hasSignal = false
+                return moved
+            }
+        }
+        if captureLease == lease { captureLease = nil; admission.release(lease) }
+        return result
     }
 
     public func stop() -> [Float] {
+        guard unsavedPurpose == nil, guidedScope == nil else { return [] } // only diagnostic owner may close it
+        defer { if let captureLease { admission.release(captureLease) }; captureLease = nil }
         lock.lock()
         capturing = false
         lock.unlock()
@@ -557,11 +894,15 @@ public final class AudioRecorder {
         lock.lock()
         samples.append(contentsOf: tail)
         let captured = samples
+        captureFormat = nil
         let failures = failedBuffers
+        let diagnosticEnd = ended
         // Whatever the tap wrote while stop() ran is this dictation's own tail,
         // already transcribed — never prepend it to the next one.
         preRoll.reset()
         lock.unlock()
+        let rms = AudioRecorder.rms(captured)
+        lock.withLock { captureDiagnostics?.stop(sampleCount: captured.count, rms: rms, deviceLost: diagnosticEnd == .deviceLost) }
         // The production reader of the failure count, which is the whole reason
         // it is kept: "Parla heard nothing" otherwise logs identically whether the
         // mic was silent or every tap buffer failed to convert.
@@ -572,7 +913,7 @@ public final class AudioRecorder {
         // A cold-path start may have bound a headset (the gate only allows
         // *holding* a non-Bluetooth device) or a mic that was not yet granted.
         if AudioRecorder.shouldTeardown(warm: warm, builtAuthorized: builtAuthorized,
-                                        bluetooth: AudioRecorder.isBluetooth(boundDevice),
+                                        bluetooth: testEngine == nil && AudioRecorder.isBluetooth(boundDevice),
                                         capturedNothing: captured.isEmpty) {
             teardown()
         }
@@ -624,6 +965,9 @@ struct PreRollRing {
         guard let lastWrite else { return false }
         return now - lastWrite > Self.maxAge
     }
+
+    var count: Int { samples.count }
+    mutating func discard() { samples = []; lastWrite = nil }
 
     mutating func reset() {
         samples.removeAll(keepingCapacity: true)
@@ -681,17 +1025,19 @@ final class Resampler {
     }
 
     /// Frames still inside the resampler. Call once, after the last buffer.
-    func flush() -> [Float] {
-        guard let converter, let out else { return [] }
+    func flush() -> [Float] { (try? flushResult().get()) ?? [] }
+    func flushResult() -> Result<[Float], GuidedTemplateFailure> {
+        guard let converter, let out else { return .success([]) }
         let outcome = converter.convert(to: out, error: nil) { _, status in
             status.pointee = .endOfStream
             return nil
         }
-        guard outcome != .error else { return [] }
-        return Array(UnsafeBufferPointer(start: out.floatChannelData![0],
-                                         count: Int(out.frameLength)))
+        guard outcome != .error else { return .failure(GuidedTemplateFailure("Converter drain failed.")) }
+        return .success(Array(UnsafeBufferPointer(start: out.floatChannelData![0], count: Int(out.frameLength))))
     }
 
     /// Ready the converter for a new stream after a flush, without discarding it.
     func reset() { converter?.reset() }
+    var hasStorage: Bool { converter != nil || out != nil }
+    func discard() { converter = nil; inputFormat = nil; out = nil }
 }

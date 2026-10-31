@@ -278,14 +278,15 @@ final class CleanupTests: XCTestCase {
     }
 
     // …and it switches itself on, unchanged, once the prompt clears the bar —
-    // here via a large dictionary, not by editing the base prompt.
+    // here via a bounded dictionary and a model with a lower cache threshold.
     func testOverThresholdPromptCachesTheSystemBlock() async throws {
         let http = MockHTTP()
         http.body = Data(#"{"content":[{"type":"text","text":"Hi."}]}"#.utf8)
         let big = CleanupContext(dictionary: (0..<2000).map { "Kubernetes\($0)" },
                                  snippets: ["calendar link": "https://cal.com/x"],
                                  appName: "Slack", bundleID: "com.tinyspeck.slackmacgap")
-        let client = CleanupClient(apiKey: "k", model: "claude-haiku-4-5", http: http)
+        XCTAssertLessThanOrEqual(big.dictionary.joined(separator: ", ").utf8.count, VocabularyHints.cleanupBytes)
+        let client = CleanupClient(apiKey: "k", model: "claude-sonnet-5", http: http)
         _ = try await client.clean(transcript: "um hi", context: big)
 
         let json = try JSONSerialization.jsonObject(with: http.lastRequest!.httpBody!) as! [String: Any]

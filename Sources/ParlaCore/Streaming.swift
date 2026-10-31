@@ -9,9 +9,17 @@ import Foundation
 /// (and cleared) by the finish() queued right after it on the processTask chain
 /// — the chain is the synchronization; nothing else may touch it.
 public struct StreamWindow {
+    public struct Ownership: Equatable, Sendable {
+        public let instance: UUID
+        public let identity: RecognitionIdentity?
+        public let capture: UUID
+        public let request: RecognitionRequest
+    }
+    public let ownership: Ownership?
     public var confirmedText: String
     public var cutSample: Int
-    public init(confirmedText: String, cutSample: Int) {
+    public init(confirmedText: String, cutSample: Int, ownership: Ownership? = nil) {
+        self.ownership = ownership
         self.confirmedText = confirmedText
         self.cutSample = cutSample
     }
@@ -43,12 +51,22 @@ public struct StreamWindow {
         return best + window / 2
     }
 
+    public static let confirmedContextBytes = 800
+
     /// initial_prompt for a tail pass: dictionary terms plus the tail of the
     /// confirmed transcript (whisper reads initial_prompt as prior context).
     public static func tailPrompt(dictionary: [String], confirmed: String,
                                   maxContext: Int = 200) -> String? {
-        let dict = dictionary.isEmpty ? nil : dictionary.joined(separator: ", ")
-        let ctx = confirmed.isEmpty ? nil : String(confirmed.suffix(maxContext))
+        let dict = VocabularyHints.asrPrompt(dictionary)
+        var tail = ""
+        var bytes = 0
+        for character in confirmed.suffix(max(0, maxContext)).reversed() {
+            let size = String(character).utf8.count
+            guard bytes + size <= confirmedContextBytes else { break }
+            tail.insert(character, at: tail.startIndex)
+            bytes += size
+        }
+        let ctx = tail.isEmpty ? nil : tail
         let parts = [dict, ctx].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }

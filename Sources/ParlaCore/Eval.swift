@@ -6,6 +6,141 @@ public enum Eval {
         s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
+    /// Case/punctuation-sensitive text with horizontal whitespace folded per
+    /// line. Line endings and outer whitespace vary freely; internal newlines,
+    /// including blank lines, remain significant. Existing normalize/WER stay
+    /// deliberately insensitive to all whitespace.
+    public static func normalizeStructure(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: .newlines)
+            .map(normalize).joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Newline positions in whitespace-delimited word offsets. Repeated offsets
+    /// encode blank lines. This measures layout independently of spelling and
+    /// punctuation, not semantic equivalence (same-length substitutions remain
+    /// the job of content checks). Horizontal spacing/indentation is ignored.
+    public static func newlineLayout(_ text: String) -> [Int] {
+        let lines = normalizeStructure(text).components(separatedBy: "\n")
+        var words = 0
+        return lines.dropLast().map { line in
+            words += line.split(whereSeparator: \.isWhitespace).count
+            return words
+        }
+    }
+
+    // MARK: - Explicit offline cleanup-output policy
+
+    public struct QualityPolicy {
+        public let version: Int
+        public let cases: [QualityRule]
+    }
+
+    private struct QualityDocument: Decodable {
+        let version: Int
+        let cases: [QualityRule]
+    }
+
+    public struct QualityRule: Decodable {
+        public let name: String
+        public let protected: [String]
+        public let alternatives: [String]
+    }
+
+    /// Also decodes real parla-eval results; references/scores supplied by a run
+    /// are intentionally ignored. Only the reviewed golden is authoritative.
+    private struct QualityOutput: Decodable {
+        let name: String
+        let leg: String
+        let hypothesis: String
+    }
+
+    public enum QualityError: LocalizedError {
+        case invalid(String)
+        public var errorDescription: String? {
+            switch self { case .invalid(let message): return message }
+        }
+    }
+
+    /// A small, strict schema: reject unknown fields as well as missing fields,
+    /// so a misspelled or unsupported constraint cannot disappear in decoding.
+    public static func qualityPolicy(from data: Data) throws -> QualityPolicy {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["version", "cases"],
+              let rules = object["cases"] as? [[String: Any]],
+              rules.allSatisfy({ Set($0.keys) == ["name", "protected", "alternatives"] }) else {
+            throw QualityError.invalid("policy requires version/cases and name/protected/alternatives per case")
+        }
+        let document = try JSONDecoder().decode(QualityDocument.self, from: data)
+        let policy = QualityPolicy(version: document.version, cases: document.cases)
+        guard policy.version == 1, !policy.cases.isEmpty else {
+            throw QualityError.invalid("policy must have version 1 and non-empty cases")
+        }
+        var names = Set<String>()
+        for rule in policy.cases {
+            guard !rule.name.isEmpty,
+                  rule.name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }),
+                  names.insert(rule.name).inserted,
+                  Set(rule.protected).count == rule.protected.count,
+                  rule.protected.allSatisfy({ !$0.isEmpty && normalizeStructure($0) == $0 }),
+                  rule.alternatives.allSatisfy({ !normalizeStructure($0).isEmpty }) else {
+                throw QualityError.invalid("invalid or duplicate rule: \(rule.name)")
+            }
+        }
+        return policy
+    }
+
+    /// Empty return means every required cleanup output meets the reviewed text
+    /// policy. Missing/duplicate/unknown cases and unusable rules throw; quality
+    /// mismatches return diagnostics. Neither path invokes cleanup or a model.
+    public static func checkQuality(policy: QualityPolicy, references: [String: String],
+                                    results: Data) throws -> [String] {
+        let names = Set(policy.cases.map(\.name))
+        guard Set(references.keys) == names else {
+            throw QualityError.invalid("golden cases must exactly match policy cases")
+        }
+        let outputs = try JSONDecoder().decode([QualityOutput].self, from: results)
+        var cleanup: [String: String] = [:]
+        var keys = Set<String>()
+        for output in outputs {
+            guard names.contains(output.name), ["asr", "cleanup"].contains(output.leg),
+                  keys.insert("\(output.leg)/\(output.name)").inserted else {
+                throw QualityError.invalid("unknown or duplicate result: \(output.leg)/\(output.name)")
+            }
+            if output.leg == "cleanup" { cleanup[output.name] = output.hypothesis }
+        }
+        guard Set(cleanup.keys) == names else {
+            let missing = names.subtracting(cleanup.keys).sorted().joined(separator: ", ")
+            throw QualityError.invalid("missing cleanup results: \(missing)")
+        }
+        func occurrences(_ literal: String, in text: String) -> Int {
+            text.components(separatedBy: literal).count - 1
+        }
+        var failures: [String] = []
+        for rule in policy.cases {
+            let golden = normalizeStructure(references[rule.name]!)
+            let accepted = ([golden] + rule.alternatives).map(normalizeStructure)
+            guard !golden.isEmpty, Set(accepted).count == accepted.count else {
+                throw QualityError.invalid("empty golden or duplicate accepted text: \(rule.name)")
+            }
+            for literal in rule.protected {
+                let count = occurrences(literal, in: golden)
+                guard count > 0, accepted.allSatisfy({ occurrences(literal, in: $0) == count }) else {
+                    throw QualityError.invalid("protected literal absent/inconsistent in accepted text: \(rule.name): \(literal)")
+                }
+            }
+            let actual = normalizeStructure(cleanup[rule.name]!)
+            if !accepted.contains(actual) {
+                failures.append("\(rule.name): output differs from accepted structure/content")
+            }
+            for literal in rule.protected where occurrences(literal, in: actual) != occurrences(literal, in: golden) {
+                failures.append("\(rule.name): protected literal count changed: \(literal)")
+            }
+        }
+        return failures
+    }
+
     /// Word tokens for WER. ONE function for reference and hypothesis — a WER
     /// harness that normalizes only one side is the most common way these
     /// numbers lie, so the scorer below never lets a caller pass raw text in.
@@ -243,5 +378,17 @@ public enum Eval {
             all.append(contentsOf: AudioRecorder.convert(buf))
         }
         return all
+    }
+}
+
+public enum EvalCleanupSelection {
+    public static func validate(settings: Settings, modelOverride: String?, command: String?) throws {
+        if settings.usesAppleIntelligence, modelOverride != nil, command == nil {
+            throw LocalCleanupReason.unsupportedAction.error
+        }
+    }
+    public static func label(settings: Settings, modelOverride: String?, command: String?) -> String {
+        if let command { return "cmd:" + URL(fileURLWithPath: command).lastPathComponent + (modelOverride.map { " " + $0 } ?? "") }
+        return settings.cleanupModelLabel
     }
 }

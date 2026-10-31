@@ -37,3 +37,7 @@ jobs:
       # would peg this red forever and teach everyone to ignore it. Same bytes
       # in, different score out, is always a bug.
       - run: swift run parla-eval verify
+
+      # Reviewed text outputs + explicit content/layout constraints. This checks
+      # the offline policy, not current provider or human-speech quality.
+      - run: .build/debug/parla-eval quality-check

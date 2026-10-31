@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import ParlaCore
 
@@ -5,7 +6,7 @@ final class HotkeyTests: XCTestCase {
     func monitor(_ out: UnsafeMutablePointer<[HotkeyMonitor.Edge]>) -> HotkeyMonitor {
         // A store on a path that never exists: bindings stay at the defaults and
         // no test can be steered by the developer's real settings.json.
-        let m = HotkeyMonitor(store: SettingsStore(url: URL(fileURLWithPath: "/dev/null/parla-tests")))
+        let m = HotkeyMonitor(store: SettingsStore(url: URL(fileURLWithPath: "/dev/null/parla-tests"), credentials: testCredentialStore()))
         m.onEdge = { out.pointee.append($0) }
         m.keyIsPhysicallyDown = { _ in false } // no HID in tests; injected where it matters
         return m
@@ -542,7 +543,7 @@ final class HotkeyTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString).appendingPathComponent("settings.json")
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let m = HotkeyMonitor(store: SettingsStore(url: url))
+        let m = HotkeyMonitor(store: SettingsStore(url: url, credentials: testCredentialStore()))
 
         try Data(#"{"hotkeys": {"pushToTalk": "rightoption", "handsFree": "opt+space"}}"#.utf8)
             .write(to: url)
@@ -684,5 +685,83 @@ final class HotkeyTests: XCTestCase {
         b = HotkeyBindings()
         b.pasteLast = KeyChord(49, .fn)        // same as hands-free
         XCTAssertNotNil(b.problem())
+    }
+}
+
+extension HotkeyTests {
+    private func mouseOnlyMonitor(state: @escaping (Int) -> MouseButtonState) -> HotkeyMonitor {
+        let store = SettingsStore(url: URL(fileURLWithPath: "/__parla_hotkey_test_ram__/settings.json"),
+            credentials: testCredentialStore(),
+            scratchpadIO: .init(read: { _ in nil }, write: { _, _ in throw CocoaError(.fileWriteNoPermission) }),
+            documentIO: .init(read: { Data(#"{"mouseBinding":{"buttonNumber":2}}"#.utf8) }),
+            atomicWrite: { _, _ in throw CocoaError(.fileWriteNoPermission) })
+        let monitor = HotkeyMonitor(store: store, tapEvents: .otherMouseOnly, buttonState: state)
+        monitor.enqueueOnMain = { $0() }
+        monitor.receiveTapStatus(.ready)
+        return monitor
+    }
+    func testTapEventMasksPreserveDefaultAndExcludeKeyboardOnlyWhenRequested() {
+        let oldMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+            | CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+            | CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.otherMouseUp.rawValue)
+        let mouseMask = CGEventMask(1 << CGEventType.otherMouseDown.rawValue)
+            | CGEventMask(1 << CGEventType.otherMouseUp.rawValue)
+        XCTAssertEqual(HotkeyMonitor.eventMask(.keyboardAndOtherMouse), oldMask)
+        XCTAssertEqual(HotkeyMonitor.eventMask(.otherMouseOnly), mouseMask)
+        let defaultMonitor = HotkeyMonitor(store: SettingsStore(url: URL(fileURLWithPath: "/__parla_test_ram__/unused"), credentials: testCredentialStore())) { _ in .unknown }
+        XCTAssertEqual(defaultMonitor.tapEvents, .keyboardAndOtherMouse) // trailing closure compatibility
+    }
+    func testMouseOnlyActualCallbackPassesFnEscapeAndPasteWhileConsumingBoundMouse() throws {
+        let monitor = mouseOnlyMonitor { _ in .down }
+        var keyboard: [HotkeyMonitor.Edge] = [], downs = 0, cancels = 0, ups = 0
+        monitor.onEdge = { keyboard.append($0) }
+        monitor.onMouseEdge = {
+            switch $0 { case .down: downs += 1; case .cancel: cancels += 1; case .up: ups += 1 }
+        }
+        let source = try XCTUnwrap(CGEventSource(stateID: .privateState))
+        let fn = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 63, keyDown: true))
+        fn.flags = .maskSecondaryFn
+        XCTAssertNotNil(monitor.process(type: .flagsChanged, event: fn))
+        let mouse = try XCTUnwrap(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
+            mouseCursorPosition: .zero, mouseButton: .center))
+        XCTAssertNil(monitor.process(type: .otherMouseDown, event: mouse))
+        let keys: [(CGKeyCode, CGEventFlags)] = [(53, []), (9, [.maskControl, .maskCommand])]
+        for (code, flags) in keys {
+            let event = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true))
+            event.flags = flags
+            XCTAssertNotNil(monitor.process(type: .keyDown, event: event))
+        }
+        XCTAssertTrue(keyboard.isEmpty); XCTAssertEqual(downs, 1); XCTAssertEqual(cancels, 0)
+        XCTAssertEqual(monitor.pendingMouseReleaseCount, 1)
+        XCTAssertNil(monitor.process(type: .otherMouseUp, event: mouse))
+        XCTAssertEqual(ups, 1); XCTAssertEqual(monitor.pendingMouseReleaseCount, 0)
+        // A normal monitor still handles the production paste chord, with no native tap/HID.
+        let normal = HotkeyMonitor(store: SettingsStore(url: URL(fileURLWithPath: "/__parla_test_ram__/unused"),
+            credentials: testCredentialStore(), scratchpadIO: .init(read: { _ in nil }, write: { _, _ in }),
+            documentIO: .init(read: { Data("{}".utf8) })), buttonState: { _ in .unknown })
+        normal.onEdge = { keyboard.append($0) }
+        let paste = try XCTUnwrap(CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true))
+        paste.flags = [.maskControl, .maskCommand]
+        XCTAssertNil(normal.process(type: .keyDown, event: paste)); XCTAssertEqual(keyboard, [.pasteLast])
+    }
+    func testSuspensionCancelsButUnknownOrHeldPhysicalStateKeepsOwedRelease() {
+        for physical: MouseButtonState in [.down, .unknown] {
+            var current = MouseButtonState.down
+            let monitor = mouseOnlyMonitor { _ in current }
+            var downs = 0, cancels = 0, ups = 0
+            monitor.onMouseEdge = {
+                switch $0 { case .down: downs += 1; case .cancel: cancels += 1; case .up: ups += 1 }
+            }
+            XCTAssertTrue(monitor.receiveMouseEvent(button: 2, isDown: true, at: 1))
+            XCTAssertEqual(monitor.pendingMouseReleaseCount, 1)
+            let token = HotkeyMonitor.acquireSuspension(); defer { HotkeyMonitor.releaseSuspension(token) }
+            current = physical; monitor.reconcileMouseButtons()
+            XCTAssertEqual(downs, 1); XCTAssertEqual(cancels, 1); XCTAssertEqual(monitor.pendingMouseReleaseCount, 1)
+            XCTAssertFalse(monitor.receiveMouseEvent(button: 3, isDown: true, at: 2))
+            XCTAssertTrue(monitor.receiveMouseEvent(button: 2, isDown: false, at: 3))
+            XCTAssertEqual(ups, 0); XCTAssertEqual(monitor.pendingMouseReleaseCount, 0)
+            XCTAssertFalse(monitor.receiveMouseEvent(button: 2, isDown: false, at: 4))
+        }
     }
 }

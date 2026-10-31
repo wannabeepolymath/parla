@@ -1,0 +1,227 @@
+[
+  {
+    "name": "like-literal",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "I like this plan.",
+    "hypothesis": "I like this plan.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "like-filler",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "I need this plan.",
+    "hypothesis": "I need this plan.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "sort-literal",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "What sort of adapter does Mira need?",
+    "hypothesis": "What sort of adapter does Mira need?",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "sort-filler",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "I need a USB-C adapter.",
+    "hypothesis": "I need a USB-C adapter.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "sort-hedge",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "It is sort of ready.",
+    "hypothesis": "It is sort of ready.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "you-know-literal",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "Tell me what you know about Mira.",
+    "hypothesis": "Tell me what you know about Mira.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "you-know-filler",
+    "category": "meaningful-filler",
+    "leg": "cleanup",
+    "reference": "It is ready.",
+    "hypothesis": "It is ready.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "correction-replace",
+    "category": "self-correction",
+    "leg": "cleanup",
+    "reference": "Meet on Thursday.",
+    "hypothesis": "Meet on Thursday.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "correction-negation",
+    "category": "self-correction",
+    "leg": "cleanup",
+    "reference": "Meet on Tuesday, not Thursday.",
+    "hypothesis": "Meet on Tuesday, not Thursday.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "question",
+    "category": "questions",
+    "leg": "cleanup",
+    "reference": "Can you disable autoPay?",
+    "hypothesis": "Can you disable autoPay?",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "statement",
+    "category": "questions",
+    "leg": "cleanup",
+    "reference": "You can disable autoPay.",
+    "hypothesis": "You can disable autoPay.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "negative",
+    "category": "negation",
+    "leg": "cleanup",
+    "reference": "Do not disable autoPay.",
+    "hypothesis": "Do not disable autoPay.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "positive",
+    "category": "negation",
+    "leg": "cleanup",
+    "reference": "Do disable autoPay.",
+    "hypothesis": "Do disable autoPay.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "quantity-fifteen",
+    "category": "quantities",
+    "leg": "cleanup",
+    "reference": "Set the timeout to 15 seconds.",
+    "hypothesis": "Set the timeout to 15 seconds.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "quantity-fifty",
+    "category": "quantities",
+    "leg": "cleanup",
+    "reference": "Set the timeout to 50 seconds.",
+    "hypothesis": "Set the timeout to 50 seconds.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "money-fifty",
+    "category": "currencies",
+    "leg": "cleanup",
+    "reference": "Transfer $12.50.",
+    "hypothesis": "Transfer $12.50.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "money-five",
+    "category": "currencies",
+    "leg": "cleanup",
+    "reference": "Transfer $12.05.",
+    "hypothesis": "Transfer $12.05.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "money-euro",
+    "category": "currencies",
+    "leg": "cleanup",
+    "reference": "Transfer €12.50.",
+    "hypothesis": "Transfer €12.50.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "url-one",
+    "category": "code",
+    "leg": "cleanup",
+    "reference": "Open https://example.com/a?x=1&y=2.",
+    "hypothesis": "Open https://example.com/a?x=1&y=2.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "url-two",
+    "category": "code",
+    "leg": "cleanup",
+    "reference": "Open https://example.com/a?x=2&y=1.",
+    "hypothesis": "Open https://example.com/a?x=2&y=1.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "identifier-not-equal",
+    "category": "code",
+    "leg": "cleanup",
+    "reference": "Keep userID != nil.",
+    "hypothesis": "Keep userID != nil.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "identifier-equal",
+    "category": "code",
+    "leg": "cleanup",
+    "reference": "Keep userId == nil.",
+    "hypothesis": "Keep userId == nil.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "email-paragraphs",
+    "category": "layout",
+    "leg": "cleanup",
+    "reference": "Hi Mira,\n\nThanks for the update.\n\nSam.",
+    "hypothesis": "Hi Mira,\n\nThanks for the update.\n\nSam.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "list-newlines",
+    "category": "layout",
+    "leg": "cleanup",
+    "reference": "1. Check userID.\n2. Check autoPay.",
+    "hypothesis": "1. Check userID.\n2. Check autoPay.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  },
+  {
+    "name": "terminal-single-line",
+    "category": "terminal",
+    "leg": "cleanup",
+    "reference": "Run git status; git diff --staged.",
+    "hypothesis": "Run git status; git diff --staged.",
+    "seconds": 0,
+    "engine": "authored:reviewed-text"
+  }
+]

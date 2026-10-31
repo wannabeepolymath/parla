@@ -31,8 +31,38 @@ enum Sound {
 ///    decide what to do next.
 extension AppDelegate {
 
+    static func automationSecureEvidence() -> Bool {
+        IsSecureEventInputEnabled() || (AXIsProcessTrusted() && Inserter.focusTarget() == .secure)
+    }
+
+    static func observeTransientSecurity(_ event: DictationSession.Event, templates: GuidedTemplateOwner, imports: AudioImportOwner) {
+        templates.observe(event); imports.observe(event)
+    }
+
     /// One event in, its effects executed — always on main.
     func send(_ event: DictationSession.Event) {
+        // Secure evidence precedes the stale-operation guard below.
+        Self.observeTransientSecurity(event, templates: templates, imports: audioImport)
+
+        switch event {
+        case .startDictation, .startCommand, .startSavedPreset, .startAutomation,
+             .discardPending, .discardOwnedOperation:
+            canceledCaptureUndo.invalidate()
+        case .cancelRequested:
+            switch session.state {
+            case .starting(let s), .recording(let s):
+                canceledCaptureDeadlines[s.operation.id] = canceledCaptureUndo.cancellationDeadline()
+            default: break
+            }
+        case .focusSampled(_, .secure): canceledCaptureUndo.invalidate()
+        default: break
+        }
+        canceledCaptureUndo.observe(event)
+        originalCopy.observe(event)
+        guard event.operation?.shouldAbort != true else { return }
+        if case .discardPending(let token) = event { MainActor.assumeIsolated { invocation.discarded(token) } }
+        if case .operationFinished(let operation) = event { MainActor.assumeIsolated { invocation.finished(operation) } }
+        historySink.beginEvent(for: event, currentGeneration: session.gen)
         session.send(event) { [self] effect in
             // Refresh the off-main mirror before every effect: `state` is an enum
             // carrying Settings (arrays, dictionaries) and must never be read off
@@ -42,10 +72,20 @@ extension AppDelegate {
             capturingGen.withLock { $0 = session.isCapturing ? session.gen : 0 }
             perform(effect)
         }
+        canceledCaptureDeadlines.removeAll()
+        MainActor.assumeIsolated { invocation.synchronizeInput() }
     }
 
     func perform(_ effect: DictationSession.Effect) {
+        originalCopy.observe(effect)
         switch effect {
+
+        case .captureAccepted(let s): MainActor.assumeIsolated { invocation.accepted(s) }
+        case .captureAcknowledged(let s):
+            canceledCaptureUndo.acknowledged(s)
+            MainActor.assumeIsolated { invocation.acknowledged(s) }
+        case .captureFinalizing(let s): MainActor.assumeIsolated { invocation.finalizing(s) }
+        case .finalResult(let s, let result): MainActor.assumeIsolated { invocation.completed(s, result: result) }
 
         // MARK: - Capture
 
@@ -56,7 +96,16 @@ extension AppDelegate {
             // A failed paste the last session never surfaced must not leak into this one.
             insertionFailure = nil
             let gen = session.gen
-            do { try recorder.start() } catch {
+            selectionDestinations = selectionDestinations.filter { $0.key == gen }
+            let operation: PendingOperation?
+            switch session.state {
+            case .starting(let value), .recording(let value): operation = value.operation
+            default: operation = nil
+            }
+            recorderGeneration = gen
+            do { try captureDiagnostics.start(operation: operation) { try recorder.start(diagnosticOperation: $0) } } catch {
+                recorderGeneration = 0
+                selectionDestinations[gen] = nil
                 send(.recorderFailed(gen: gen, message: "\(error)"))
                 return
             }
@@ -69,53 +118,180 @@ extension AppDelegate {
             // command mode sampled its focus at fn-down.
             send(.focusSampled(gen: gen, focus: Inserter.focusTarget()))
 
-        case let .stopCapture(discard):
-            let samples = recorder.stop()
+        case .cancelCapture(let context):
+            let deadline = canceledCaptureDeadlines.removeValue(forKey: context.operation.id) ?? 0
+            canceledCaptureExecutor.execute(context, deadline: deadline)
+        case .presentCanceledCapture(let generation): canceledCaptureUndo.present(generation: generation)
+
+        case let .stopOwnedCapture(generation, discard):
+            guard recorderGeneration == generation else { return }
+            recorderGeneration = 0
+            let samples = captureDiagnostics.stop(discard: discard) { recorder.stop() }
             captured = discard ? [] : samples
+            capturedGeneration = discard ? nil : generation
+
+        case let .stopCapture(discard):
+            let generation = recorderGeneration
+            recorderGeneration = 0
+            let samples = captureDiagnostics.stop(discard: discard) { recorder.stop() }
+            captured = discard ? [] : samples
+            capturedGeneration = discard ? nil : generation
+
+        case let .abortOperation(operation):
+            if activePreviewCapture?.operation == operation {
+                MainActor.assumeIsolated { activePreviewCapture?.revoke() }
+            }
+            // The reducer has revoked both delivery and the native mirror already.
+            if let ownership = operationAudio.removeValue(forKey: operation.id), !recordings.discard(ownership) {
+                send(.operationDisposalFailed(operation, message: recordings.lastError ?? "Audio disposal failed"))
+            }
+            operation.requestAbort()
+
+        case let .releaseOwnedRecognition(generation):
+            processTask = Task { [previous = processTask] in
+                await previous?.value
+                self.recognitionHandles[generation] = nil
+                self.previewCaptures[generation] = nil
+                self.recognitionErrors[generation] = nil
+                if self.windowGeneration == generation { self.window = nil; self.windowGeneration = nil }
+                await MainActor.run { self.selectionDestinations[generation] = nil }
+            }
 
         case .discardStreamWindow:
+            selectionDestinations.removeAll()
             // Queued on the chain: the in-flight streaming pass writes `window`
             // as it exits, so clearing it here and now would be undone.
             processTask = Task { [prev = processTask] in
                 await prev?.value
+                self.recognitionHandles.removeAll()
+                self.previewCaptures.removeAll()
+                self.recognitionErrors.removeAll()
                 await MainActor.run { self.window = nil }
             }
 
-        case let .startStreamLoop(gen, dictionary, preview):
+        case let .startStreamLoop(gen, _, preview):
+            guard case .recording(let s) = session.state, s.recognition.selection.engine == .whisper else { return }
+            if let plan = s.previewPlan, plan.refusal(directory: recognitionFactory.directory, catalog: recognitionFactory.catalog) == nil { return }
             // Shadow streaming runs on EVERY dictation so the finalize only ever
             // pays for the unconfirmed tail. Chained onto the previous work:
             // the whisper ctx isn't reentrant.
-            guard let transcriber else { return }
-            processTask = Task { [prev = processTask] in
-                await prev?.value
-                await self.stream(transcriber: transcriber, gen: gen, dictionary: dictionary,
-                                  preview: preview)
+            processTask = PendingOperationQueue.enqueue(previous: processTask, operation: s.operation) {
+                guard let handle = self.recognitionHandles[gen], handle.client.capabilities.shadowWindows else { return }
+                await self.stream(handle: handle, gen: gen, preview: preview && s.previewPlan == nil, operation: s.operation)
             }
 
         // MARK: - Model
 
-        case .ensureModelLoaded: activeTranscriber()
+        case .ensureModelLoaded:
+            let s: DictationSession.Session
+            switch session.state {
+            case .starting(let value), .recording(let value): s = value
+            default: return
+            }
+            lastModelUse = Date()
+            let selectionEpoch = preparationSelectionEpoch
+            let preparationEpoch: UUID? = s.recognition.selection.engine == .whisper ? nativePreparation.core.admissionEpoch : nil
+            let factory = recognitionFactory(for: s.recognition)
+            if let plan = s.previewPlan {
+                if let refusal = plan.refusal(directory: factory.directory, catalog: factory.catalog) {
+                    send(.recognitionPreview(gen: s.gen, operationID: s.operation.id, phase: plan.phase, update: .status(refusal)))
+                } else {
+                    let capture = RecognitionPreviewCapture(plan: plan, operation: s.operation, factory: factory,
+                        selectionEpoch: selectionEpoch, preparationEpoch: preparationEpoch,
+                        capturing: { self.capturing(s.gen) }, suffix: { self.recorder.previewSuffix(operationID: $0) },
+                        secure: RecognitionPreviewCapture.secureEvidence({ Self.automationSecureEvidence() }, shadow: s.activityShadowPermission),
+                        publish: { update in
+                            self.send(.recognitionPreview(gen: s.gen, operationID: s.operation.id, phase: plan.phase, update: update))
+                        }, clear: {
+                            self.send(.recognitionPreviewRevoked(gen: s.gen, operationID: s.operation.id, phase: plan.phase))
+                        }, releaseAliases: {
+                            self.recognitionHandles.removeAll(); self.recognitionErrors.removeAll()
+                            self.window = nil; self.windowGeneration = nil
+                            await MainActor.run {
+                                self.residentRecognition = nil; self.lastGoodModelPath = nil
+                                self.modelReady = false; self.hubModel.modelLoaded = false
+                            }
+                        })
+                    activePreviewCapture = capture
+                    processTask = PendingOperationQueue.enqueue(previous: processTask, operation: s.operation) {
+                        self.previewCaptures.removeAll()
+                        self.previewCaptures[s.gen] = capture
+                        await capture.run()
+                    }
+                    return
+                }
+            }
+            processTask = PendingOperationQueue.enqueue(previous: processTask, operation: s.operation) {
+                s.operation.advance(.acquiring)
+                // Every older final/cancel has drained. An overridden capture may
+                // have no final at all, so release its handle here too.
+                self.recognitionHandles.removeAll()
+                self.previewCaptures.removeAll()
+                self.recognitionErrors.removeAll()
+                let resident = await MainActor.run { self.residentRecognition }
+                guard !s.operation.shouldAbort else { return }
+                do {
+                    let handle = try await RecognitionAcquisition.acquire(request: s.recognition,
+                        resident: resident, factory: factory, operation: s.operation, capture: s.operation.id,
+                        selectionEpoch: selectionEpoch, preparationEpoch: preparationEpoch)
+                    guard !s.operation.shouldAbort else { return }
+                    self.recognitionHandles[s.gen] = handle
+                    // Preserve the global resident/unload policy after an idle reload.
+                    // Profile-only models are retained just by their session handle.
+                    await MainActor.run {
+                        guard s.recognition.selection.engine == .whisper, !s.operation.shouldAbort,
+                              RecognitionAcquisition.mayPromote(handle, global: RecognitionRequest(settings: s.settings),
+                                epoch: selectionEpoch, currentEpoch: self.hubModel.modelSelectionEpoch,
+                                current: RecognitionRequest(settings: self.store.load()), factory: self.recognitionFactory) else { return }
+                        self.residentRecognition = handle.resident
+                        self.lastGoodModelPath = handle.request.modelPath
+                        self.modelReady = true; self.hubModel.modelLoaded = true
+                        self.hubModel.observedRecognition = (handle.request.selection, handle.client.capabilities)
+                    }
+                } catch {
+                    guard !s.operation.shouldAbort else { return }
+                    let message = (error as? ParakeetInstallationRefusal)?.message ?? (error as? AppleSpeechRefusal)?.message ?? (error as? PreparationRefusal)?.description ?? "Local model unavailable — check the selected model"
+                    self.recognitionErrors[s.gen] = message
+                    await MainActor.run {
+                        if s.recognition.selection.engine == .whisper { self.nativePreparation.refresh() }
+                        if !s.operation.shouldAbort, s.gen == self.session.gen { self.hud.show(.error(message)) }
+                    }
+                }
+            }
         case .releaseModelIfPolicyImmediate: unloadAfterTranscription()
 
         // MARK: - Legs (whisper / LLM), all on the processTask chain
 
         case let .transcribeFinal(s, ledger):
-            let samples = takeCaptured()
-            processTask = Task { [prev = processTask] in
-                await prev?.value
-                await self.finish(s, samples: samples, ledger: ledger)
+            admitLocalCleanup(s)
+            if MainActor.assumeIsolated({ localCleanupAdmission.hasOrdinaryFailover }), s.gen == session.gen {
+                hud.show(.notice("Recording saved for processing. Waiting for prior cleanup to stop; you can discard it."))
             }
+            let samples = takeCaptured()
+            processTask = executionDispatcher.enqueue(.ordinary(s, samples: samples, ledger: ledger), previous: processTask,
+                finished: {
+                    self.recognitionHandles[s.gen] = nil; self.previewCaptures[s.gen] = nil; self.recognitionErrors[s.gen] = nil
+                    if self.windowGeneration == s.gen { self.window = nil; self.windowGeneration = nil }
+                    await MainActor.run { self.localCleanupAdmission.exited(s.operation); self.operationAudio[s.operation.id] = nil; self.send(.operationFinished(s.operation)) }
+                })
 
         case let .transcribeCommand(s):
+            let destination = selectionDestinations.removeValue(forKey: s.gen)
             let samples = takeCaptured()
-            processTask = Task { [prev = processTask] in
-                await prev?.value
-                await self.transform(s, samples: samples)
+            processTask = enqueueOperation(s) {
+                await self.transform(s, samples: samples, destination: destination)
+            }
+
+        case let .runSavedPreset(s):
+            let destination = selectionDestinations.removeValue(forKey: s.gen)
+            hubModel.recordProfileWinners(s)
+            processTask = enqueueOperation(s) {
+                await self.runSelectionTransform(s, instruction: s.preset?.intent ?? "", destination: destination)
             }
 
         case .warmCleanupEndpoint:
             guard let url = cleanupWarmURL(settings: store.load(),
-                                           env: ProcessInfo.processInfo.environment) else { return }
+                                           env: ProcessInfo.processInfo.environment, credentials: self.store.credentials) else { return }
             var request = URLRequest(url: url)
             request.httpMethod = "HEAD"
             request.timeoutInterval = 5
@@ -123,17 +299,27 @@ extension AppDelegate {
 
         // Both legs pick their request up from the MainActor hop that emitted it
         // and await it themselves — the chain must stay held until it resolves.
-        case let .polish(_, landed): pendingPolish = landed
+        case let .polish(s, landed):
+            pendingPolish = (s, landed)
+            hubModel.recordProfileWinners(s)
+            // With profiles, the start destination does not decide whether to warm.
+            if s.effectiveSettings.outputMode == .cleanup, !s.settings.profiles.isEmpty,
+               let url = cleanupWarmURL(settings: s.effectiveSettings, env: ProcessInfo.processInfo.environment, credentials: self.store.credentials) {
+                var request = URLRequest(url: url)
+                request.httpMethod = "HEAD"
+                request.timeoutInterval = 5
+                URLSession.shared.dataTask(with: request).resume()
+            }
         case let .transform(_, instruction): pendingInstruction = instruction
 
         // MARK: - Insertion. Nothing here deletes without proving what it deletes.
 
-        case let .insertText(text):
-            if Inserter.insert(text) {
+        case let .insertText(text, historyEnabled, original):
+            guard let posted = insertionExecutor.insert(text, original: original, operation: session.effectOperation, contextRun: session.effectSurroundingTextRun) else { return }
+            if posted {
                 insertionFailure = nil
-                CorrectionWatcher.shared.arm(inserted: text, dictionary: store.load().dictionary)
             } else {
-                insertionFailure = store.load().historyEnabled
+                insertionFailure = (historyEnabled ?? store.load().historyEnabled)
                     ? "Paste failed — copy the transcript from History" : "Paste failed"
             }
 
@@ -149,10 +335,11 @@ extension AppDelegate {
             // cleanup's rewrite gets learned as if the user had made it.
             CorrectionWatcher.shared.disarm()
             guard Inserter.canEraseTyped(expect) else {
+                session.effectOperation?.diagnostics?.disposition(.destinationChanged)
                 // AX can't prove the field still ends with our text — leave it
                 // alone; history retains the result when enabled.
                 NSLog("Parla replace: unverified, field left alone")
-                hud.show(unverifiedHUD)
+                if let state = historySink.feedback(unverifiedHUD) { hud.show(state) }
                 return
             }
             // One atomic AX value write over the tail, read-back verified inside
@@ -161,17 +348,22 @@ extension AppDelegate {
             // an erase of 0, which the helper declines) fall back to keystrokes.
             // An ISSUED write that never confirmed gets no fallback: Electron
             // applies AX sets async, and typing over one lands the edit twice.
-            switch Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append) {
+            guard session.effectOperation?.authorizeDispatch() != false else { return }
+            let diagnostic = session.effectOperation?.diagnostics
+            let delivery = diagnostic?.begin(.delivery); defer { delivery?.end() }
+            let result = Inserter.replaceTypedTail(String(expect.suffix(erase)), with: append)
+            DiagnosticDispatch.replacement(result, diagnostics: diagnostic)
+            switch result {
             case .replaced:
                 NSLog("Parla replace: atomic ax swap (erase %d)", erase)
             case .unverified:
                 NSLog("Parla replace: ax write unconfirmed, field left alone (erase %d)", erase)
-                hud.show(unverifiedHUD)
+                if let state = historySink.feedback(unverifiedHUD) { hud.show(state) }
                 return
             case .unavailable:
                 NSLog("Parla replace: ax-verified tail swap (erase %d)", erase)
-                Inserter.typeBackspaces(erase)
-                Inserter.typeUnicode(append)
+                Inserter.typeBackspaces(erase, diagnostics: diagnostic)
+                Inserter.typeUnicode(append, diagnostics: diagnostic)
             }
             hud.show(verifiedHUD)
             CorrectionWatcher.shared.arm(inserted: String(expect.dropLast(erase)) + append,
@@ -186,9 +378,11 @@ extension AppDelegate {
                 hud.show(.error(failure))
                 insertionFailure = nil
             } else {
-                hud.show(state)
+                if let state = historySink.feedback(state) { hud.show(state) }
             }
-        case let .secureRefusal(passwordField): showSecureRefusal(passwordField)
+        case let .secureRefusal(passwordField):
+            canceledCaptureUndo.invalidate()
+            showSecureRefusal(passwordField)
         case .hideHUD: hud.hide()
         case let .menuBar(state):
             switch state {
@@ -207,12 +401,33 @@ extension AppDelegate {
 
         // MARK: - Records
 
-        case let .appendHistory(raw, cleaned, appName):
-            history.append(HistoryEntry(raw: raw, cleaned: cleaned, appName: appName,
-                                        metrics: Metrics.shared.snapshot()))
+        case .appendTransformHistory, .appendHistory:
+            if let feedback = historySink.record(effect, insertionFailed: insertionFailure != nil) { hud.show(feedback) }
         case let .log(line): NSLog("%@", line)
         case let .trace(s): stamp(s)
         case .flushTrace: Trace.flush()
+        }
+    }
+
+    /// This barrier owns the child through actual exit, even after discard.
+    private func enqueueOperation(_ s: DictationSession.Session, work: @escaping () async -> Void) -> Task<Void, Never> {
+        admitLocalCleanup(s)
+        return PendingOperationQueue.enqueue(previous: processTask, operation: s.operation, completes: true, work: work) {
+            self.recognitionHandles[s.gen] = nil
+            self.recognitionErrors[s.gen] = nil
+            await MainActor.run {
+                self.localCleanupAdmission.exited(s.operation)
+                self.operationAudio[s.operation.id] = nil
+                self.send(.operationFinished(s.operation))
+            }
+        }
+    }
+
+    private func admitLocalCleanup(_ s: DictationSession.Session) {
+        guard s.settings.usesAppleIntelligence else { return }
+        if s.mode == .dictation && s.settings.outputMode == .raw { return }
+        MainActor.assumeIsolated {
+            if !localCleanupAdmission.admit(s.operation) { s.operation.revoke(); s.operation.requestAbort() }
         }
     }
 
@@ -224,7 +439,7 @@ extension AppDelegate {
     }
 
     private func takeCaptured() -> [Float] {
-        defer { captured = [] }
+        defer { captured = []; capturedGeneration = nil }
         return captured
     }
 
@@ -234,142 +449,155 @@ extension AppDelegate {
     /// and run what it decides. Runs off-main on the processTask chain; every
     /// look at the world happens inside the MainActor hops and travels as a probe.
     func finish(_ s: DictationSession.Session, samples: [Float], ledger: String) async {
-        // Written BEFORE anything can fail, deleted once a transcript exists: a
-        // crash inside the whisper pass otherwise takes the only copy of what
-        // the user just said, which is Handy #1332. Every early return below is
-        // a failure path and deliberately leaves the file behind — except when
-        // focus is secure, which outranks the keep and so has to be sampled on
-        // EVERY exit, not just the landing one.
-        let recording = RecordingStore.shared.stash(samples)
-        guard let transcriber else {
-            NSLog("Parla: no whisper model loaded — run scripts/download-model.sh")
+        defer { s.surroundingTextRun.finish() }
+        let finalization = OrdinaryDictationFinalization(recordings: recordings, settings: store)
+        let cleanupUsage = TransformUsage()
+        let failoverRun = CleanupFailoverRun(admit: {
             await MainActor.run {
-                self.send(.legUnavailable(s, message: "No whisper model"))
-                // Behind the HUD for the same reason the landing path is behind
-                // the keystrokes. transcript: nil keeps the file (Handy #1332);
-                // the probe is what stops audio captured into a password field
-                // from sitting on disk for the retention window just because no
-                // model was loaded.
-                RecordingStore.shared.resolve(recording, transcript: nil,
-                                              secure: Inserter.focusTarget() == .secure)
+                guard self.localCleanupAdmission.admitOrdinaryFailover(s.operation) else {
+                    s.operation.revoke(); s.operation.requestAbort(); return false
+                }
+                return true
             }
+        })
+        defer { recognitionHandles[s.gen] = nil; previewCaptures[s.gen] = nil; recognitionErrors[s.gen] = nil; window = nil }
+        if s.delivery == .resultOnly, samples.count < 6400 {
+            await MainActor.run { self.send(.resultUnavailable(s, .minimumDuration)) }
             return
         }
-        let settings = s.settings
-        // var: frontBundleID is rebound below to the app the text actually landed
-        // in — it isn't known until the finalize insert.
-        var pipeline = Pipeline(
-            transcribe: { samples, prompt in transcriber.transcribe(samples, initialPrompt: prompt) },
-            cleanup: { transcript, ctx in
-                // A factory throw (misconfig / no key) lands in Pipeline's raw-transcript fallback.
-                try await makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
-                    .clean(transcript: transcript, context: ctx)
-            },
-            settings: { settings },
-            frontBundleID: { nil })
-
-        // Raw transcript — reuse the stream's confirmed prefix so the final pass
-        // is O(tail), not O(whole utterance). self.window is ours to consume:
-        // stream() (queued just before us) wrote it, the chain serializes access.
-        let raw: String?
-        if let win = window {
-            window = nil
-            let cut = min(win.cutSample, samples.count)
-            let tail = Array(samples[cut...])
-            // Min-audio guard on the TAIL only: a long dictation trailing off into
-            // silence still finalizes its confirmed prefix — we just skip the tail
-            // whisper pass (which would hallucinate) and use the confirmed text raw.
-            if TextRules.audioWorthTranscribing(sampleCount: tail.count, rms: AudioRecorder.rms(tail)) {
-                let tailText = transcriber.transcribe(
-                    tail,
-                    initialPrompt: StreamWindow.tailPrompt(dictionary: settings.dictionary,
-                                                           confirmed: win.confirmedText))
-                // nil = the tail pass failed. That must not discard the confirmed
-                // prefix the stream already earned — fall back to it, exactly as a
-                // below-floor tail does.
-                if tailText == nil { NSLog("Parla finish: tail pass failed, using confirmed prefix") }
-                let joined = StreamWindow.join(win.confirmedText, tailText ?? "")
-                raw = joined.isEmpty ? nil : joined
-            } else {
-                raw = win.confirmedText.isEmpty ? nil : win.confirmedText
+        await finalization.run(operation: s.operation, samples: samples, window: previewCaptures[s.gen] == nil ? window : nil,
+            shadow: s.activityShadowPermission, separatePreview: previewCaptures[s.gen] != nil,
+            shadowCurrent: { s.gen == self.session.gen && self.session.activityShadowPermission == s.activityShadowPermission }, prepare: { recording, ownership in
+            guard !s.operation.shouldAbort else { return nil }
+            let proceed = await MainActor.run { () -> Bool in
+                guard !s.operation.shouldAbort else {
+                    if let ownership, !recordings.discard(ownership) {
+                        self.send(.operationDisposalFailed(s.operation, message: recordings.lastError ?? "Audio disposal failed"))
+                    }
+                    return false
+                }
+                self.operationAudio[s.operation.id] = ownership
+                return true
             }
-        } else if TextRules.audioWorthTranscribing(sampleCount: samples.count, rms: AudioRecorder.rms(samples)) {
-            raw = pipeline.transcript(samples: samples)
-        } else {
-            // Too short or silent — whisper hallucinates here. Treat as empty.
-            NSLog("Parla finish: audio below min-audio floor, skipping whisper")
-            raw = nil
-        }
-
-        stamp(.finalPassDone)
-        // Whatever whisper actually ran against, which is not necessarily the
-        // catalog default — the metric is worthless if it names the wrong model.
-        Metrics.shared.update {
-            $0.model = URL(fileURLWithPath: settings.whisperModelPath
-                ?? WhisperTranscriber.defaultModelPath())
-                .deletingPathExtension().lastPathComponent
-                .replacingOccurrences(of: "ggml-", with: "")
-        }
-
-        // Resolve the destination before cleanup and hold its identity across
-        // the await. The production path inserts only the final result.
-        let delivery = await MainActor.run { () -> (DictationSession.Landed?, Inserter.Destination?) in
-            // Re-check focus: it may have moved into a password field since
-            // fn-down. Sampled on BOTH paths, not just the landing one: it is
-            // also the signal that deletes the stashed WAV below, and the
-            // no-transcript path is the only one that KEEPS that file — reading
-            // focus only when there is a transcript is what made the secure
-            // delete unreachable exactly where it matters. The reducer ignores
-            // the probe entirely when `raw` is nil, so this changes no decision.
-            let focus = Inserter.focusTarget()
-            var probe = LandingProbe(focus: focus)
-            if raw != nil {
-                // Sample the destination app HERE, not at fn-down — dictation
-                // often starts before the user clicks into the app the text is
-                // meant for.
-                let app = NSWorkspace.shared.frontmostApplication
-                probe = LandingProbe(focus: focus, bundleID: app?.bundleIdentifier,
-                                     appName: app?.localizedName,
-                                     typedIsOurs: s.live && !ledger.isEmpty
-                                         && Inserter.canEraseTyped(ledger),
-                                     deferInsertionUntilClean: true,
-                                     browserURL: focus == .secure ? nil : Inserter.focusedBrowserURL(bundleID: app?.bundleIdentifier),
-                                     singleLine: focus == .secure ? false : Inserter.focusedFieldIsSingleLine())
+            guard proceed else { return nil }
+            guard !s.operation.shouldAbort else { return nil }
+            if let preview = previewCaptures[s.gen] {
+                do {
+                    let handle = try await preview.acquireFinal()
+                    guard !s.operation.shouldAbort else { return nil }
+                    recognitionHandles[s.gen] = handle
+                    await MainActor.run {
+                        guard !s.operation.shouldAbort,
+                              RecognitionAcquisition.mayPromote(handle, global: RecognitionRequest(settings: s.settings),
+                                epoch: preview.selectionEpoch, currentEpoch: self.hubModel.modelSelectionEpoch,
+                                current: RecognitionRequest(settings: self.store.load()), factory: self.recognitionFactory) else { return }
+                        self.residentRecognition = handle.resident
+                        self.lastGoodModelPath = handle.request.modelPath
+                        self.modelReady = true; self.hubModel.modelLoaded = true
+                        self.hubModel.observedRecognition = (handle.request.selection, handle.client.capabilities)
+                    }
+                } catch {
+                    recognitionErrors[s.gen] = (error as? PreparationRefusal)?.description ?? "Local model unavailable — check the selected model"
+                }
             }
-            let destination = focus == .secure ? nil : Inserter.Destination()
-            self.send(.transcribed(s, raw: raw, probe: probe))
-            // Behind the landing keystrokes on purpose — a file delete must not
-            // sit between the transcript and the screen. `secure` is the same
-            // pair of signals the reducer just refused on inside that send, so
-            // audio that drifted into a password field cannot outlive the
-            // transcript that was dropped for it.
-            RecordingStore.shared.resolve(recording, transcript: raw,
-                                          secure: probe.focus == .secure || s.focus == .secure)
-            defer { self.pendingPolish = nil }
-            return (self.pendingPolish, destination)
-        }
-        guard let landed = delivery.0 else { return } // dropped, empty, or cleanup unconfigured
-
-        // The bundle ID the text actually landed in — the cleanup prompt's tone
-        // hint is keyed on it, and it is the same one the swap's flatten uses,
-        // so the prompt and the last mile can't disagree about the destination.
-        pipeline.frontBundleID = { landed.bundleID }
-        pipeline.frontBrowserURL = { landed.browserURL }
-        pipeline.singleLine = landed.singleLine
-        // Keep the processing chain serialized through cleanup. A newer session
-        // invalidates this insertion; the result can still be retained in history.
-        let result = await pipeline.clean(transcript: landed.raw)
-        await MainActor.run {
-            // Only the swap paths that can type consult this, so only they pay
-            // for the AX read.
-            var focus = (landed.landing == .field || landed.landing == .pending) && s.gen == self.session.gen
-                ? Inserter.focusTarget() : Inserter.FocusTarget.none
-            if landed.landing == .pending, focus != .secure, delivery.1?.isCurrent() != true {
-                NSLog("Parla delivery: destination or selection changed, or identity unavailable; insertion withheld")
-                focus = .none
+            guard let handle = recognitionHandles[s.gen] else {
+                NSLog("Parla: requested local model unavailable")
+                await MainActor.run {
+                    guard !s.operation.shouldAbort else { return }
+                    self.send(.legUnavailable(s, message: self.recognitionErrors[s.gen] ?? "Local model unavailable"))
+                    // Behind the HUD for the same reason the landing path is behind
+                    // the keystrokes. transcript: nil keeps the file (Handy #1332);
+                    // the probe is what stops audio captured into a password field
+                    // from sitting on disk for the retention window just because no
+                    // model was loaded.
+                    finalization.resolve(transcript: nil,
+                                                  secure: s.focus == .secure || (s.delivery == .resultOnly ? Self.automationSecureEvidence() : Inserter.focusTarget() == .secure))
+                }
+                return nil
             }
-            self.send(.cleanReady(s, landed, text: result.text, failure: result.failure, focus: focus))
-        }
+            return handle
+        }, recognized: { handle, raw in
+            stamp(.finalPassDone)
+            // Whatever whisper actually ran against, which is not necessarily the
+            // catalog default — the metric is worthless if it names the wrong model.
+            if s.settings.usesAppleIntelligence {
+                cleanupUsage.recordRecognition(model: handle.request.metricLabel.replacingOccurrences(of: "ggml-", with: ""))
+            }
+            Metrics.shared.update {
+                $0.model = handle.request.metricLabel
+                    .replacingOccurrences(of: "ggml-", with: "")
+            }
+
+            // Resolve the destination before cleanup and hold its identity across
+            // the await. The production path inserts only the final result.
+            let delivery = await MainActor.run { () -> ((DictationSession.Session, DictationSession.Landed)?, Inserter.Destination?) in
+                // Re-check focus: it may have moved into a password field since
+                // fn-down. Sampled on BOTH paths, not just the landing one: it is
+                // also the signal that deletes the stashed WAV below, and the
+                // no-transcript path is the only one that KEEPS that file — reading
+                // focus only when there is a transcript is what made the secure
+                // delete unreachable exactly where it matters. The reducer ignores
+                // the probe entirely when `raw` is nil, so this changes no decision.
+                guard !s.operation.shouldAbort else { return (nil, nil) }
+                let focus = s.delivery == .resultOnly
+                    ? (Self.automationSecureEvidence() ? Inserter.FocusTarget.secure : .unknown) : Inserter.focusTarget()
+                var probe = LandingProbe(focus: focus)
+                if raw != nil, s.delivery == .keyboard {
+                    // Sample the destination app HERE, not at fn-down — dictation
+                    // often starts before the user clicks into the app the text is
+                    // meant for.
+                    let app = NSWorkspace.shared.frontmostApplication
+                    probe = LandingProbe(focus: focus, bundleID: app?.bundleIdentifier,
+                                         appName: app?.localizedName,
+                                         typedIsOurs: s.live && !ledger.isEmpty
+                                             && Inserter.canEraseTyped(ledger),
+                                         deferInsertionUntilClean: true,
+                                         browserURL: focus == .secure ? nil : Inserter.focusedBrowserURL(bundleID: app?.bundleIdentifier),
+                                         singleLine: focus == .secure ? false : Inserter.focusedFieldIsSingleLine())
+                }
+                let destination = s.delivery == .resultOnly || focus == .secure ? nil : Inserter.Destination()
+                if raw != nil, focus != .secure, s.delivery == .keyboard {
+                    self.hubModel.recordProfileWinners(s.resolvingOutput(at: ProfileDestination(
+                        bundleID: probe.bundleID, browserURL: probe.browserURL)))
+                }
+                self.send(.transcribed(s, raw: raw, probe: probe))
+                // Behind the landing keystrokes on purpose — a file delete must not
+                // sit between the transcript and the screen. `secure` is the same
+                // pair of signals the reducer just refused on inside that send, so
+                // audio that drifted into a password field cannot outlive the
+                // transcript that was dropped for it.
+                finalization.resolve(transcript: raw,
+                                              secure: probe.focus == .secure || s.focus == .secure)
+                defer { self.pendingPolish = nil }
+                return (self.pendingPolish, destination)
+            }
+            guard let (outputSession, landed) = delivery.0 else { return nil }
+            return (outputSession, landed, delivery.1)
+
+        }, clean: { (context: (DictationSession.Session, DictationSession.Landed, Inserter.Destination?)) in
+            let (outputSession, landed, _) = context
+            return await DictationCleanupOutput.clean(session: outputSession, landed: landed,
+                store: self.store, environment: ProcessInfo.processInfo.environment,
+                run: failoverRun, usage: cleanupUsage.record)
+        }, completed: { context, text, failure in
+            let (outputSession, landed, destination) = context
+            await MainActor.run {
+                guard !s.operation.shouldAbort else { return }
+                // Only the swap paths that can type consult this, so only they pay
+                // for the AX read.
+                var focus = s.delivery == .resultOnly ? (Self.automationSecureEvidence() ? .secure : .unknown) : (landed.landing == .field || landed.landing == .pending) && s.gen == self.session.gen
+                    ? Inserter.focusTarget() : Inserter.FocusTarget.none
+                if landed.landing == .pending, focus != .secure, destination?.isCurrent() != true {
+                    NSLog("Parla delivery: destination or selection changed, or identity unavailable; insertion withheld")
+                    s.operation.diagnostics?.disposition(.destinationChanged)
+                    focus = .none
+                }
+                finalization.observeSecurity(secure: s.focus == .secure || focus == .secure)
+                self.send(.cleanReady(outputSession, landed, text: text, failure: failure, focus: focus,
+                                      metrics: outputSession.surroundingTextRun.metrics ?? (failoverRun.participated ? failoverRun.metrics
+                                        : outputSession.effectiveSettings.usesAppleIntelligence || outputSession.effectiveSettings.outputMode == .selectedPreset ? cleanupUsage.snapshot() : nil)))
+            }
+        }, drain: { await failoverRun.drain() })
     }
 
     // MARK: - Command leg
@@ -377,32 +605,38 @@ extension AppDelegate {
     /// Command mode: transcribe the spoken instruction on-device, transform the
     /// selection latched at fn-down via the cleanup LLM, and let the machine
     /// decide whether it may replace the live selection.
-    func transform(_ s: DictationSession.Session, samples: [Float]) async {
-        guard let transcriber else {
+    func transform(_ s: DictationSession.Session, samples: [Float], destination: Inserter.Destination?) async {
+        defer { recognitionHandles[s.gen] = nil; recognitionErrors[s.gen] = nil }
+        guard !s.operation.shouldAbort else { return }
+        guard let handle = recognitionHandles[s.gen] else {
             NSLog("Parla transform: no whisper model loaded")
-            await MainActor.run { self.send(.legUnavailable(s, message: "No whisper model")) }
+            let message = recognitionErrors[s.gen] ?? "No whisper model"
+            await MainActor.run { self.send(.legUnavailable(s, message: message)) }
             return
         }
-        // Transforms REQUIRE the cleanup LLM (no raw fallback) — fail fast with
-        // the real reason before burning a whisper pass, instead of a misleading
-        // "Transform failed" after it. A configured-but-broken setup still
-        // proceeds and hard-fails so the misconfiguration surfaces.
+        // No profile can supply a missing global provider or credential.
         guard s.cleanupConfigured else {
-            NSLog("Parla transform: cleanup not configured")
+            s.operation.diagnostics?.update { $0.providerOutcome = .refused }
             await MainActor.run { self.send(.legUnavailable(s, message: "Cleanup not configured")) }
             return
         }
-        let settings = s.settings
-        // Same min-audio floor as dictation: too short/silent = no instruction.
-        let heard = TextRules.audioWorthTranscribing(sampleCount: samples.count,
-                                                     rms: AudioRecorder.rms(samples))
-        if !heard { NSLog("Parla transform: audio below min-audio floor") }
-        let prompt = settings.dictionary.isEmpty ? nil : settings.dictionary.joined(separator: ", ")
-        guard let spoken = heard ? transcriber.transcribe(samples, initialPrompt: prompt) : "" else {
-            // nil = the pass errored, distinct from "nothing heard": say so
-            // instead of blaming the user's diction.
-            NSLog("Parla transform: transcription failed")
+        guard let spoken = await DictationProcessing.command(operation: s.operation, handle: handle, samples: samples) else {
             await MainActor.run { self.send(.legUnavailable(s, message: "Transcription failed")) }
+            return
+        }
+        guard !s.operation.shouldAbort else { return }
+        // Recognition is frozen; resolve output only after ASR, just before cleanup.
+        let s = await MainActor.run { () -> DictationSession.Session in
+            guard !s.operation.shouldAbort else { return s }
+            let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            let resolved = s.resolvingOutput(at: ProfileDestination(bundleID: id,
+                browserURL: Inserter.focusTarget() == .secure ? nil : Inserter.focusedBrowserURL(bundleID: id)))
+            self.hubModel.recordProfileWinners(resolved)
+            return resolved
+        }
+        guard s.effectiveSettings.cleanupEnabled && s.cleanupConfigured else {
+            s.operation.diagnostics?.update { $0.providerOutcome = .refused }
+            await MainActor.run { self.send(.legUnavailable(s, message: "Cleanup off or not configured")) }
             return
         }
         let instruction: String? = await MainActor.run {
@@ -412,34 +646,73 @@ extension AppDelegate {
         }
         guard let instruction else { return } // nothing usable was heard
 
-        // Via the cleanup client DIRECTLY (not Pipeline.clean): its raw-transcript
-        // fallback would return the spoken instruction on failure, which must
-        // never be typed over the user's selection.
-        let ctx = CleanupContext(dictionary: settings.dictionary, snippets: [:], appName: nil,
-                                 selection: s.selection)
-        let out: String
-        do {
-            out = try await makeCleanupClient(settings: settings, env: ProcessInfo.processInfo.environment)
-                .clean(transcript: instruction, context: ctx)
-        } catch {
-            NSLog("%@", "Parla transform failed: \(error)")
-            await MainActor.run { self.send(.legUnavailable(s, message: "Transform failed")) }
-            return
+        await runSelectionTransform(s, instruction: instruction, destination: destination)
+    }
+
+    /// Both selected-text entry points hold their original native destination.
+    /// The serial chain remains owned until request and guarded completion finish.
+    func runSelectionTransform(_ s: DictationSession.Session, instruction: String,
+                               destination: Inserter.Destination?) async {
+        guard !s.operation.shouldAbort else { return }
+        s.operation.advance(.cleaning)
+        let usage = TransformUsage()
+        guard let result = await DictationProcessing.transform(operation: s.operation, request: {
+            try await s.transform(instruction: instruction) {
+                guard !s.operation.shouldAbort else { throw CancellationError() }
+                return try makeCleanupClient(settings: $0, env: ProcessInfo.processInfo.environment, credentials: self.store.credentials, usage: usage.record)
+            }
+        }) else { return }
+        // An optional idle shortcut can finish while its modifiers are still
+        // held. Wait without blocking main; timeout parks rather than typing a
+        // modified keystroke into the destination. Identity is checked afterwards.
+        for _ in 0..<20 {
+            guard !s.operation.shouldAbort else { return }
+            let ready = await MainActor.run {
+                s.gen != self.session.gen || Self.transformModifiersClear
+            }
+            if ready { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
         await MainActor.run {
-            // Probe only while this session still owns the field: a stale
-            // transform parks without touching AX, as it did before.
-            var probe = TransformProbe(focus: .none, selectionStillMatches: false)
-            if s.gen == self.session.gen {
-                let focus = Inserter.focusTarget()
-                probe = TransformProbe(
-                    focus: focus,
-                    // Never query a password field's selection.
-                    selectionStillMatches: focus != .secure && Inserter.selectedText() == s.selection,
-                    bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
-            }
-            self.send(.transformReady(s, text: out, probe: probe))
+            guard !s.operation.shouldAbort else { return }
+            let probe = TransformProbe.capture(for: s, currentGeneration: self.session.gen,
+                focus: { Inserter.focusTarget() }, modifiersClear: Self.transformModifiersClear,
+                destinationStillMatches: { destination?.isCurrentSelection() == true },
+                selectedText: { Inserter.selectedText() })
+            if !Self.transformModifiersClear { s.operation.diagnostics?.disposition(.modifiersHeld) }
+            self.send(.transformReady(s, text: result.text, probe: probe, failure: result.failure, metrics: usage.snapshot()))
         }
+    }
+
+    private static var transformModifiersClear: Bool {
+        NSEvent.modifierFlags.intersection([.command, .control, .option, .shift, .function]).isEmpty
+    }
+
+    /// Global shortcut only: capture while the destination app is frontmost,
+    /// before queueing work. No Hub button and no ASR/model path.
+    func runSelectedPreset() {
+        guard !updater.committing, axGranted else {
+            hud.show(.error("Transforms unavailable — check Accessibility or finish updating")); return
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+            hud.show(.error("Select text in the destination app first")); return
+        }
+        _ = store.migrateSelectedCredentials()
+        let settings = store.load()
+        guard store.lastError == nil else { hud.show(.error("Repair settings before running a preset")); return }
+        let focus = Inserter.focusTarget()
+        let app = NSWorkspace.shared.frontmostApplication
+        let source = focus == .secure ? nil : Inserter.selectedText()
+        let token = focus == .secure ? nil : Inserter.Destination()
+        let target = LandingProbe(focus: focus, bundleID: app?.bundleIdentifier, appName: app?.localizedName,
+            browserURL: focus == .secure ? nil : Inserter.focusedBrowserURL(bundleID: app?.bundleIdentifier),
+            singleLine: focus == .secure ? false : Inserter.focusedFieldIsSingleLine())
+        var providerSettings = settings; providerSettings.cleanupEnabled = true
+        let configured = cleanupIsConfigured(settings: providerSettings, env: ProcessInfo.processInfo.environment, credentials: self.store.credentials)
+        let nextGen = session.gen + 1
+        selectionDestinations[nextGen] = token
+        _ = MainActor.assumeIsolated { invocation.keyboard(.startSavedPreset(settings: settings, cleanupConfigured: configured, selection: source, target: target)) }
+        if session.gen != nextGen { selectionDestinations[nextGen] = nil }
     }
 
     // MARK: - Streaming pass loop
@@ -459,12 +732,12 @@ extension AppDelegate {
     /// the result is used, so an aborted "" is never committed as a hypothesis
     /// or a confirmed head. The handoff below still runs after a break: it only
     /// carries state from completed passes.
-    func stream(transcriber: WhisperTranscriber, gen: Int, dictionary dict: [String],
-                preview: Bool) async {
+    func stream(handle: RecognitionHandle, gen: Int, preview: Bool, operation: PendingOperation) async {
+        guard handle.client.capabilities.shadowWindows else { return }
         var confirmed = "" // frozen transcript of snap[0..<cut]
         var cut = 0
         var lastCount = 0
-        while capturing(gen) {
+        while capturing(gen) && !operation.shouldAbort {
             let snap = recorder.snapshot()
             guard snap.count - lastCount >= 8000 else { // <0.5s new audio, wait
                 await pauseBetweenPasses(gen)
@@ -476,15 +749,14 @@ extension AppDelegate {
                 // Freeze the head up to the quietest spot near cutTarget: one
                 // final pass over it, then it's never re-transcribed.
                 let rel = StreamWindow.quietestCut(samples: tail, near: StreamWindow.cutTarget)
-                let head = transcriber.transcribe(
-                    Array(tail[..<rel]),
-                    initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
-                    shouldAbort: { !self.capturing(gen) })
+                let head = await DictationProcessing.stream(operation: operation, handle: handle,
+                    samples: Array(tail[..<rel]), pass: .streamHead(confirmed), sampleRange: cut..<(cut + rel),
+                    capturing: { self.capturing(gen) })
                 // Aborted or errored head pass returns nil: committing the cut
                 // would silently drop the head's audio from the transcript
                 // forever. Only commit a completed pass; an errored one leaves
                 // the window alone and finish()'s full pass still owns the audio.
-                guard capturing(gen) else { break }
+                guard capturing(gen), !operation.shouldAbort else { break }
                 guard let head else {
                     NSLog("Parla stream: head pass failed, not committing the cut")
                     await pauseBetweenPasses(gen)
@@ -506,14 +778,12 @@ extension AppDelegate {
                 await pauseBetweenPasses(gen)
                 continue
             }
-            let tailText = transcriber.transcribe(
-                tail,
-                initialPrompt: StreamWindow.tailPrompt(dictionary: dict, confirmed: confirmed),
-                shouldAbort: { !self.capturing(gen) })
+            let tailText = await DictationProcessing.stream(operation: operation, handle: handle,
+                samples: tail, pass: .streamTail(confirmed), sampleRange: cut..<snap.count, capturing: { self.capturing(gen) })
             // Aborted or errored pass returns nil: never treat it as a new
             // hypothesis — live typing would erase everything the user sees.
             // On abort finish() takes over; on error just try the next pass.
-            guard capturing(gen) else { break }
+            guard capturing(gen), !operation.shouldAbort else { break }
             guard let tailText else {
                 await pauseBetweenPasses(gen)
                 continue
@@ -524,7 +794,7 @@ extension AppDelegate {
                 // a cancel can land on main between the check above and this
                 // block, and typing after its erase would leave orphan text in
                 // the field and re-fill the ledger the cancel just cleared.
-                guard self.capturing(gen) else { return }
+                guard self.capturing(gen), !operation.shouldAbort else { return }
                 // Preview goes to Parla's own pill and stops there — no ledger,
                 // no insertion, no history.
                 if preview { self.send(.streamPreview(gen: gen, text: text)) }
@@ -559,7 +829,8 @@ extension AppDelegate {
         // window goes unconsumed, and the next dictation — almost always short,
         // confirmed empty — would inherit it and splice the previous utterance
         // in front of its own tail.
-        window = confirmed.isEmpty ? nil : StreamWindow(confirmedText: confirmed, cutSample: cut)
+        window = operation.shouldAbort || confirmed.isEmpty ? nil : handle.window(confirmedText: confirmed, cutSample: cut)
+        windowGeneration = window == nil ? nil : gen
     }
 
     /// This dictation still holds the mic — what `isRecording` used to answer,
@@ -729,5 +1000,54 @@ final class CorrectionWatcher {
                ref as? String == "AXSecureTextField" { return true }
         }
         return false
+    }
+}
+
+
+/// The production ordinary output seam, also exercised with explicit fake bottoms.
+/// All other origins keep the single-provider primitive and Pipeline semantics.
+enum DictationCleanupOutput {
+    static func clean(session: DictationSession.Session, landed: DictationSession.Landed,
+        store: SettingsStore, environment: [String: String],
+        primaryHTTP: HTTPPosting = URLSessionPoster(),
+        primaryDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
+        backupDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
+        now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: ((TimeInterval) async throws -> Void)? = nil,
+        localRuntime: LocalCleanupRuntime = LocalCleanupRuntime(),
+        run: CleanupFailoverRun, usage: @escaping CleanupUsageSink,
+        primitiveUsage: @escaping CleanupUsageSink = recordCleanupUsage,
+        contextPort: SurroundingTextPort = .unsupported, contextDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
+        disarmLearning: @escaping @MainActor () -> Void = { CorrectionWatcher.shared.disarm() },
+        contextLog: @escaping (String) -> Void = { NSLog("%@", $0) }) async -> (text: String, failure: String?) {
+        let settings = session.effectiveSettings
+        let ordinaryUsage: CleanupUsageSink = { model, input, output in
+            if !session.surroundingTextRun.participated { primitiveUsage(model, input, output) }
+        }
+        var pipeline = Pipeline(outputSettings: settings, bundleID: landed.bundleID,
+            browserURL: landed.browserURL, singleLine: landed.singleLine, diagnostics: session.operation.diagnostics,
+            failureLogging: session.delivery == .resultOnly ? .contentFree : .details) { selected in
+            guard !session.operation.shouldAbort else { throw CancellationError() }
+            if let origin = session.cleanupFailoverOrigin, !selected.usesAppleIntelligence {
+                return try makeOrdinaryCleanupClient(settings: selected, origin: origin,
+                    grant: session.cleanupFailoverGrant, operationID: session.operation.id, store: store,
+                    env: environment, credentials: store.credentials, http: primaryHTTP,
+                    primaryDriver: primaryDriver, backupDriver: backupDriver, now: now, sleep: sleep, run: run,
+                    shouldContinue: { !session.operation.shouldAbort }, usage: ordinaryUsage)
+            }
+            return try makeCleanupClient(settings: selected, env: environment, credentials: store.credentials,
+                http: primaryHTTP, localRuntime: localRuntime,
+                usage: selected.usesAppleIntelligence || selected.outputMode == .selectedPreset ? usage : ordinaryUsage)
+        }
+        pipeline.failoverRun = run
+        if session.surroundingTextGrant != nil {
+            pipeline.failureLogging = .contentFree
+            pipeline.log = contextLog
+            pipeline.surroundingText = { transcript, context in
+                try await SurroundingTextCapture.clean(session: session, landed: landed, transcript: transcript, context: context,
+                    store: store, environment: environment, port: contextPort, driver: contextDriver, now: now, sleep: sleep, disarmLearning: disarmLearning)
+            }
+        }
+        return await pipeline.clean(transcript: landed.raw)
     }
 }
