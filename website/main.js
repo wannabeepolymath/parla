@@ -214,8 +214,13 @@ const io = new IntersectionObserver((entries) => entries.forEach((en) => {
 }), { rootMargin: '0px 0px -8% 0px' });
 $$('main section').forEach((sec) => $$('[data-reveal]', sec).forEach((el, i) => { el.style.setProperty('--d', i % 4); io.observe(el); }));
 
-/* ---------- footer: latest release, live from GitHub ---------- */
+/* ---------- latest release, live from GitHub: footer tag + direct DMG download ---------- */
 fetch('https://api.github.com/repos/wannabeepolymath/parla/releases/latest')
   .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-  .then((r) => { if (r.tag_name) $('#release').textContent = r.tag_name; })
+  .then((r) => {
+    if (r.tag_name) $('#release').textContent = r.tag_name;
+    // ponytail: links keep the release page as href until this resolves, so no-JS or API failure still works
+    const dmg = (r.assets || []).find((a) => a.name.endsWith('.dmg'));
+    if (dmg) $$('a[href$="/releases/latest"]').forEach((a) => { a.href = dmg.browser_download_url; });
+  })
   .catch(() => {});
