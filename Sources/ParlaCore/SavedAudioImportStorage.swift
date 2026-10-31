@@ -457,3 +457,469 @@ public final class SavedAudioImportStorage: @unchecked Sendable {
     func budget(started: TimeInterval? = nil, credits: Int = 0) -> Budget { Budget(system,started:started,credits:credits) }
     deinit { try? close() }
 }
+
+// Meeting-only primitives. The import constructor, static grammar and all import operations above are unchanged.
+public struct MeetingStorageProfile: Equatable, Sendable {
+    public let members = 512, metadata = 524_288, pathComponents = 12
+    public init() {}
+}
+/// Pure process identity, retained by receipts so allocator address reuse cannot authenticate a foreign exit.
+public final class MeetingStorageContext: Hashable, @unchecked Sendable {
+    public init() {}
+    public static func == (a: MeetingStorageContext, b: MeetingStorageContext) -> Bool { a === b }
+    public func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+}
+public enum MeetingRegistryDomain: Hashable, Sendable { case physical, virtual(MeetingStorageContext) }
+public enum MeetingStorageFault: Error { case missing, interrupted, io }
+public enum MeetingOpenMode: Equatable { case directory, read, write, exclusive }
+public struct MeetingVolume { public let local: Bool, name: String; public init(local: Bool, name: String) { self.local = local; self.name = name } }
+/// Every OS query is injected. A virtual bottom implements every method; there is no Darwin fallback.
+public protocol MeetingStorageBottom: AnyObject {
+    var registryDomain: MeetingRegistryDomain { get }
+    var uid: uid_t { get }
+    func uptime() -> TimeInterval
+    func checkpoint(_ operation: String, name: String?) throws
+    func open(parent: Int32?, name: String, mode: MeetingOpenMode) throws -> Int32
+    func mkdir(parent: Int32, name: String) throws
+    func inspect(_ fd: Int32) throws -> stat
+    func named(parent: Int32, name: String) throws -> stat?
+    func volume(_ fd: Int32) throws -> MeetingVolume
+    func finderAlias(_ fd: Int32) throws -> Bool
+    func denyACLCount(_ fd: Int32, maximum: Int, check: () throws -> Void) throws -> Int
+    func flock(_ fd: Int32) throws
+    func duplicate(_ fd: Int32) throws -> Int32
+    func makeStream(_ fd: Int32) throws
+    func nextName(_ stream: Int32) throws -> String?
+    func closeStream(_ stream: Int32) throws
+    func read(_ fd: Int32, maximum: Int) throws -> Data
+    func write(_ fd: Int32, bytes: Data) throws -> Int
+    func freeBytes(_ fd: Int32) throws -> Int64
+    func sync(_ fd: Int32) throws
+    func rename(parent: Int32, from: String, to: String) throws
+    func unlink(parent: Int32, name: String, directory: Bool) throws
+    /// Must consume the raw descriptor once even when the close result is unknown.
+    func close(_ fd: Int32) throws
+}
+
+private func meetingExclusiveLock(_ fd: Int32) -> Int32 { flock(fd,LOCK_EX | LOCK_NB) }
+
+/// Explicit real bottom, never constructed by the store or owner. Initializing this object does no IO.
+public final class MeetingDarwinBottom: MeetingStorageBottom {
+    private let tick: () -> TimeInterval, fault: (String,String?) throws -> Void
+    private var streams: [Int32:UnsafeMutablePointer<DIR>] = [:]
+    public init(uptime: @escaping () -> TimeInterval, checkpoint: @escaping (String,String?) throws -> Void) { tick = uptime; fault = checkpoint }
+    public var registryDomain: MeetingRegistryDomain { .physical }
+    public var uid: uid_t { geteuid() }
+    public func uptime() -> TimeInterval { tick() }
+    public func checkpoint(_ operation: String, name: String?) throws { try fault(operation,name) }
+    private func error() -> MeetingStorageFault { errno == ENOENT ? .missing : errno == EINTR ? .interrupted : .io }
+    public func open(parent: Int32?, name: String, mode: MeetingOpenMode) throws -> Int32 {
+        let flags: Int32
+        switch mode { case .directory: flags = O_RDONLY | O_DIRECTORY; case .read: flags = O_RDONLY; case .write: flags = O_RDWR; case .exclusive: flags = O_RDWR | O_CREAT | O_EXCL }
+        let safe = flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        let fd: Int32
+        if let parent { fd = openat(parent,name,safe,0o600) } else { guard name == "/", mode == .directory else { throw MeetingStorageFault.io }; fd = Darwin.open(name,safe) }
+        guard fd >= 0 else { throw error() }; return fd
+    }
+    public func mkdir(parent: Int32, name: String) throws { guard mkdirat(parent,name,0o700) == 0 else { throw error() } }
+    public func inspect(_ fd: Int32) throws -> stat { var s = stat(); guard fstat(fd,&s) == 0 else { throw error() }; return s }
+    public func named(parent: Int32, name: String) throws -> stat? { var s = stat(); if fstatat(parent,name,&s,AT_SYMLINK_NOFOLLOW) == 0 { return s }; guard errno == ENOENT else { throw error() }; return nil }
+    public func volume(_ fd: Int32) throws -> MeetingVolume {
+        var v = statfs(); guard fstatfs(fd,&v) == 0 else { throw error() }
+        let name = withUnsafePointer(to:v.f_fstypename) { $0.withMemoryRebound(to:CChar.self,capacity:16) { String(cString:$0) } }
+        return .init(local:v.f_flags & UInt32(MNT_LOCAL) != 0,name:name)
+    }
+    public func finderAlias(_ fd: Int32) throws -> Bool {
+        var b = [UInt8](repeating:0,count:32); let n = b.withUnsafeMutableBytes { fgetxattr(fd,"com.apple.FinderInfo",$0.baseAddress,$0.count,0,0) }
+        if n < 0 { guard errno == ENOATTR else { throw error() }; return false }; guard n == 32 else { throw MeetingStorageFault.io }; return b[8] & 0x80 != 0
+    }
+    public func denyACLCount(_ fd: Int32, maximum: Int, check: () throws -> Void) throws -> Int {
+        guard maximum == 0 || maximum == 64 else { throw MeetingStorageFault.io }
+        try check()
+        guard let acl = acl_get_fd_np(fd,ACL_TYPE_EXTENDED) else { guard errno == ENOENT else { throw error() }; return 0 }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?, flag = ACL_FIRST_ENTRY, count = 0
+        while true {
+            try check()
+            let status = acl_get_entry(acl,Int32(flag.rawValue),&entry)
+            if status == -1, errno == EINVAL { return count }
+            guard status == 0, let entry else { throw MeetingStorageFault.io }
+            count += 1; guard count <= maximum else { throw MeetingStorageFault.io }
+            var tag = acl_tag_t(0); guard acl_get_tag_type(entry,&tag) == 0, tag == ACL_EXTENDED_DENY else { throw MeetingStorageFault.io }
+            flag = ACL_NEXT_ENTRY
+        }
+    }
+    public func flock(_ fd: Int32) throws { guard meetingExclusiveLock(fd) == 0 else { throw SavedAudioImportStorage.Failure.contended } }
+    public func duplicate(_ fd: Int32) throws -> Int32 { let copy = fcntl(fd,F_DUPFD_CLOEXEC,0); guard copy >= 0 else { throw error() }; return copy }
+    public func makeStream(_ fd: Int32) throws { guard streams[fd] == nil, let stream = fdopendir(fd) else { throw MeetingStorageFault.io }; streams[fd] = stream; rewinddir(stream) }
+    public func nextName(_ stream: Int32) throws -> String? {
+        guard let p = streams[stream] else { throw MeetingStorageFault.io }; errno = 0
+        guard let e = readdir(p) else { guard errno == 0 else { throw error() }; return nil }
+        let b = withUnsafePointer(to:e.pointee.d_name) { $0.withMemoryRebound(to:UInt8.self,capacity:Int(MAXNAMLEN)+1) { Array(UnsafeBufferPointer(start:$0,count:Int(MAXNAMLEN)+1)) } }
+        guard let end = b.firstIndex(of:0), let value = String(bytes:b[..<end],encoding:.utf8) else { throw MeetingStorageFault.io }; return value
+    }
+    public func closeStream(_ stream: Int32) throws { guard let p = streams.removeValue(forKey:stream) else { throw MeetingStorageFault.io }; guard closedir(p) == 0 else { throw MeetingStorageFault.io } }
+    public func read(_ fd: Int32, maximum: Int) throws -> Data {
+        guard maximum > 0, maximum <= 65_536 else { throw MeetingStorageFault.io }
+        var bytes = Data(count:maximum); let n = bytes.withUnsafeMutableBytes { Darwin.read(fd,$0.baseAddress!,maximum) }
+        guard n >= 0 else { throw error() }; bytes.count = n; return bytes
+    }
+    public func write(_ fd: Int32, bytes: Data) throws -> Int { let n = bytes.withUnsafeBytes { Darwin.write(fd,$0.baseAddress!,bytes.count) }; guard n >= 0 else { throw error() }; return n }
+    public func freeBytes(_ fd: Int32) throws -> Int64 {
+        var s = statfs(); guard fstatfs(fd,&s) == 0, s.f_bsize > 0 else { throw MeetingStorageFault.io }
+        let product = UInt64(s.f_bavail).multipliedReportingOverflow(by:UInt64(s.f_bsize)); guard !product.overflow, product.partialValue <= UInt64(Int64.max) else { throw MeetingStorageFault.io }; return Int64(product.partialValue)
+    }
+    public func sync(_ fd: Int32) throws { guard fsync(fd) == 0 else { throw error() } }
+    public func rename(parent: Int32, from: String, to: String) throws { guard renameat(parent,from,parent,to) == 0 else { throw error() } }
+    public func unlink(parent: Int32, name: String, directory: Bool) throws { guard unlinkat(parent,name,directory ? AT_REMOVEDIR : 0) == 0 else { throw error() } }
+    public func close(_ fd: Int32) throws { guard Darwin.close(fd) == 0 else { throw error() } }
+}
+
+extension SavedAudioImportStorage {
+    /// A retained meeting epoch. Store serialization surrounds every public phase; raw descriptors never escape.
+    final class MeetingLease {
+        typealias Member = SavedAudioImportStorage.Member
+        typealias Failure = SavedAudioImportStorage.Failure
+        struct Receipt: Equatable, Sendable {
+            let domain: MeetingRegistryDomain
+            let hashes: Int, hashBytes: UInt64, syncAttempts: Int, publications: Int
+            let validates: Int, enumerations: Int, fixed: Int, progress: Int, interrupts: Int, retirement: Int, path: Int, opens: Int, closes: Int, carryIn: Int, carryOut: Int, peak: Int
+            var credits: Int { validates * 1600 + enumerations * 550 + fixed + progress + interrupts * 2 + retirement + path }
+        }
+        final class Work {
+            let bottom: MeetingStorageBottom, started: TimeInterval, carry: Int
+            var hashes = 0, hashBytes: UInt64 = 0, syncAttempts = 0, publications = 0
+            var mutated = false
+            var validates = 0, enumerations = 0, fixed = 0, progress = 0, interrupts = 0, retirement = 0, path = 0, opens = 0, closes = 0, peak: Int
+            init(_ bottom: MeetingStorageBottom, carry: Int) { self.bottom = bottom; started = bottom.uptime(); self.carry = carry; peak = carry }
+            func charge(v: Int = 0, e: Int = 0, f: Int = 0, io: Int = 0, interrupt: Bool = false) throws {
+                let nv = validates + v, ne = enumerations + e, nf = fixed + f, ni = progress + io, nt = interrupts + (interrupt ? 1 : 0)
+                let current = bottom.uptime(), elapsed = current - started
+                // Denied precharges perform no primitive. Reserve once-only unwind and its failure fence first.
+                guard nv <= 32, ne <= 2, nf <= 2048 - 17, ni <= 1024, nt <= 128,
+                    nv * 1600 + ne * 550 + nf + ni + nt * 2 + path + 512 + 17 <= 65_536,
+                    started.isFinite, started >= 0, current.isFinite, elapsed.isFinite, elapsed >= 0, elapsed <= 30 else { throw Failure.bounds }
+                validates = nv; enumerations = ne; fixed = nf; progress = ni; interrupts = nt
+            }
+            func hashed(_ bytes: Int) throws {
+                guard bytes >= 0 else { throw Failure.bounds }
+                hashBytes = try MeetingSession.add(hashBytes,UInt64(bytes)); hashes += 1
+            }
+            func checkTime() throws {
+                let current = bottom.uptime(), elapsed = current-started
+                guard started.isFinite,started >= 0,current.isFinite,elapsed.isFinite,elapsed >= 0,elapsed <= 30 else { throw Failure.bounds }
+            }
+            func opened() throws { opens += 1; peak = max(peak,carry + opens - closes); guard peak <= 17, opens <= 64 else { throw Failure.bounds } }
+            func closed() { closes += 1; retirement += 8 }
+            func result(carryOut: Int, domain: MeetingRegistryDomain) -> Receipt { .init(domain:domain,hashes:hashes,hashBytes:hashBytes,syncAttempts:syncAttempts,publications:publications,validates:validates,enumerations:enumerations,fixed:fixed,progress:progress,interrupts:interrupts,retirement:retirement,path:path,opens:opens,closes:closes,carryIn:carry,carryOut:carryOut,peak:peak) }
+        }
+        struct Token: Equatable, Hashable { let context: MeetingStorageContext, epoch: UInt64, serial: UInt64 }
+        struct Owned { let token: Token, fd: Int32; var stream: Bool }
+        struct Binding { let parent: Int32, fd: Int32, name: String, identity: Identity }
+        struct Borrow { let owned: Owned, member: Member, name: String, generation: UInt64 }
+        enum Worker: Hashable, Sendable { case microphone, system, microphoneCallback, systemCallback, writer, output }
+        struct Hold: Equatable, Sendable { let context: MeetingStorageContext, epoch: UInt64, serial: UInt64, kind: Worker }
+        let context = MeetingStorageContext()
+        var currentEpoch: UInt64 { epoch }
+        private var registryDomain: MeetingRegistryDomain?
+        let root: URL, profile: MeetingStorageProfile, bottom: MeetingStorageBottom
+        private var epoch: UInt64 = 0, serial: UInt64 = 0
+        private var base: [Owned] = [], temporary: [Owned] = [], bindings: [Binding] = []
+        private var lockToken: Owned?, lockMember: Member?, registered: Identity?
+        private var borrowed: Borrow?, active = false
+        private var retiredValue = true
+        private var retired: Bool { get { holdLock.withLock { retiredValue } } set { holdLock.withLock { retiredValue = newValue } } }
+        private var poisonValue = false, unavailableValue = false
+        private(set) var poisoned: Bool { get { holdLock.withLock { poisonValue } } set { holdLock.withLock { poisonValue = newValue } } }
+        private(set) var unavailable: Bool { get { holdLock.withLock { unavailableValue } } set { holdLock.withLock { unavailableValue = newValue } } }
+        private let holdLock = NSRecursiveLock(); private var workers: [Worker:Hold] = [:]
+        private var quit = false, revoked = false, outputRevoked = false
+        var identity: Identity? { registered }
+        var directory: Int32 { base.last?.fd ?? -1 }
+        var rawCount: Int { base.count + temporary.count + (lockToken == nil ? 0 : 1) + (borrowed == nil ? 0 : 1) }
+        var hasBorrow: Bool { borrowed != nil }
+        var drained: Bool { holdLock.withLock { workers.isEmpty } && borrowed == nil }
+        var ready: Bool { quit && drained && !active && !poisoned && !unavailable && !retired && lockToken != nil }
+        init(root: URL, profile: MeetingStorageProfile, bottom: MeetingStorageBottom) { self.root = root; self.profile = profile; self.bottom = bottom }
+        func register(_ kind: Worker) throws -> Hold {
+            try holdLock.withLock {
+                guard (!revoked || (kind == .output && !quit && !outputRevoked)), !retired, !poisoned, !unavailable, workers[kind] == nil else { throw Failure.revoked }
+                serial = try MeetingSession.add(serial,1); let token = Hold(context:context,epoch:epoch,serial:serial,kind:kind); workers[kind] = token; return token
+            }
+        }
+        func actualExit(_ hold: Hold) throws { try holdLock.withLock { guard workers[hold.kind] == hold, hold.epoch == epoch else { throw Failure.changed }; workers.removeValue(forKey:hold.kind) } }
+        func fence(allWorkers: Bool = false) { holdLock.withLock { revoked = true; if allWorkers { outputRevoked = true } } }
+        func reserveQuit() { holdLock.withLock { quit = true; revoked = true } }
+        func cancelQuit() { holdLock.withLock { quit = false } }
+        func begin(cold: Bool = false, retirementOnly: Bool = false) throws -> Work {
+            try holdLock.withLock {
+            guard (serial <= UInt64.max - 128 || retirementOnly), !active, !poisoned || retirementOnly, !unavailable || retirementOnly else { throw Failure.unavailable }
+            if cold { guard base.isEmpty, lockToken == nil, borrowed == nil, registered == nil, holdLock.withLock({workers.isEmpty}) else { throw Failure.contended }; epoch = try MeetingSession.add(epoch,1); retired = false }
+            else { guard !retired, !base.isEmpty, lockToken != nil, registered != nil else { throw Failure.unavailable } }
+            active = true; return Work(bottom,carry:rawCount)
+            }
+        }
+        func checkpoint(_ label: String, name: String?, fixed: Int, _ b: Work) throws { try b.charge(f:fixed); try bottom.checkpoint(label,name:name) }
+        private func acquired(_ fd: Int32, base isBase: Bool, isLock: Bool = false, _ b: Work) throws -> Owned {
+            let owned = try holdLock.withLock { () throws -> Owned in
+                serial = try MeetingSession.add(serial,1); return Owned(token:.init(context:context,epoch:epoch,serial:serial),fd:fd,stream:false)
+            }
+            if isLock { lockToken = owned } else if isBase { base.append(owned) } else { temporary.append(owned) }
+            try b.opened(); try bottom.checkpoint(isBase ? "base-open" : "temporary-open",name:nil); return owned
+        }
+        private func consume(_ owned: Owned, _ b: Work) throws {
+            // Remove ownership BEFORE observing either close or injected post-close failure. Never retry the raw integer.
+            if let i = temporary.firstIndex(where:{$0.token == owned.token}) { temporary.remove(at:i) }
+            else if let i = base.firstIndex(where:{$0.token == owned.token}) { base.remove(at:i) }
+            else if lockToken?.token == owned.token { lockToken = nil }
+            else if borrowed?.owned.token == owned.token { borrowed = nil }
+            else { throw Failure.changed }
+            b.closed()
+            var failed = false; do { if owned.stream { try bottom.closeStream(owned.fd) } else { try bottom.close(owned.fd) } } catch { failed = true }
+            do { try bottom.checkpoint("close-observed",name:nil) } catch { failed = true }
+            if failed { poisoned = true; unavailable = true; throw Failure.uncertain }
+        }
+        func fail(_ b: Work, cold: Bool = false, undeliveredBorrow: Bool = false, final: Bool = false) {
+            unavailable = true; b.fixed += 17
+            while let token = temporary.last { try? consume(token,b) }
+            if undeliveredBorrow, let token = borrowed?.owned { try? consume(token,b) }
+            if cold || final { retireBase(b) }
+            active = false
+        }
+        func snapshot(_ b: Work) -> Receipt { b.result(carryOut:rawCount,domain:registryDomain!) }
+        func finish(_ b: Work) throws -> Receipt {
+            guard temporary.isEmpty else { throw Failure.uncertain }
+            try checkpoint("phase-exit",name:nil,fixed:17,b); try bottom.checkpoint("before-outward-receipt",name:nil)
+            active = false; return b.result(carryOut:rawCount,domain:registryDomain!)
+        }
+        private func retireBase(_ b: Work) {
+            while let token = base.last { try? consume(token,b) }
+            if let token = lockToken { try? consume(token,b) } // meeting lock is deliberately LAST
+            bindings = []; retired = true; lockMember = nil
+            if !poisoned, let registered { _ = SelfRegistry.remove(registered,domain:registryDomain!); self.registered = nil }
+        }
+        // Shared in-process registry with imports; no profile can adopt an already retained physical root.
+        private enum SelfRegistry {
+            private struct Key: Hashable { let scope: MeetingStorageContext, identity: Identity }
+            private static let lock = NSLock(); private static var virtual = Set<Key>()
+            static func insert(_ key: Identity, domain: MeetingRegistryDomain) -> Bool {
+                switch domain {
+                case .physical: return SavedAudioImportStorage.registryLock.withLock { SavedAudioImportStorage.registry.insert(key).inserted }
+                case .virtual(let scope): return lock.withLock { virtual.insert(.init(scope:scope,identity:key)).inserted }
+                }
+            }
+            static func remove(_ key: Identity, domain: MeetingRegistryDomain) {
+                switch domain {
+                case .physical: _ = SavedAudioImportStorage.registryLock.withLock { SavedAudioImportStorage.registry.remove(key) }
+                case .virtual(let scope): _ = lock.withLock { virtual.remove(.init(scope:scope,identity:key)) }
+                }
+            }
+        }
+        private func directoryInfo(_ fd: Int32, privateRoot: Bool, strictParent: Bool, budget b: Work) throws -> stat {
+            let s = try bottom.inspect(fd), acl = try bottom.denyACLCount(fd,maximum:privateRoot ? 0 : 64,check:{try b.checkTime()})
+            guard s.st_mode & S_IFMT == S_IFDIR, s.st_uid == bottom.uid || (!privateRoot && s.st_uid == 0),
+                s.st_flags & 0x4000_0000 == 0, acl >= 0, acl <= 64, !privateRoot || acl == 0,
+                !privateRoot || s.st_mode & 0o7777 == 0o700,
+                s.st_mode & 0o022 == 0 || (!privateRoot && !strictParent && s.st_uid == 0 && s.st_mode & S_ISVTX != 0),
+                try !bottom.finderAlias(fd) else { throw Failure.changed }
+            if privateRoot || strictParent { let v = try bottom.volume(fd); guard v.local, v.name == "apfs" || v.name == "hfs" else { throw Failure.unavailable } }; return s
+        }
+        private func fileInfo(_ fd: Int32, cap: Int64, budget b: Work) throws -> Member {
+            let s = try bottom.inspect(fd)
+            guard s.st_mode & S_IFMT == S_IFREG, s.st_uid == bottom.uid, s.st_mode & 0o7777 == 0o600, s.st_nlink == 1,
+                s.st_size >= 0, s.st_size <= cap, s.st_flags & 0x4000_0000 == 0, s.st_dev == registered?.device,
+                try bottom.denyACLCount(fd,maximum:0,check:{try b.checkTime()}) == 0, try !bottom.finderAlias(fd) else { throw Failure.changed }
+            return Member(s)
+        }
+        private func namedMatch(_ name: String, _ member: Member) throws {
+            guard let named = try bottom.named(parent:directory,name:name), member.matches(named) else { throw Failure.changed }
+        }
+        func validate(_ b: Work, retirementOnly: Bool = false) throws {
+            try b.charge(v:1); try bottom.checkpoint("binding",name:nil); try validateBody(b,retirementOnly:retirementOnly)
+        }
+        private func validateBody(_ b: Work, retirementOnly: Bool = false) throws {
+            guard !poisoned, let registered, !base.isEmpty else { throw Failure.unavailable }
+            guard Identity(try directoryInfo(directory,privateRoot:true,strictParent:false,budget:b)) == registered else { throw Failure.changed }
+            for (i,binding) in bindings.enumerated() {
+                let held = try directoryInfo(binding.fd,privateRoot:i == bindings.count-1,strictParent:i == bindings.count-2,budget:b)
+                guard Identity(held) == binding.identity, let named = try bottom.named(parent:binding.parent,name:binding.name), Identity(named) == binding.identity, named.st_mode & S_IFMT == S_IFDIR else { throw Failure.changed }
+            }
+            if retirementOnly { guard try bottom.named(parent:directory,name:"lock") == nil else { throw Failure.changed }; return }
+            guard let token = lockToken, let lockMember, try fileInfo(token.fd,cap:0,budget:b) == lockMember else { throw Failure.changed }
+            try namedMatch("lock",lockMember); try b.checkTime()
+        }
+        /// Returns false only for an absent noncreating bootstrap. Existing empty roots are never adopted.
+        func acquire(create: Bool, _ b: Work) throws -> Bool {
+            registryDomain = bottom.registryDomain
+            b.path = 3072; try b.charge(v:1,f:33); try bottom.checkpoint("cold-acquire",name:nil)
+            guard root.isFileURL, root.host == nil || root.host == "" || root.host == "localhost", root.query == nil, root.fragment == nil,
+                root.path.utf8.count <= 4096, !root.path.utf8.contains(0), root.path.hasPrefix("/") else { throw Failure.bounds }
+            let parts = root.path.split(separator:"/").map(String.init)
+            guard !parts.isEmpty, parts.count <= profile.pathComponents, !parts.contains("."), !parts.contains("..") else { throw Failure.bounds }
+            var parent = try acquired(bottom.open(parent:nil,name:"/",mode:.directory),base:true,b).fd, rootCreated = false
+            for (i,name) in parts.enumerated() {
+                let child: Int32
+                do { child = try bottom.open(parent:parent,name:name,mode:.directory) }
+                catch MeetingStorageFault.missing {
+                    if !create {
+                        retireBase(b)
+                        guard !poisoned,!unavailable else { throw Failure.uncertain }
+                        return false
+                    }
+                    guard i >= parts.count-2 else { throw Failure.unavailable }; _ = try directoryInfo(parent,privateRoot:false,strictParent:true,budget:b)
+                    try checkpoint("mkdir-and-sync",name:name,fixed:38,b); b.mutated = true; try bottom.mkdir(parent:parent,name:name)
+                    child = try bottom.open(parent:parent,name:name,mode:.directory)
+                    _ = try acquired(child,base:true,b); b.syncAttempts += 1; try bottom.sync(child); b.syncAttempts += 1; try bottom.sync(parent)
+                    let s = try directoryInfo(child,privateRoot:i == parts.count-1,strictParent:i == parts.count-2,budget:b)
+                    bindings.append(.init(parent:parent,fd:child,name:name,identity:Identity(s))); parent = child
+                    if i == parts.count-1 { rootCreated = true }; continue
+                }
+                _ = try acquired(child,base:true,b)
+                let s = try directoryInfo(child,privateRoot:i == parts.count-1,strictParent:i == parts.count-2,budget:b)
+                bindings.append(.init(parent:parent,fd:child,name:name,identity:Identity(s))); parent = child
+            }
+            let key = Identity(try directoryInfo(directory,privateRoot:true,strictParent:false,budget:b))
+            guard SelfRegistry.insert(key,domain:registryDomain!) else { throw Failure.contended }; registered = key; try bottom.checkpoint("root-registered",name:nil)
+            if create { guard rootCreated else { throw Failure.unknown }; holdLock.withLock { revoked = false; quit = false; outputRevoked = false } }
+            if rootCreated { b.mutated = true }
+            let fd = try bottom.open(parent:directory,name:"lock",mode:rootCreated ? .exclusive : .write)
+            _ = try acquired(fd,base:false,isLock:true,b)
+            try bottom.checkpoint("lock-open-before-classification",name:"lock"); lockMember = try fileInfo(fd,cap:0,budget:b)
+            try bottom.checkpoint("lock-classified-before-flock",name:"lock"); try bottom.flock(fd); try bottom.checkpoint("flock-acquired",name:"lock")
+            try validateBody(b); return true
+        }
+        func names(_ b: Work) throws -> Set<String> {
+            try b.charge(e:1); try bottom.checkpoint("enumerate",name:nil)
+            let owned = try acquired(bottom.duplicate(directory),base:false,b)
+            try bottom.makeStream(owned.fd)
+            guard let i = temporary.firstIndex(where:{$0.token == owned.token}) else { throw Failure.uncertain }; temporary[i].stream = true
+            let stream = temporary[i]; try bottom.checkpoint("fdopendir-transfer",name:nil)
+            var names = Set<String>(), folded = Set<String>(), iterations = 0
+            while true {
+                try b.checkTime(); guard let name = try bottom.nextName(stream.fd) else { break }
+                iterations += 1; guard iterations <= 514 else { throw Failure.bounds }
+                if name == "." || name == ".." { continue }
+                guard names.count < profile.members, SavedAudioImportStorage.validName(name), names.insert(name).inserted, folded.insert(name.lowercased()).inserted else { throw Failure.unknown }
+            }
+            try consume(stream,b); return names
+        }
+        func create(_ name: String, cap: Int64, _ b: Work) throws -> (Owned,Member) {
+            try checkpoint("exclusive-create",name:name,fixed:46,b); try validate(b)
+            guard SavedAudioImportStorage.validName(name) else { throw Failure.unknown }
+            b.mutated = true
+            let token = try acquired(bottom.open(parent:directory,name:name,mode:.exclusive),base:false,b)
+            let m = try fileInfo(token.fd,cap:cap,budget:b); try namedMatch(name,m); guard m.bytes == 0 else { throw Failure.changed }
+            try bottom.checkpoint("created",name:name); return (token,m)
+        }
+        func writeOpen(_ name: String, member: Member, cap: Int64, _ b: Work) throws -> Owned {
+            try checkpoint("write-open",name:name,fixed:29,b); try validate(b); try namedMatch(name,member)
+            let token = try acquired(bottom.open(parent:directory,name:name,mode:.write),base:false,b)
+            guard try fileInfo(token.fd,cap:cap,budget:b) == member else { throw Failure.changed }; return token
+        }
+        func write(_ bytes: Data, token: Owned, name: String, registered member: Member, metadata: Bool, authorized: () throws -> Void, _ b: Work) throws -> String {
+            var offset = 0
+            while offset < bytes.count {
+                // Full primitive precharge precedes every interior fault edge, including the space query.
+                try b.charge(v:1,f:49)
+                try bottom.checkpoint("free-space",name:name)
+                let sum = try MeetingSession.add(Int64(536_870_912),MeetingSession.reservation)
+                guard try bottom.freeBytes(directory) >= sum else { throw Failure.space }
+                try bottom.checkpoint("write",name:name); try bottom.checkpoint("binding",name:nil)
+                try validateBody(b); try authorized()
+                let current = try fileInfo(token.fd,cap:Int64(bytes.count),budget:b); guard current.sameBirth(member) else { throw Failure.changed }; try namedMatch(name,current)
+                let count = min(metadata ? profile.metadata : 65_536,bytes.count-offset)
+                do {
+                    b.mutated = true
+                    try b.checkTime()
+                    let n = try bottom.write(token.fd,bytes:bytes.subdata(in:offset..<offset+count))
+                    try b.charge(io:1); guard n > 0, n <= count else { throw Failure.io }; offset += n
+                } catch MeetingStorageFault.interrupted { try b.charge(interrupt:true); try b.charge(); continue }
+            }
+            try checkpoint("input-hash",name:name,fixed:17,b); try b.hashed(bytes.count); return SavedAudioImportStorage.digest(bytes)
+        }
+        func syncClose(_ token: Owned, name: String, registered: Member, cap: Int64, authorized: () throws -> Void, _ b: Work) throws -> Member {
+            try checkpoint("file-sync",name:name,fixed:28,b); try validate(b); try authorized()
+            let m = try fileInfo(token.fd,cap:cap,budget:b); guard m.sameBirth(registered) else { throw Failure.changed }; try namedMatch(name,m)
+            b.syncAttempts += 1; try bottom.sync(token.fd); try consume(token,b); return m
+        }
+        func read(_ name: String, expected: Member?, cap: Int64, hash: String?, collect: Bool, authorized: () throws -> Void, _ b: Work) throws -> (Member,Data) {
+            try checkpoint("read-open",name:name,fixed:29,b); try validate(b); try authorized()
+            guard SavedAudioImportStorage.validName(name), let before = try bottom.named(parent:directory,name:name) else { throw Failure.changed }
+            let token = try acquired(bottom.open(parent:directory,name:name,mode:.read),base:false,b)
+            let m = try fileInfo(token.fd,cap:cap,budget:b); guard m.matches(before), expected == nil || expected == m else { throw Failure.changed }
+            var data = Data(), digest = SHA256(), total: Int64 = 0
+            while true {
+                try b.charge(f:1,io:1); try authorized()
+                do {
+                    let amount = Int(min(65_536,try MeetingSession.add(cap-total,1)))
+                    let bytes = try bottom.read(token.fd,maximum:amount); guard bytes.count <= amount else { throw Failure.io }
+                    if bytes.isEmpty { break }; total = try MeetingSession.add(total,Int64(bytes.count)); guard total <= cap else { throw Failure.bounds }
+                    digest.update(data:bytes); if collect { data.append(bytes) }
+                } catch MeetingStorageFault.interrupted { try b.charge(interrupt:true); try b.charge(); continue }
+            }
+            try checkpoint("read-hash-end",name:name,fixed:27,b)
+            guard total == m.bytes, try fileInfo(token.fd,cap:cap,budget:b) == m else { throw Failure.changed }; try namedMatch(name,m)
+            try b.hashed(Int(total))
+            let actual = digest.finalize().map { String(format:"%02x",$0) }.joined(); if let hash { guard actual == hash else { throw Failure.changed } }
+            try validate(b); try consume(token,b); return (m,data)
+        }
+        func rename(_ from: String, member: Member, to: String, replacing: Member?, authorized: () throws -> Void, _ b: Work) throws -> Member {
+            try checkpoint("rename",name:from,fixed:replacing == nil ? 59 : 69,b); try validate(b); try authorized()
+            let source = try acquired(bottom.open(parent:directory,name:from,mode:.read),base:false,b)
+            guard try fileInfo(source.fd,cap:member.bytes,budget:b) == member else { throw Failure.changed }; try namedMatch(from,member)
+            if let replacing {
+                guard to == "manifest.json", replacing.bytes <= profile.metadata else { throw Failure.changed }
+                let target = try acquired(bottom.open(parent:directory,name:to,mode:.read),base:false,b)
+                guard try fileInfo(target.fd,cap:Int64(profile.metadata),budget:b) == replacing else { throw Failure.changed }; try namedMatch(to,replacing)
+                try b.checkTime(); b.mutated = true; try bottom.rename(parent:directory,from:from,to:to)
+                let changed = try fileInfo(source.fd,cap:member.bytes,budget:b); guard changed.renamedFrom(member) else { throw Failure.changed }; try namedMatch(to,changed)
+                b.syncAttempts += 1; try bottom.sync(directory); b.publications += 1; try consume(target,b); try consume(source,b); return changed
+            }
+            guard try bottom.named(parent:directory,name:to) == nil else { throw Failure.changed }
+            try b.checkTime(); b.mutated = true; try bottom.rename(parent:directory,from:from,to:to)
+            let changed = try fileInfo(source.fd,cap:member.bytes,budget:b); guard changed.renamedFrom(member) else { throw Failure.changed }; try namedMatch(to,changed)
+            b.syncAttempts += 1; try bottom.sync(directory); if to == "manifest.json" { b.publications += 1 }; try consume(source,b); return changed
+        }
+        func unlink(_ name: String, member: Member, cap: Int64, exact: Bool, missingAllowed: Bool, _ b: Work) throws {
+            try checkpoint("unlink",name:name,fixed:32,b); try validate(b)
+            guard borrowed?.member.sameBirth(member) != true else { throw MeetingSession.Failure.held }
+            guard let named = try bottom.named(parent:directory,name:name) else { guard missingAllowed else { throw Failure.changed }; return }
+            let token = try acquired(bottom.open(parent:directory,name:name,mode:.read),base:false,b), current = try fileInfo(token.fd,cap:cap,budget:b)
+            guard current.matches(named), exact ? current == member : current.sameBirth(member) else { throw Failure.changed }
+            try namedMatch(name,current); try b.checkTime(); b.mutated = true; try bottom.unlink(parent:directory,name:name,directory:false); try consume(token,b)
+        }
+        func syncDirectory(_ b: Work) throws { try checkpoint("directory-sync",name:nil,fixed:18,b); b.syncAttempts += 1; try bottom.sync(directory) }
+        func borrow(_ name: String, member: Member, generation: UInt64, _ b: Work) throws -> Token {
+            guard borrowed == nil else { throw MeetingSession.Failure.held }
+            try checkpoint("borrow-open",name:name,fixed:29,b); try validate(b); try namedMatch(name,member)
+            let owned = try acquired(bottom.open(parent:directory,name:name,mode:.read),base:false,b)
+            guard try fileInfo(owned.fd,cap:member.bytes,budget:b) == member else { throw Failure.changed }
+            try checkpoint("borrow-transfer",name:name,fixed:34,b)
+            temporary.removeAll { $0.token == owned.token }; borrowed = .init(owned:owned,member:member,name:name,generation:generation)
+            try bottom.checkpoint("borrow-registered-before-receipt",name:name); return owned.token
+        }
+        func release(_ token: Token, _ b: Work) throws {
+            guard let owned = borrowed?.owned, owned.token == token else { throw Failure.changed }
+            // This matching actual-exit path is legal even under quarantine. No authorization IO or pre-close budget check.
+            b.fixed += 17; try consume(owned,b); try bottom.checkpoint("before-outward-receipt",name:nil); active = false
+        }
+        func detach(_ b: Work) throws {
+            guard drained, !poisoned else { throw MeetingSession.Failure.held }; try checkpoint("detach",name:nil,fixed:34,b)
+            retireBase(b); guard !poisoned else { throw Failure.uncertain }; active = false
+        }
+        func unlinkLock(_ b: Work) throws {
+            guard let lockMember else { throw Failure.changed }
+            try unlink("lock",member:lockMember,cap:0,exact:true,missingAllowed:false,b)
+        }
+        func finalClose(_ b: Work) throws {
+            guard drained, !poisoned else { throw MeetingSession.Failure.held }
+            try checkpoint("retirement-guard",name:nil,fixed:36,b); try validate(b,retirementOnly:true)
+            guard let binding = bindings.last else { throw Failure.changed }
+            try checkpoint("rmdir-parent-sync",name:binding.name,fixed:20,b)
+            try bottom.unlink(parent:binding.parent,name:binding.name,directory:true); b.syncAttempts += 1; try bottom.sync(binding.parent)
+            retireBase(b); guard !poisoned else { throw Failure.uncertain }; active = false
+        }
+        func matchesBorrow(_ token: Token, member: Member) -> Bool { borrowed?.owned.token == token && borrowed?.member == member }
+        func isBorrowed(_ member: Member) -> Bool { borrowed?.member.sameBirth(member) == true }
+    }
+}

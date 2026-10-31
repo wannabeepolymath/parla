@@ -317,3 +317,15 @@ extension SavedAudioImportStorageTests {
         }
     }
 }
+
+extension SavedAudioImportStorageTests {
+    func testMeetingProfileDoesNotBroadenTheImportStaticGrammarOrMetadataDefault() throws {
+        let profile = MeetingStorageProfile()
+        XCTAssertEqual(profile.members,512); XCTAssertEqual(profile.metadata,524_288); XCTAssertEqual(profile.pathComponents,12)
+        XCTAssertEqual(SavedAudioImportStore.maximumLedger,65_536)
+        let id = "00000000-0000-0000-0000-000000000001"
+        for suffix in [".source.pending",".source.wav",".result.pending",".raw.txt",".delete"] { XCTAssertTrue(SavedAudioImportStorage.validName(id+suffix)) }
+        for name in ["../manifest.json","manifest.next/child","meeting.json",id+".scratch",id+".source.wav/extra",String(repeating:"x",count:64)+".raw.txt"] { XCTAssertFalse(SavedAudioImportStorage.validName(name)) }
+        XCTAssertFalse(SavedAudioImportStorage.validName("ABCDEFAB-0000-0000-0000-000000000001.source.wav"))
+    }
+}

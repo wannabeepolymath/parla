@@ -477,3 +477,18 @@ extension SavedAudioImportStoreTests {
         }
     }
 }
+
+extension SavedAudioImportStoreTests {
+    func testMeetingDomainDoesNotChangeImportSchemaQuotaOrCapacity() throws {
+        XCTAssertEqual(SavedAudioImportStore.maximumJobs,10); XCTAssertEqual(SavedAudioImportStore.maximumSource,20_971_520)
+        XCTAssertEqual(SavedAudioImportStore.maximumResult,1_048_576); XCTAssertEqual(SavedAudioImportStore.maximumLedger,65_536)
+        XCTAssertEqual(SavedAudioImportStore.quota,268_435_456)
+        let owner = UUID(uuidString:"00000000-0000-0000-0000-000000000001")!, root = SavedAudioImportStorage.Identity(device:1,inode:1)
+        let value = SavedAudioImportStore.Marker(schema:1,owner:owner,root:root), encoder = JSONEncoder()
+        let bytes = try encoder.encode(value), decoded = try JSONDecoder().decode(SavedAudioImportStore.Marker.self,from:bytes)
+        XCTAssertEqual(decoded,value)
+        let meeting = Data("{\"d\":\"parla.meeting.1\",\"v\":1}".utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(SavedAudioImportStore.Marker.self,from:meeting))
+        XCTAssertThrowsError(try SavedAudioImportStore.Provenance.hash(String(repeating:"f",count:65)))
+    }
+}

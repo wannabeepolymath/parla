@@ -404,3 +404,13 @@ extension SavedAudioImportLifecycleTests {
         XCTAssertTrue(rig.native.paths.isEmpty); try await rig.close()
     }
 }
+
+extension SavedAudioImportLifecycleTests {
+    @MainActor func testMeetingFoundationConstructionAddsNoImportOrRecognitionWork() throws {
+        let bottom = LifecycleMeetingBottom(); var portCalls = 0, clocks = 0
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{clocks += 1; return 0})
+        let owner = MeetingSessionOwner(store:store,capture:.init(validate:{_ in portCalls += 1; return false},start:{_ in portCalls += 1; return .init(first:nil,second:nil)},requestStop:{portCalls += 1}),recognition:.init(run:{_,_ in portCalls += 1; return Task { .failure(MeetingSession.Failure.unavailable) } },requestCancel:{portCalls += 1}),wallClock:{clocks += 1; return 0},holdEpoch:1)
+        XCTAssertEqual(owner.state,.idle); XCTAssertEqual(owner.projection,.idle); XCTAssertEqual(bottom.calls,0); XCTAssertTrue(bottom.events.isEmpty)
+        XCTAssertEqual(portCalls,0); XCTAssertEqual(clocks,0)
+    }
+}
