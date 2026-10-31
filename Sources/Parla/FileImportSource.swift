@@ -9,15 +9,15 @@ final class FileImportSource: @unchecked Sendable {
         case unavailable, unsafe, changed, read
         var message: String {
             switch self {
-            case .unavailable: return "Choose a readable, locally resident WAV file."
-            case .unsafe: return "Use a regular local WAV without links, aliases or cloud placeholders."
+            case .unavailable: return "Choose a readable, locally resident WAV or restricted MOV file."
+            case .unsafe: return "Use a regular local WAV or restricted MOV without links, aliases or cloud placeholders."
             case .changed: return "The selected file changed. Choose it again before Start."
             case .read: return "The complete file could not be read. Choose it again to retry."
             }
         }
     }
     struct Access {
-        var conversion = ImportedAudio.Native()
+        var conversion: ImportedAudio.Native? = nil
         var start: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }
         var stop: (URL) -> Void = { $0.stopAccessingSecurityScopedResource() }
         var metadata: (URL, Int32) throws -> Void = { url, fd in
@@ -34,6 +34,7 @@ final class FileImportSource: @unchecked Sendable {
     private struct Binding {
         let parent: Int32, name: String, identity: stat
     }
+    let format: ImportedAudio.SourceFormat
     let displayName: String
     let byteCount: Int
     /// Destination protection only; recognition never reopens this pathname.
@@ -48,7 +49,13 @@ final class FileImportSource: @unchecked Sendable {
     init(url: URL, access: Access = .init()) throws {
         guard url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost",
               url.query == nil, url.fragment == nil, url.path.hasPrefix("/"),
-              !url.path.utf8.contains(0), url.pathExtension.lowercased() == "wav" else { throw Failure.unsafe }
+              !url.path.utf8.contains(0) else { throw Failure.unsafe }
+        let selectedFormat: ImportedAudio.SourceFormat
+        switch url.pathExtension.lowercased() {
+        case "wav": selectedFormat = .wav
+        case "mov": selectedFormat = .mov
+        default: throw Failure.unsafe
+        }
         let parts = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard !parts.isEmpty, !parts.contains("."), !parts.contains("..") else { throw Failure.unsafe }
         let scoped = access.start(url)
@@ -68,10 +75,13 @@ final class FileImportSource: @unchecked Sendable {
             var st = stat()
             guard fstat(parent, &st) == 0, st.st_mode & S_IFMT == S_IFREG,
                   st.st_flags & Self.datalessFlag == 0 else { throw Failure.unsafe }
-            guard st.st_size > 0, st.st_size <= ImportedWAV.maximumBytes else { throw ImportedWAV.Failure.size }
+            guard st.st_size > 0, st.st_size <= ImportedWAV.maximumBytes else {
+                if selectedFormat == .mov { throw ImportedPCMMOV.Failure.encodedLimit }
+                throw ImportedWAV.Failure.size
+            }
             try access.metadata(url, parent)
             try Self.validate(fd: parent, identity: st, bindings: bindings)
-            self.url = url; self.access = access; self.scoped = scoped
+            self.format = selectedFormat; self.url = url; self.access = access; self.scoped = scoped
             self.fd = parent; self.descriptors = opened; self.bindings = bindings; self.identity = st
             byteCount = Int(st.st_size)
             // Escape controls and bidi format characters; retain ordinary Unicode/spaces.
@@ -105,13 +115,13 @@ final class FileImportSource: @unchecked Sendable {
         }
     }
     struct Validated {
-        let decoded: ImportedAudio.Decoded
+        let decoded: ImportedAudio.SourceDecoded
         let encodedData: Data?
         let original: SavedAudioImportStore.Original?
         let startedUptime: TimeInterval, workCredits: Int
     }
     var originalIdentity: SavedAudioImportStorage.Identity { .init(device: identity.st_dev, inode: identity.st_ino) }
-    func samples(canceled: () -> Bool) throws -> ImportedAudio.Decoded {
+    func samples(canceled: () -> Bool) throws -> ImportedAudio.SourceDecoded {
         try readValidated(retainEncoded: false, canceled: canceled).decoded
     }
     /// Only explicit retained entry can extend the exact validated buffer's life.
@@ -143,7 +153,9 @@ final class FileImportSource: @unchecked Sendable {
         try check()
         let tail = buffer.withUnsafeMutableBytes { access.read(fd, $0.baseAddress!, 1) }
         guard tail == 0 else { throw Failure.changed }
-        let samples = try ImportedAudio.decode(bytes, canceled: { canceled() || self.lock.withLock { self.revoked } }, native: access.conversion)
+        let samples = try ImportedAudio.decodeSource(bytes, format: format,
+            canceled: { canceled() || self.lock.withLock { self.revoked } },
+            makeNative: { access.conversion ?? ImportedAudio.Native() })
         try validate(); try check()
         var resolvedPath: String?
         if retainEncoded {

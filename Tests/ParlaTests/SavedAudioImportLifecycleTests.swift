@@ -360,15 +360,24 @@ extension SavedAudioImportLifecycleTests {
     @MainActor func testCancelBeforeDequeueClosesUnborrowedSelectionAndNeverCreatesSavedPayload() async throws {
         let rig = try SavedImportRig(); await rig.ready()
         let gate = RecognitionTestLatch(), entered = expectation(description:"shared predecessor held")
+        let hold = MOVTestHold("selected saved predecessor",release:{gate.signal()})
+        defer {hold.release()}
+        var predecessorEntered = false
         let predecessor = PendingOperation(name:"saved predecessor")
-        rig.chain = PendingOperationQueue.enqueue(previous:nil,operation:predecessor,completes:true,work:{entered.fulfill(); await gate.wait()})
-        await fulfillment(of:[entered],timeout:5)
+        rig.chain = PendingOperationQueue.enqueue(previous:nil,operation:predecessor,completes:true,work:{await MainActor.run {predecessorEntered = true; entered.fulfill()}; await gate.wait()})
+        await fulfillment(of:[entered],timeout:3)
+        guard predecessorEntered else {
+            hold.release(); try recordWave4BFixture(rig.root,"selected-saved-predecessor-unobserved-preserved"); return
+        }
         let url = try rig.source(); rig.hub.selectAudioImport(url); let source = try XCTUnwrap(rig.transient.source)
         rig.hub.keepAudioImportAndTranscribe(); let job = try XCTUnwrap(rig.saved.job)
         rig.hub.cancelSavedAudioImport()
         XCTAssertTrue(source.isClosed); XCTAssertFalse(job.operation.hasExited); XCTAssertEqual(rig.originalReads,0)
         XCTAssertTrue(rig.native.paths.isEmpty); XCTAssertEqual(rig.faults.factoryEntries,0)
-        gate.signal(); await rig.chain?.value; await rig.saved.drain()
+        hold.release()
+        guard await observeMOVCompletion(self,"selected saved predecessor exit",work:{await rig.chain?.value; await rig.saved.drain()}) else {
+            rig.saved.invalidate(); try recordWave4BFixture(rig.root,"selected-saved-predecessor-exit-unobserved-preserved"); return
+        }
         XCTAssertTrue(job.operation.hasExited); XCTAssertTrue(rig.saved.rows.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath:rig.saved.store.storage.root.path))
         _ = try await rig.run(); XCTAssertNotNil(rig.saved.review?.accepted); XCTAssertEqual(rig.native.calls.count,1)
@@ -412,5 +421,134 @@ extension SavedAudioImportLifecycleTests {
         let owner = MeetingSessionOwner(store:store,capture:.init(validate:{_ in portCalls += 1; return false},start:{_ in portCalls += 1; return .init(first:nil,second:nil)},requestStop:{portCalls += 1}),recognition:.init(run:{_,_ in portCalls += 1; return Task { .failure(MeetingSession.Failure.unavailable) } },requestCancel:{portCalls += 1}),wallClock:{clocks += 1; return 0},holdEpoch:1)
         XCTAssertEqual(owner.state,.idle); XCTAssertEqual(owner.projection,.idle); XCTAssertEqual(bottom.calls,0); XCTAssertTrue(bottom.events.isEmpty)
         XCTAssertEqual(portCalls,0); XCTAssertEqual(clocks,0)
+    }
+}
+
+
+extension SavedAudioImportLifecycleTests {
+    @MainActor func testConnectedMOVLifetimeOriginalReaderCancelDeleteAndQuitJoinActualExit() async throws {
+        for action in 0..<3 {
+            let rig = try SavedImportRig(); await rig.ready()
+            let entered = expectation(description:"MOV original read held"), hold = MOVTestHold("MOV original reader")
+            defer {hold.release()}
+            var first = true, stops = 0
+            rig.transient.sourceAccess.start = {_ in true}; rig.transient.sourceAccess.stop = {_ in stops += 1}
+            rig.transient.sourceAccess.read = {fd,bytes,count in
+                rig.originalReads += 1
+                if first {first = false; XCTAssertFalse(Thread.isMainThread); hold.wait(entered:entered)}
+                return Darwin.read(fd,bytes,count)
+            }
+            let url = try rig.movSource(); rig.hub.selectAudioImport(url); let source = try XCTUnwrap(rig.transient.source)
+            rig.hub.keepAudioImportAndTranscribe(); await fulfillment(of:[entered],timeout:3)
+            guard hold.hasEntered else {
+                hold.release(); rig.saved.invalidate(); try recordWave4BFixture(rig.root,"MOV-original-entry-unobserved-preserved"); return
+            }
+            let job = try XCTUnwrap(rig.saved.job)
+            var quit: [Bool] = []; let reply = action == 2 ? expectation(description:"MOV quit replied") : nil
+            if action == 0 {rig.hub.cancelSavedAudioImport()}
+            if action == 1 {rig.hub.deleteSavedAudioImport(job.id)}
+            if let reply {rig.saved.beginShutdown {quit.append($0); reply.fulfill()}}
+            XCTAssertFalse(source.isClosed); XCTAssertEqual(stops,0); XCTAssertFalse(job.operation.hasExited)
+            XCTAssertTrue(rig.native.paths.isEmpty); XCTAssertFalse(rig.saved.restartReady())
+            hold.release()
+            guard await observeMOVCompletion(self,"MOV original reader chain and drain exit",work:{await rig.chain?.value; await rig.saved.drain()}) else {
+                rig.saved.invalidate(); try recordWave4BFixture(rig.root,"MOV-original-exit-unobserved-preserved"); return
+            }
+            if let reply {await fulfillment(of:[reply],timeout:3); XCTAssertEqual(quit,[true]); rig.saved.cancelShutdown()}
+            XCTAssertTrue(source.isClosed); XCTAssertEqual(stops,1); XCTAssertTrue(job.operation.hasExited)
+            XCTAssertTrue(rig.native.paths.isEmpty); XCTAssertNil(rig.saved.review)
+            XCTAssertEqual(try Data(contentsOf:url),PCMMOVConnectionFixture.bytes()); try await rig.close()
+        }
+    }
+
+    @MainActor func testConnectedMOVLifetimeOwnedBorrowConstructorAndASRHoldSharedLaneThroughDelete() async throws {
+        for phase in 0..<3 {
+            let rig = try SavedImportRig(); _ = try await rig.runMOV()
+            let id = try XCTUnwrap(rig.saved.rows.first?.id), sourceID = try XCTUnwrap(rig.saved.job?.token?.source)
+            let source = rig.saved.store.storage.root.appendingPathComponent(sourceID.uuidString.lowercased()+".source.mov")
+            let entered = expectation(description:"MOV owned phase \(phase) held"), hold = MOVTestHold("MOV owned phase \(phase)")
+            defer {hold.release()}
+            var armed = true, releaseAttempts = 0
+            rig.faults.event = {boundary,name in
+                if phase == 0, armed, boundary == .payloadRead, name?.hasSuffix(".source.mov") == true {
+                    armed = false; hold.wait(entered:entered)
+                }
+            }
+            // Storage.release emits checkpoint, not event. This counts attempts only;
+            // the observed chain/drain and deleted source below establish actual exit.
+            rig.faults.reached = {if $0 == .borrowRelease {releaseAttempts += 1}}
+            let block = {hold.wait(entered:entered)}
+            if phase == 1 {rig.native.construct = block}
+            if phase == 2 {rig.native.decode = block}
+            rig.hub.retrySavedAudioImport(id); await fulfillment(of:[entered],timeout:3)
+            guard hold.hasEntered else {
+                hold.release(); rig.saved.invalidate(); try recordWave4BFixture(rig.root,"MOV-owned-entry-unobserved-preserved"); return
+            }
+            let job = try XCTUnwrap(rig.saved.job)
+            rig.hub.deleteSavedAudioImport(id)
+            XCTAssertFalse(job.operation.hasExited); XCTAssertFalse(rig.saved.restartReady()); XCTAssertEqual(releaseAttempts,0)
+            XCTAssertTrue(FileManager.default.fileExists(atPath:source.path))
+            var nextEntered = false
+            let next = PendingOperationQueue.enqueue(previous:rig.chain,operation:PendingOperation(name:"after MOV exit"),completes:true,work:{await MainActor.run {nextEntered = true}})
+            XCTAssertFalse(nextEntered)
+            hold.release()
+            guard await observeMOVCompletion(self,"MOV owned consumer next and drain exit",work:{await next.value; await rig.chain?.value; await rig.saved.drain()}) else {
+                rig.saved.invalidate(); try recordWave4BFixture(rig.root,"MOV-owned-exit-unobserved-preserved"); return
+            }
+            XCTAssertTrue(nextEntered); XCTAssertTrue(job.operation.hasExited); XCTAssertEqual(releaseAttempts,1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath:source.path)); XCTAssertNil(rig.saved.review)
+            rig.native.construct = nil; rig.native.decode = nil; rig.faults.event = nil; rig.faults.reached = nil; try await rig.close()
+        }
+    }
+
+    @MainActor func testConnectedMOVLifetimeBorrowCloseUncertaintyNeverFreesReadinessOrDeletion() async throws {
+        let faults = SavedImportFaults(), rig = try SavedImportRig(faults:faults)
+        faults.closeBorrowFails = true; let original = try await rig.runMOV()
+        let id = try XCTUnwrap(rig.saved.rows.first?.id), token = try XCTUnwrap(rig.saved.job?.token)
+        XCTAssertEqual(rig.saved.store.failure,.uncertain); XCTAssertFalse(rig.saved.restartReady())
+        XCTAssertNotNil(rig.saved.review); XCTAssertNil(rig.saved.review?.accepted)
+        XCTAssertThrowsError(try rig.saved.store.close())
+        rig.hub.deleteSavedAudioImport(id); await rig.saved.drain()
+        XCTAssertFalse(rig.saved.restartReady())
+        XCTAssertTrue(FileManager.default.fileExists(atPath:rig.saved.store.storage.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov").path))
+        XCTAssertEqual(try Data(contentsOf:original),PCMMOVConnectionFixture.bytes())
+        rig.saved.invalidate(); rig.transient.invalidate(); await rig.chain?.value; await rig.saved.drain()
+        // The real fd was retired by the fault bottom; the logical uncertain
+        // Borrow remains intentionally fenced. Never label this fixture closed.
+        try recordWave4BFixture(rig.root,"MOV-borrow-close-uncertain-preserved")
+    }
+
+    @MainActor func testConnectedMOVLifetimeOutputIOAndRestartRequireActualRelease() async throws {
+        let rig = try SavedImportRig(); _ = try await rig.runMOV()
+        let review = try XCTUnwrap(rig.saved.review), io = try XCTUnwrap(rig.saved.beginOutputIO(review))
+        let hold = MOVTestHold("MOV output IO",release:{Task { @MainActor in rig.saved.endOutputIO(io) }})
+        defer {hold.release()}
+        XCTAssertTrue(rig.saved.reserveRestart()); XCTAssertFalse(rig.saved.restartReady())
+        var exited = false; let done = expectation(description:"MOV output drain joined")
+        let drain = Task { @MainActor in await rig.saved.drain(); exited = true; done.fulfill() }
+        await Task.yield(); XCTAssertFalse(exited)
+        hold.release(); await fulfillment(of:[done],timeout:3)
+        // Independent release watchdog owns the IO release even on failed wait.
+        guard exited else {XCTFail("MOV output drain exit unobserved; preserve fixture"); try recordWave4BFixture(rig.root,"MOV-output-exit-unobserved-preserved"); return}
+        await drain.value; XCTAssertTrue(exited); XCTAssertTrue(rig.saved.restartReady())
+        rig.saved.releaseRestart(); XCTAssertNil(rig.saved.review); try await rig.close()
+    }
+
+    @MainActor func testConnectedMOVLifetimeQueuedCancelReleasesUnborrowedOriginalWithoutMigration() async throws {
+        let rig = try SavedImportRig(); await rig.ready()
+        let gate = RecognitionTestLatch(), hold = MOVTestHold("MOV saved queued predecessor",release:{gate.signal()})
+        defer {hold.release()}
+        rig.chain = Task {await gate.wait()}
+        let url = try rig.movSource(); rig.hub.selectAudioImport(url); let source = try XCTUnwrap(rig.transient.source)
+        rig.hub.keepAudioImportAndTranscribe(); let job = try XCTUnwrap(rig.saved.job)
+        rig.hub.cancelSavedAudioImport()
+        XCTAssertTrue(source.isClosed); XCTAssertFalse(job.operation.hasExited); XCTAssertEqual(rig.originalReads,0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:rig.saved.store.storage.root.path))
+        hold.release()
+        guard await observeMOVCompletion(self,"MOV canceled queued chain and drain exit",work:{await rig.chain?.value; await rig.saved.drain()}) else {
+            rig.saved.invalidate(); try recordWave4BFixture(rig.root,"MOV-queued-exit-unobserved-preserved"); return
+        }
+        XCTAssertTrue(job.operation.hasExited); XCTAssertEqual(rig.originalReads,0); XCTAssertEqual(rig.faults.factoryEntries,0)
+        XCTAssertTrue(rig.saved.rows.isEmpty); try await rig.close()
     }
 }

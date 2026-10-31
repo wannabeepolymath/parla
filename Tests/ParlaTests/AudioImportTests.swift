@@ -74,7 +74,7 @@ private final class ImportTimedNative: @unchecked Sendable {
         defer { free(physical) }
         root = URL(fileURLWithPath: String(cString: physical), isDirectory: true)
             .appendingPathComponent("wave7c1-import-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         inode = (try FileManager.default.attributesOfItem(atPath: root.path)[.systemFileNumber] as! NSNumber).uint64Value
         try recordWave4BFixture(root, "created")
         try Self.receipt(root, action: "identity")
@@ -109,7 +109,7 @@ private final class ImportTimedNative: @unchecked Sendable {
         }
     }
     func file(_ name: String = "हिन्दी clip 世界.wav", bytes: Data? = nil) throws -> URL {
-        let url = root.appendingPathComponent(name); try (bytes ?? importWAV()).write(to: url); return url
+        let url = root.appendingPathComponent(name); try PCMMOVConnectionFixture.write(bytes ?? importWAV(),to:url); return url
     }
     func run(_ url: URL) async { hub.selectAudioImport(url); hub.startAudioImport(); await chain?.value }
     func close() async throws {
@@ -245,19 +245,29 @@ final class AudioImportTests: XCTestCase {
     }
     @MainActor func testT06QueuedCancellationSettlesAndHeldReaderRetainsScopeUntilExit() async throws {
         let r = try ImportRig(), url = try r.file(), gate = RecognitionTestLatch()
+        let predecessorHold = MOVTestHold("selected transient predecessor",release:{gate.signal()})
+        defer {predecessorHold.release()}
         r.chain = Task { await gate.wait() }
         r.hub.selectAudioImport(url); r.hub.startAudioImport(); let queued = try XCTUnwrap(r.owner.job)
         r.hub.discardAudioImport(); XCTAssertEqual(r.stops, 1); XCTAssertFalse(queued.operation.hasExited)
-        gate.signal(); await r.chain?.value
+        predecessorHold.release()
+        guard await observeMOVCompletion(self,"selected transient predecessor exit",work:{await r.chain?.value}) else {
+            r.owner.invalidate(); try recordWave4BFixture(r.root,"selected-transient-predecessor-exit-unobserved-preserved"); return
+        }
         XCTAssertTrue(queued.operation.hasExited); XCTAssertFalse(r.owner.busy); XCTAssertTrue(r.probe.paths.isEmpty)
-        let entered = expectation(description: "actual fd read held"), exit = DispatchSemaphore(value: 0)
+        let entered = expectation(description: "actual fd read held")
+        let readerHold = MOVTestHold("selected transient reader")
+        defer {readerHold.release()}
         var first = true
         r.owner.sourceAccess.read = { fd, buffer, count in
-            if first { first = false; entered.fulfill(); exit.wait() }
+            if first { first = false; readerHold.wait(entered:entered) }
             return Darwin.read(fd, buffer, count)
         }
         r.hub.selectAudioImport(url); r.hub.startAudioImport()
         await fulfillment(of: [entered], timeout: 3)
+        guard readerHold.hasEntered else {
+            readerHold.release(); r.owner.invalidate(); try recordWave4BFixture(r.root,"selected-transient-reader-unobserved-preserved"); return
+        }
         let held = try XCTUnwrap(r.owner.job)
         r.hub.discardAudioImport(); XCTAssertFalse(held.source.isClosed); XCTAssertEqual(r.stops, 1)
         r.hub.selectAudioImport(url); XCTAssertNil(r.owner.source)
@@ -265,7 +275,10 @@ final class AudioImportTests: XCTestCase {
         let next = PendingOperationQueue.enqueue(previous: r.chain, operation: PendingOperation(name: "ordinary next"), completes: true, work: {
             await MainActor.run { nextEntered = true }
         })
-        XCTAssertFalse(nextEntered); exit.signal(); await next.value; await r.chain?.value
+        XCTAssertFalse(nextEntered); readerHold.release()
+        guard await observeMOVCompletion(self,"selected transient reader and next exit",work:{await next.value; await r.chain?.value}) else {
+            r.owner.invalidate(); try recordWave4BFixture(r.root,"selected-transient-reader-exit-unobserved-preserved"); return
+        }
         XCTAssertTrue(nextEntered); XCTAssertTrue(held.source.isClosed); XCTAssertEqual(r.stops, 2)
         XCTAssertNil(r.owner.review); XCTAssertTrue(r.probe.paths.isEmpty)
         try await r.close()
@@ -1166,5 +1179,171 @@ extension AudioImportTests {
         XCTAssertEqual(r.owner.message, "Native timing is unavailable for this review. Copy or save its raw text.")
         XCTAssertEqual(panels, 0); XCTAssertEqual(writes, 0); XCTAssertEqual(p.calls, 2)
         try await r.close()
+    }
+}
+
+
+extension AudioImportTests {
+    @MainActor func testConnectedMOVSelectionRawStartUsesRealBatchAndLiteralPCMOnly() async throws {
+        let r = try ImportRig(), bytes = PCMMOVConnectionFixture.bytes(), url = try r.file("inert.MOV",bytes:bytes)
+        var converterEntries = 0; var native = ImportedAudio.Native()
+        native.make = {_,_ in converterEntries += 1; XCTFail("MOV entered WAV conversion"); return nil}
+        r.owner.sourceAccess.conversion = native
+        var selected: FileImportSource?
+        r.probe.construct = {XCTAssertTrue(selected?.isClosed == true); XCTAssertEqual(r.stops,1)}
+        r.hub.audioImportPicker = {url}; r.hub.chooseAudioImport(); selected = r.owner.source
+        XCTAssertNotNil(selected); XCTAssertEqual(selected?.format,.mov); XCTAssertEqual(r.reads,0)
+        XCTAssertTrue(r.probe.paths.isEmpty); XCTAssertTrue(r.history.entries.isEmpty); XCTAssertTrue(r.disk.copies.isEmpty)
+        r.hub.refreshAudioImportConfiguration(); r.hub.audioImportPicker = {nil}; r.hub.chooseAudioImport()
+        XCTAssertTrue(r.owner.source === selected); XCTAssertEqual(r.reads,0)
+        r.hub.startAudioImport(); await r.chain?.value
+        let review = try XCTUnwrap(r.owner.review,r.owner.message ?? "missing raw review")
+        XCTAssertEqual(review.sourceInfo.origin,.directMOVPCM16k); XCTAssertEqual(review.sourceInfo.profile,.qtPCM16kV1)
+        XCTAssertNil(review.segments); XCTAssertEqual(r.probe.calls.count,1)
+        XCTAssertEqual(r.probe.calls.first?.samples,PCMMOVConnectionFixture.samples)
+        XCTAssertEqual(converterEntries,0); XCTAssertEqual(r.probe.admissions,1)
+        XCTAssertTrue(selected?.isClosed == true); XCTAssertEqual(r.scopes,r.stops)
+        XCTAssertTrue(r.history.entries.isEmpty); XCTAssertTrue(r.disk.copies.isEmpty)
+        XCTAssertEqual(try Data(contentsOf:url),bytes)
+        r.hub.copyAudioImport(); XCTAssertEqual(r.disk.copies,["native original"])
+        r.hub.saveAudioImport(); XCTAssertEqual(r.history.entries.first?.raw,"native original")
+        try await r.close()
+    }
+    @MainActor func testConnectedMOVSelectionRenamingLimitsAndSilenceNeverLoadPrefix() async throws {
+        let r = try ImportRig(), valid = PCMMOVConnectionFixture.bytes()
+        for ext in ["mp4","aac","bin"] {
+            r.hub.selectAudioImport(try r.file("unsupported."+ext,bytes:valid))
+            XCTAssertNil(r.owner.source); XCTAssertEqual(r.scopes,0); XCTAssertEqual(r.reads,0)
+        }
+        let invalid = [importWAV(),Data(valid.dropLast()),valid + Data([0]),Data(repeating:0,count:20_971_521),PCMMOVConnectionFixture.bytes(silent:true)]
+        for (i,bytes) in invalid.enumerated() {
+            await r.run(try r.file("refusal-\(i).mov",bytes:bytes))
+            XCTAssertNil(r.owner.review); XCTAssertTrue(r.probe.paths.isEmpty); XCTAssertFalse(r.owner.busy)
+        }
+        await r.run(try r.file("renamed.wav",bytes:valid)); XCTAssertNil(r.owner.review); XCTAssertTrue(r.probe.paths.isEmpty)
+        await r.run(try r.file("positive.mov",bytes:valid))
+        XCTAssertEqual(r.probe.calls.count,1); XCTAssertEqual(r.probe.calls.first?.samples,PCMMOVConnectionFixture.samples)
+        try await r.close()
+    }
+    @MainActor func testConnectedMOVTimedOwnerAndDirectQueuedJobRefuseBeforeRead() async throws {
+        let r = try ImportRig(), url = try r.file("timed.mov",bytes:PCMMOVConnectionFixture.bytes())
+        r.hub.selectAudioImport(url); let selected = try XCTUnwrap(r.owner.source)
+        r.hub.startTimedAudioImport()
+        XCTAssertTrue(r.owner.source === selected); XCTAssertNil(r.owner.job); XCTAssertFalse(r.owner.busy)
+        XCTAssertEqual(r.reads,0); XCTAssertTrue(r.probe.paths.isEmpty); XCTAssertFalse(selected.isClosed)
+        let settings = try r.store.savedRetrySnapshot()
+        let direct = AudioImportOwner.Job(source:selected,settings:settings,selectionEpoch:UUID(),preparationEpoch:nil,diagnostics:r.hub.diagnostics,mode:.experimentalTimed)
+        var completed = false, succeeded = false
+        let queued = AudioImportExecution.enqueue(previous:nil,admission:r.admission,job:direct,store:r.store,
+            load:{_ in XCTFail("Queued MOV timing reached factory"); throw CancellationError()},done:{result in completed = true; if case .success = result {succeeded = true}})
+        await queued?.value
+        XCTAssertTrue(completed); XCTAssertFalse(succeeded); XCTAssertEqual(r.reads,0)
+        XCTAssertTrue(selected.isClosed); XCTAssertTrue(direct.operation.hasExited); XCTAssertTrue(r.probe.paths.isEmpty)
+        // Raw positive and original-WAV timing positive prove both gates are live.
+        r.hub.selectAudioImport(url); r.hub.startAudioImport(); await r.chain?.value
+        XCTAssertEqual(r.probe.calls.count,1); XCTAssertNil(r.owner.review?.segments)
+        let facts = try ImportedAudio.decodeSource(PCMMOVConnectionFixture.bytes(),format:.mov).transientSourceInfo
+        XCTAssertThrowsError(try AudioImportExecution.validateSource(facts,mode:.experimentalTimed))
+        try await r.close()
+        let (wav, timed, wavURL) = try timedRig(); await runTimed(wav,wavURL)
+        XCTAssertEqual(timed.calls,1); XCTAssertNotNil(wav.owner.review?.segments); try await wav.close()
+    }
+    @MainActor func testConnectedMOVBindingEOFMetadataPathAndAliasesRefuseBeforeFactory() async throws {
+        for cut in 0..<6 {
+            let r = try ImportRig(), bytes = PCMMOVConnectionFixture.bytes(), url = try r.file("binding.mov",bytes:bytes)
+            var first = true
+            r.owner.sourceAccess.read = {fd,buffer,count in
+                r.reads += 1
+                if cut == 0 {return 0}
+                if cut == 1 {return -1}
+                let n = Darwin.read(fd,buffer,count)
+                if count == 1, n == 0, cut == 2 {buffer.storeBytes(of:UInt8(1),as:UInt8.self); return 1}
+                if first, cut == 3 {
+                    first = false
+                    do {let replacement = try r.file("replacement.mov",bytes:bytes); XCTAssertEqual(rename(replacement.path,url.path),0)} catch {XCTFail("Replacement seam: \(error)")}
+                }
+                if count == 1, n == 0, cut == 4 {let writer = Darwin.open(url.path,O_WRONLY); if writer >= 0 {var changed: UInt8 = 0x33; _ = pwrite(writer,&changed,1,40); Darwin.close(writer)}}
+                return n
+            }
+            if cut == 5 {r.owner.sourceAccess.metadata = {_,_ in throw FileImportSource.Failure.unsafe}}
+            r.hub.selectAudioImport(url); r.hub.startAudioImport(); await r.chain?.value
+            XCTAssertNil(r.owner.review); XCTAssertTrue(r.probe.paths.isEmpty); XCTAssertEqual(r.scopes,r.stops)
+            try await r.close()
+        }
+        let r = try ImportRig(), url = try r.file("source.mov",bytes:PCMMOVConnectionFixture.bytes()), alias = r.root.appendingPathComponent("alias.mov")
+        XCTAssertEqual(symlink(url.path,alias.path),0); r.hub.selectAudioImport(alias); XCTAssertNil(r.owner.source)
+        await r.run(url); XCTAssertEqual(r.probe.calls.count,1); try await r.close()
+    }
+}
+
+
+extension AudioImportTests {
+    @MainActor func testConnectedMOVBindingPureCheckpointCancellationAndOriginalMutationCannotEscape() async throws {
+        for cancel in [false,true] {
+            let r = try ImportRig(), bytes = PCMMOVConnectionFixture.bytes(), url = try r.file("checkpoint.mov",bytes:bytes)
+            var structuralChecks = 0
+            _ = try ImportedPCMMOV.inspect(bytes,canceled:{structuralChecks += 1; return false})
+            let boundary = structuralChecks + 3 // First extraction chunk, after parser-owned copy/validation.
+            let state = NSLock(); var eof = false, checkpoints = 0, revoked = false
+            let entered = expectation(description:"pure MOV extraction checkpoint"), hold = MOVTestHold("pure MOV extraction")
+            defer {hold.release()}
+            r.owner.sourceAccess.read = {fd,buffer,count in
+                r.reads += 1; let n = Darwin.read(fd,buffer,count)
+                if count == 1, n == 0 {state.withLock {eof = true}}
+                return n
+            }
+            r.hub.selectAudioImport(url); let source = try XCTUnwrap(r.owner.source)
+            let reader = Task.detached { () -> Result<FileImportSource.Validated,Error> in
+                do {
+                    return .success(try source.readValidated(retainEncoded:true,canceled:{
+                        let atBoundary = state.withLock { () -> Bool in
+                            guard eof else {return false}; checkpoints += 1; return checkpoints == boundary
+                        }
+                        if atBoundary {hold.wait(entered:entered)}
+                        return state.withLock {revoked}
+                    }))
+                } catch {return .failure(error)}
+            }
+            await fulfillment(of:[entered],timeout:3)
+            guard hold.hasEntered else {
+                hold.release(); source.cancel(); try recordWave4BFixture(r.root,"MOV-pure-checkpoint-unobserved-preserved"); return
+            }
+            XCTAssertFalse(source.isClosed); XCTAssertEqual(r.stops,0)
+            if cancel {state.withLock {revoked = true}; source.cancel()}
+            else {
+                let writer = Darwin.open(url.path,O_WRONLY); XCTAssertGreaterThanOrEqual(writer,0)
+                if writer >= 0 {var value: UInt8 = 0x5a; XCTAssertEqual(pwrite(writer,&value,1,40),1); XCTAssertEqual(Darwin.close(writer),0)}
+            }
+            hold.release()
+            var observed: Result<FileImportSource.Validated,Error>?
+            guard await observeMOVCompletion(self,"pure MOV extraction reader exit",work:{observed = await reader.value}) else {
+                source.cancel(); try recordWave4BFixture(r.root,"MOV-pure-reader-exit-unobserved-preserved"); return
+            }
+            let result = try XCTUnwrap(observed)
+            switch result {
+            case .success: XCTFail("Canceled or postdecode-mutated original escaped as a validated source")
+            case .failure(let error):
+                if cancel {XCTAssertEqual(error as? ImportedPCMMOV.Failure,.canceled)}
+                else {
+                    if let failure = error as? FileImportSource.Failure, case .changed = failure {}
+                    else {XCTFail("Expected postdecode binding refusal, got \(error)")}
+                }
+            }
+            XCTAssertTrue(source.isClosed); XCTAssertEqual(r.stops,1); XCTAssertTrue(r.probe.paths.isEmpty)
+            try await r.close()
+        }
+    }
+
+    @MainActor func testConnectedMOVBindingFailedSavedHandoffStillProtectsOriginalAndAlias() async throws {
+        let rig = try SavedImportRig(); await rig.ready()
+        let url = try rig.movSource(), alias = rig.root.appendingPathComponent("failed-handoff.txt")
+        XCTAssertEqual(link(url.path,alias.path),0)
+        rig.transient.sourceAccess.read = {_,_,_ in 0}
+        rig.hub.selectAudioImport(url); rig.hub.keepAudioImportAndTranscribe(); await rig.chain?.value; await rig.saved.drain()
+        XCTAssertTrue(rig.saved.rows.isEmpty); XCTAssertEqual(rig.faults.factoryEntries,0)
+        XCTAssertThrowsError(try rig.hub.validateExportDestination(alias,fileExtension:"txt"))
+        XCTAssertThrowsError(try rig.hub.validateExportDestination(url,fileExtension:"mov"))
+        XCTAssertNoThrow(try rig.hub.validateExportDestination(rig.root.appendingPathComponent("safe.txt"),fileExtension:"txt"))
+        try await rig.close()
     }
 }

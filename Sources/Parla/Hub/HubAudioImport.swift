@@ -165,9 +165,9 @@ extension HubModel {
     }
     static func selectAudioImportURL() -> URL? {
         let panel = NSOpenPanel()
-        panel.title = "Choose one mono PCM WAV"
+        panel.title = "Choose WAV or restricted MOV…"
         panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.wav]; panel.resolvesAliases = false
+        panel.allowedContentTypes = [.wav, .quickTimeMovie]; panel.resolvesAliases = false
         return panel.runModal() == .OK ? panel.url : nil
     }
 }

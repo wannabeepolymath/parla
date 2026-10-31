@@ -368,7 +368,7 @@ final class SavedAudioImportOwner: ObservableObject {
         load:@escaping (RecognitionRequest) async throws -> RecognitionHandle) async -> Result<SavedAudioImportOwner.Completed,Error> {
             do {
                 let requested = try SavedAudioImportStore.Provenance(request:job.authority.configuration.request)
-                let decoded: ImportedAudio.Decoded
+                let decoded: ImportedAudio.SourceDecoded
                 var sourceBorrow: SavedAudioImportStore.Borrow?
                 defer { sourceBorrow?.end() }
                 let token: SavedAudioImportStore.AttemptToken
@@ -384,7 +384,12 @@ final class SavedAudioImportOwner: ObservableObject {
                     token = try store.begin(job.id,requested:requested,now:now(),authorized:authorized)
                     job.token = token
                     sourceBorrow = try store.borrow(token,now:now())
-                    decoded = try ImportedAudio.decode(store.source(token,now:now(),authorized:authorized),canceled:{!job.current})
+                    let snapshot = try store.sourceSnapshot(token,now:now(),authorized:authorized)
+                    let format: ImportedAudio.SourceFormat = snapshot.facts.profile == .wavPCM ? .wav : .mov
+                    decoded = try ImportedAudio.decodeSource(snapshot.bytes,format:format,canceled:{!job.current})
+                    if snapshot.facts.profile == .qtPCM16kV1 {
+                        guard SavedAudioImportStore.Facts(decoded.transientSourceInfo) == snapshot.facts else { throw SavedAudioImportStorage.Failure.changed }
+                    }
                 }
                 job.token = token
                 if sourceBorrow == nil { sourceBorrow = try store.borrow(token,now:now()) }

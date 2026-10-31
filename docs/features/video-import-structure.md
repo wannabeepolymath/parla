@@ -243,6 +243,24 @@ and 31 AAC structural tests**, in one serial package invocation with zero
 failures. The tests use authored in-memory containers, including literal sample
 oracles, compact tables, nonzero Data origins, external backing mutation,
 limits, rational clocks, aliases and cancellation checkpoints. Actual exporter
-compatibility remains unobserved. The reader is not connected to file selection,
-durable storage, recognition or output. General MOV/MP4 import and B40 remain
+compatibility remains unobserved.
+
+The reader is now connected to explicit file selection, ordinary raw transcription,
+private-copy admission and owned-source Retry through the closed `qtPCM16kV1`
+profile. MOV uses literal PCM extraction; the WAV converter remains lazy and is
+never constructed for MOV. Timed import remains strict WAV-only and refuses MOV
+before decoding. Retained MOV copies contain the entire original container,
+including video, under the existing seven-day private-import policy.
+
+First MOV admission migrates saved metadata from schema 1 to schema 2 before
+granting work, preserving old jobs and payloads. Publication uncertainty refuses
+MOV work and freezes storage; physical schema-1 rollback after a successful rename
+is not promised. Retry checks its verified owned bytes and redecoded MOV facts,
+without reopening the original. See [saved private imports](audio-file-import.md#saved-private-imports).
+
+The connected slice passed 103 distinct focused methods across four staged
+test-only correction snapshots (57 + 20 + 17 + 9), including all 34 new methods.
+Source review and corrected test-oracle review found no remaining blockers.
+This is neither a full-package pass nor exporter, installed-backend or native-UI
+qualification. General MOV/MP4 import, AAC native eligibility and B40 remain
 incomplete; the macOS completion count stays 23/43.

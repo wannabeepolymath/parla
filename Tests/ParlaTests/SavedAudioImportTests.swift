@@ -60,7 +60,7 @@ final class SavedImportClock { var value = Date(timeIntervalSince1970:2_000_000)
         var system = SavedAudioImportStorage.System()
         system.event = { boundary,name in
             if boundary == .payloadRead, let name {
-                if name.hasSuffix(".source.wav") || name.hasSuffix(".source.pending") {faults.sourceReads += 1}
+                if name.hasSuffix(".source.wav") || name.hasSuffix(".source.mov") || name.hasSuffix(".source.pending") {faults.sourceReads += 1}
                 if name.hasSuffix(".raw.txt") || name.hasSuffix(".result.pending") {faults.resultReads += 1}
             }
             try faults.event?(boundary,name)
@@ -779,6 +779,260 @@ extension SavedAudioImportTests {
             rig.faults.event = nil; rig.hub.openSavedAudioImport(id); await rig.saved.drain()
             XCTAssertNotNil(rig.saved.review); XCTAssertEqual(rig.native.calls.count,1)
             try await rig.close()
+        }
+    }
+}
+
+
+extension SavedImportRig {
+    func movSource(_ name: String = "original.mov", video: UInt8 = 0xa5, tail: UInt8 = 0x7f) throws -> URL {
+        let url = root.appendingPathComponent(name)
+        try PCMMOVConnectionFixture.write(PCMMOVConnectionFixture.bytes(video:video,tail:tail),to:url); return url
+    }
+    func runMOV(_ name: String = "original.mov", video: UInt8 = 0xa5, tail: UInt8 = 0x7f) async throws -> URL {
+        await ready(); let url = try movSource(name,video:video,tail:tail)
+        hub.selectAudioImport(url); hub.keepAudioImportAndTranscribe(); await chain?.value; await saved.drain(); return url
+    }
+}
+extension SavedAudioImportTests {
+    @MainActor func testConnectedMOVKeepRetryWholeSourceVideoTailAndFreshGlobals() async throws {
+        let rig = try SavedImportRig(); await rig.ready()
+        let a = PCMMOVConnectionFixture.bytes(), url = try rig.movSource()
+        XCTAssertFalse(FileManager.default.fileExists(atPath:rig.saved.store.storage.root.path))
+        rig.hub.selectAudioImport(url); let selected = try XCTUnwrap(rig.transient.source)
+        XCTAssertEqual(rig.originalReads,0); XCTAssertTrue(rig.native.paths.isEmpty)
+        XCTAssertTrue(rig.saved.rows.isEmpty); XCTAssertTrue(rig.history.entries.isEmpty); XCTAssertTrue(rig.copies.isEmpty)
+        rig.native.construct = {XCTAssertTrue(selected.isClosed)} // Original read fd is retired BEFORE ASR.
+        rig.hub.keepAudioImportAndTranscribe(); await rig.chain?.value; await rig.saved.drain()
+        let review = try XCTUnwrap(rig.saved.review,rig.saved.message ?? "no MOV review"), accepted = try XCTUnwrap(review.accepted)
+        let token = try XCTUnwrap(rig.saved.job?.token), source = rig.saved.store.storage.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov")
+        XCTAssertEqual(try Data(contentsOf:source),a); XCTAssertEqual(try Data(contentsOf:url),a)
+        XCTAssertEqual(accepted.sourceHash,SavedAudioImportStorage.digest(a)); XCTAssertEqual(accepted.sourceGeneration,token.source)
+        XCTAssertEqual(rig.saved.rows.first?.sourceProfile,.qtPCM16kV1)
+        XCTAssertEqual(rig.native.calls.first?.samples,PCMMOVConnectionFixture.samples); XCTAssertEqual(rig.native.calls.count,1)
+        XCTAssertGreaterThan(rig.faults.sourceReads,0) // Includes .source.mov verify reads.
+        let reads = rig.originalReads, savedReads = rig.faults.sourceReads
+        XCTAssertEqual(unlink(url.path),0)
+        var settings = try rig.settings.savedRetrySnapshot(); settings.language = "en"; settings.dictionary = ["Fresh"]
+        try rig.settings.save(settings); rig.hub.refreshAudioImportConfiguration()
+        rig.hub.retrySavedAudioImport(token.job); await rig.chain?.value; await rig.saved.drain()
+        XCTAssertEqual(rig.originalReads,reads); XCTAssertGreaterThan(rig.faults.sourceReads,savedReads)
+        XCTAssertEqual(rig.native.calls.count,2); XCTAssertEqual(rig.native.calls.last?.samples,PCMMOVConnectionFixture.samples)
+        XCTAssertEqual(rig.native.calls.last?.language,"en"); XCTAssertEqual(rig.native.calls.last?.prompt,"Fresh")
+        XCTAssertFalse(FileManager.default.fileExists(atPath:url.path))
+        rig.native.construct = nil
+        let b = PCMMOVConnectionFixture.bytes(video:0x5a,tail:0x33)
+        _ = try await rig.runMOV("visual-mutation.mov",video:0x5a,tail:0x33)
+        let second = try XCTUnwrap(rig.saved.review?.accepted), secondToken = try XCTUnwrap(rig.saved.job?.token)
+        XCTAssertNotEqual(second.sourceHash,accepted.sourceHash)
+        XCTAssertEqual(second.sourceHash,SavedAudioImportStorage.digest(b)); XCTAssertEqual(rig.native.calls.last?.samples,PCMMOVConnectionFixture.samples)
+        XCTAssertEqual(try Data(contentsOf:rig.saved.store.storage.root.appendingPathComponent(secondToken.source.uuidString.lowercased()+".source.mov")),b)
+        XCTAssertTrue(rig.history.entries.isEmpty); XCTAssertTrue(rig.copies.isEmpty)
+        try await rig.close()
+
+        // Same hash-valid bytes and a closed, numeric-valid schema2 ledger.
+        // Only MOV requires redecoded Facts equality; legacy WAV stays loose.
+        for isMOV in [false,true] {
+            let originalRig = try SavedImportRig()
+            let original = isMOV ? try await originalRig.runMOV() : try await originalRig.run()
+            let prior = try XCTUnwrap(originalRig.saved.review?.accepted)
+            let savedToken = try XCTUnwrap(originalRig.saved.job?.token)
+            let storageRoot = originalRig.saved.store.storage.root
+            let source = storageRoot.appendingPathComponent(savedToken.source.uuidString.lowercased() + (isMOV ? ".source.mov" : ".source.wav"))
+            let sourceBytes = try Data(contentsOf:source)
+            let expectedHash = SavedAudioImportStorage.digest(sourceBytes)
+            XCTAssertEqual(expectedHash,prior.sourceHash)
+            try await originalRig.close() // The old manifest generation is no longer held.
+            let manifest = storageRoot.appendingPathComponent("manifest.json")
+            var ledger = try XCTUnwrap(JSONSerialization.jsonObject(with:Data(contentsOf:manifest)) as? [String:Any])
+            // WAV-only files normally stay schema1. Use the explicit schema2 projection
+            // to compare the exact same durable profile boundary as the MOV negative.
+            ledger["schema"] = 2
+            var jobs = try XCTUnwrap(ledger["jobs"] as? [[String:Any]])
+            var facts = try XCTUnwrap(jobs[0]["facts"] as? [String:Any])
+            facts["profile"] = isMOV ? "qtPCM16kV1" : "wavPCM"
+            facts["frames"] = 8001; facts["outputFrames"] = 8001
+            jobs[0]["facts"] = facts; ledger["jobs"] = jobs
+            let modified = try JSONSerialization.data(withJSONObject:ledger,options:[.sortedKeys])
+            try modified.write(to:manifest)
+            XCTAssertEqual(try Data(contentsOf:source),sourceBytes)
+            XCTAssertEqual(unlink(original.path),0) // Retry cannot depend on the selected original.
+            var ownedReads = 0
+            var system = SavedAudioImportStorage.System()
+            system.event = {boundary,name in
+                if boundary == .payloadRead, name?.hasSuffix(isMOV ? ".source.mov" : ".source.wav") == true {ownedReads += 1}
+            }
+            let reopened = SavedAudioImportOwner(root:storageRoot,system:system,clock:{originalRig.now})
+            guard await observeMOVCompletion(self,"fact-mismatch metadata reopen",work:{await reopened.drain()}) else {
+                reopened.invalidate(); try recordWave4BFixture(originalRig.root,"MOV-fact-metadata-exit-unobserved-preserved"); return
+            }
+            XCTAssertEqual(reopened.metadataReadiness,.ready)
+            XCTAssertEqual(reopened.rows.map(\.id),[savedToken.job])
+            XCTAssertEqual(reopened.rows.first?.sourceProfile,isMOV ? .qtPCM16kV1 : .wavPCM)
+            XCTAssertNil(reopened.store.failure)
+            XCTAssertEqual(try Data(contentsOf:manifest),modified) // Bootstrap accepted; no repair.
+            XCTAssertEqual(ownedReads,0)
+            let transient = AudioImportOwner(); transient.savedImports = reopened; transient.security = {false}
+            transient.sourceAccess.read = {fd,buffer,count in originalRig.originalReads += 1; return Darwin.read(fd,buffer,count)}
+            let hub = HubModel(store:originalRig.settings,history:originalRig.history,clipboard:{_ in XCTFail("Retry copied output")},audioImport:transient)
+            var chain: Task<Void,Never>?, loads = 0
+            reopened.enqueue = {job,done in
+                let next = SavedAudioImportExecution.enqueue(previous:chain,admission:originalRig.admission,store:reopened.store,
+                    job:job,settings:originalRig.settings,now:{originalRig.now},enter:{},load:{request in
+                        await MainActor.run {loads += 1}
+                        let factory = await MainActor.run {originalRig.native.factory()}
+                        return try await RecognitionAcquisition.acquire(request:request,resident:nil,factory:factory,operation:job.operation,
+                            selectionEpoch:job.authority.selectionEpoch,preparationEpoch:job.authority.preparationEpoch)
+                    },done:done)
+                if let next {chain = next}; return next
+            }
+            hub.refreshAudioImportConfiguration()
+            let originalReads = originalRig.originalReads, nativeCalls = originalRig.native.calls.count
+            hub.retrySavedAudioImport(savedToken.job)
+            let retryJob = try XCTUnwrap(reopened.job)
+            guard await observeMOVCompletion(self,"fact-mismatch Hub Retry exit",work:{await chain?.value; await reopened.drain()}) else {
+                reopened.invalidate(); try recordWave4BFixture(originalRig.root,"MOV-fact-retry-exit-unobserved-preserved"); return
+            }
+            XCTAssertTrue(retryJob.operation.hasExited); XCTAssertGreaterThan(ownedReads,0)
+            XCTAssertEqual(originalRig.originalReads,originalReads)
+            XCTAssertEqual(try Data(contentsOf:source),sourceBytes)
+            XCTAssertEqual(SavedAudioImportStorage.digest(try Data(contentsOf:source)),expectedHash)
+            XCTAssertEqual(loads,isMOV ? 0 : 1)
+            XCTAssertEqual(originalRig.native.calls.count-nativeCalls,isMOV ? 0 : 1)
+            if isMOV {
+                XCTAssertNil(reopened.review)
+                XCTAssertEqual(reopened.rows.first?.result?.id,prior.id)
+            } else {XCTAssertNotNil(reopened.review?.accepted)}
+            reopened.invalidate(); transient.invalidate()
+            guard await observeMOVCompletion(self,"fact-mismatch close drain",work:{await chain?.value; await reopened.drain()}) else {
+                try recordWave4BFixture(originalRig.root,"MOV-fact-close-exit-unobserved-preserved"); return
+            }
+            try reopened.store.close()
+            try recordWave4BFixture(originalRig.root,"MOV-fact-comparison-closed")
+        }
+    }
+
+
+    @MainActor func testConnectedMOVTextOnlySaveRetryAndMissingSourceOpenHaveZeroSourceOrASRDelta() async throws {
+        let faults = SavedImportFaults(); faults.resultWriteFails = true
+        let rig = try SavedImportRig(faults:faults); let original = try await rig.runMOV()
+        let review = try XCTUnwrap(rig.saved.review,rig.saved.message ?? "no RAM text")
+        XCTAssertNil(review.accepted)
+        let id = review.resultID, bytes = review.bytes, date = review.date, token = review.token, observed = review.observed
+        let originalReads = rig.originalReads, sources = faults.sourceReads, factories = faults.factoryEntries, calls = rig.native.calls.count
+        // Remove both sources before Retry Save. This makes any hidden original or
+        // owned-source parse impossible; the current review retains only raw text.
+        XCTAssertEqual(unlink(original.path),0)
+        let sourceID = try XCTUnwrap(token?.source), source = rig.saved.store.storage.root.appendingPathComponent(sourceID.uuidString.lowercased()+".source.mov")
+        XCTAssertEqual(unlink(source.path),0)
+        rig.hub.retrySaveAudioImportResult(); await rig.saved.drain()
+        let saved = try XCTUnwrap(rig.saved.review?.accepted,rig.saved.message ?? "not saved")
+        XCTAssertEqual(saved.id,id); XCTAssertEqual(saved.date,date.timeIntervalSince1970)
+        XCTAssertEqual(rig.saved.review?.bytes,bytes); XCTAssertEqual(rig.saved.review?.token,token); XCTAssertEqual(saved.observed,observed)
+        XCTAssertEqual(rig.originalReads,originalReads); XCTAssertEqual(faults.sourceReads,sources)
+        XCTAssertEqual(faults.factoryEntries,factories); XCTAssertEqual(rig.native.calls.count,calls)
+        XCTAssertGreaterThan(faults.resultReads,0)
+        rig.hub.discardAudioImport(); rig.hub.openSavedAudioImport(review.jobID); await rig.saved.drain()
+        XCTAssertEqual(rig.saved.review?.bytes,bytes); XCTAssertEqual(rig.saved.review?.resultID,id)
+        XCTAssertEqual(rig.originalReads,originalReads); XCTAssertEqual(faults.sourceReads,sources)
+        XCTAssertEqual(faults.factoryEntries,factories); XCTAssertEqual(rig.native.calls.count,calls)
+        rig.hub.saveSavedAudioImportHistory(); await rig.saved.drain()
+        XCTAssertEqual(rig.history.entries.map(\.id),[id]); XCTAssertEqual(rig.history.entries.first?.raw,review.text)
+        rig.hub.saveSavedAudioImportHistory(); await rig.saved.drain(); XCTAssertEqual(rig.history.entries.count,1)
+        try await rig.close()
+    }
+
+    @MainActor func testConnectedMOVTextOnlyMetadataReopenDoesNotReadSourceOrTranscribe() async throws {
+        let rig = try SavedImportRig(); _ = try await rig.runMOV()
+        let id = try XCTUnwrap(rig.saved.rows.first?.id), calls = rig.native.calls.count, originalReads = rig.originalReads
+        rig.saved.invalidate(); await rig.saved.drain(); try rig.saved.store.close()
+        var payloadReads = 0, hashes = 0, writes = 0
+        var system = SavedAudioImportStorage.System()
+        system.event = {boundary,_ in
+            if boundary == .payloadRead {payloadReads += 1}
+            if boundary == .hash {hashes += 1}
+            if boundary == .write {writes += 1}
+        }
+        let reopened = SavedAudioImportOwner(root:rig.saved.store.storage.root,system:system,clock:{rig.now})
+        await reopened.drain()
+        XCTAssertEqual(reopened.metadataReadiness,.ready); XCTAssertEqual(reopened.rows.map(\.id),[id])
+        XCTAssertEqual(reopened.rows.first?.sourceProfile,.qtPCM16kV1)
+        XCTAssertEqual(payloadReads,0); XCTAssertEqual(hashes,0); XCTAssertEqual(writes,0)
+        XCTAssertEqual(rig.native.calls.count,calls); XCTAssertEqual(rig.originalReads,originalReads)
+        reopened.invalidate(); try reopened.store.close(); try await rig.close()
+    }
+
+    @MainActor func testConnectedMOVTextOnlyProtectionAliasesModalAuthorityAndSafeDestination() async throws {
+        let rig = try SavedImportRig(), original = try await rig.runMOV(), review = try XCTUnwrap(rig.saved.review)
+        let alias = rig.root.appendingPathComponent("original-alias.txt"), safe = rig.root.appendingPathComponent("safe.txt")
+        XCTAssertEqual(link(original.path,alias.path),0)
+        let protected = [alias,rig.saved.store.storage.root.appendingPathComponent("new.txt"),original]
+        for destination in protected {
+            rig.hub.audioImportExportPanel = {_ in destination}; rig.hub.exportSavedAudioImportText(); XCTAssertTrue(rig.written.isEmpty)
+        }
+        rig.hub.audioImportExportPanel = {_ in safe}; rig.hub.exportSavedAudioImportText(); XCTAssertEqual(rig.written,[review.bytes])
+        rig.written = []
+        rig.hub.audioImportExportPanel = {_ in rig.hub.discardAudioImport(); return safe}
+        rig.hub.exportSavedAudioImportText(); XCTAssertTrue(rig.written.isEmpty); XCTAssertNil(rig.saved.review)
+        rig.hub.openSavedAudioImport(review.jobID); await rig.saved.drain(); XCTAssertNotNil(rig.saved.review)
+        rig.now = try XCTUnwrap(rig.saved.rows.first?.expires)
+        rig.hub.copySavedAudioImport(); rig.hub.saveSavedAudioImportHistory(); rig.hub.exportSavedAudioImportText()
+        XCTAssertTrue(rig.copies.isEmpty); XCTAssertTrue(rig.history.entries.isEmpty); XCTAssertTrue(rig.written.isEmpty)
+        XCTAssertEqual(rig.native.calls.count,1); try await rig.close()
+    }
+
+    @MainActor func testConnectedMOVMixedJobsWAVResultMalformedRefusalMissingSourceAndFullDisk() async throws {
+        let faults = SavedImportFaults(), rig = try SavedImportRig(faults:faults)
+        _ = try await rig.run(); let wavReview = try XCTUnwrap(rig.saved.review), wavID = wavReview.jobID
+        _ = try await rig.runMOV(); let mov = try XCTUnwrap(rig.saved.review), token = try XCTUnwrap(rig.saved.job?.token)
+        let oldIDs = rig.saved.rows.map(\.id), count = rig.native.calls.count
+        let malformed = rig.root.appendingPathComponent("malformed.mov")
+        try PCMMOVConnectionFixture.write(Data(PCMMOVConnectionFixture.bytes().dropLast()),to:malformed)
+        rig.hub.selectAudioImport(malformed); rig.hub.keepAudioImportAndTranscribe(); await rig.chain?.value; await rig.saved.drain()
+        XCTAssertEqual(rig.saved.rows.map(\.id),oldIDs); XCTAssertEqual(rig.native.calls.count,count)
+        let missing = rig.saved.store.storage.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov")
+        XCTAssertEqual(unlink(missing.path),0)
+        let originalReads = rig.originalReads, factories = faults.factoryEntries
+        rig.hub.retrySavedAudioImport(mov.jobID); await rig.chain?.value; await rig.saved.drain()
+        XCTAssertNil(rig.saved.review); XCTAssertEqual(rig.originalReads,originalReads); XCTAssertEqual(faults.factoryEntries,factories)
+        rig.hub.openSavedAudioImport(wavID); await rig.saved.drain(); XCTAssertEqual(rig.saved.review?.bytes,wavReview.bytes)
+        rig.hub.openSavedAudioImport(mov.jobID); await rig.saved.drain(); XCTAssertEqual(rig.saved.review?.bytes,mov.bytes)
+        // Synthetic .space at the actual free-space seam, without changing quotas.
+        var failSpace = true
+        faults.event = {boundary,_ in
+            if boundary == .freeSpace, failSpace {failSpace = false; throw SavedAudioImportStorage.Failure.space}
+        }
+        _ = try await rig.runMOV("disk-full.mov")
+        XCTAssertFalse(failSpace)
+        XCTAssertEqual(rig.saved.rows.map(\.id),oldIDs); XCTAssertEqual(rig.native.calls.count,count)
+        XCTAssertEqual(faults.factoryEntries,factories); XCTAssertEqual(rig.saved.rows.first?.sourceProfile,.wavPCM)
+        try await rig.close()
+    }
+}
+
+
+extension SavedAudioImportTests {
+    @MainActor func testConnectedMOVKeepRetryMigrationFailureNeverEntersFactoryOrGrantsMOVPayload() async throws {
+        for cut in 0..<3 {
+            let faults = SavedImportFaults(), rig = try SavedImportRig(faults:faults); _ = try await rig.run()
+            let old = try XCTUnwrap(rig.saved.review), source = try XCTUnwrap(rig.saved.job?.token?.source)
+            let owned = rig.saved.store.storage.root.appendingPathComponent(source.uuidString.lowercased()+".source.wav")
+            let oldBytes = try Data(contentsOf:owned), factories = faults.factoryEntries, calls = rig.native.calls.count
+            var hit = false, movAllocations = 0
+            faults.event = {boundary,name in
+                if boundary == .create, name?.hasSuffix(".source.pending") == true {movAllocations += 1}
+                guard !hit else {return}
+                let target = cut == 0 ? boundary == .created && name == "manifest.next"
+                    : cut == 1 ? boundary == .rename && name == "manifest.next"
+                    : boundary == .directorySync && name == "manifest.json"
+                if target {hit = true; throw cut == 0 ? SavedAudioImportStorage.Failure.bounds : .revoked}
+            }
+            _ = try await rig.runMOV("refused.mov")
+            XCTAssertTrue(hit); XCTAssertEqual(movAllocations,0); XCTAssertEqual(faults.factoryEntries,factories)
+            XCTAssertEqual(rig.native.calls.count,calls); XCTAssertNil(rig.saved.review)
+            XCTAssertEqual(rig.saved.rows.map(\.id),[old.jobID]); XCTAssertEqual(rig.saved.store.failure,.uncertain)
+            XCTAssertEqual(try Data(contentsOf:owned),oldBytes); XCTAssertFalse(rig.saved.restartReady())
+            faults.event = nil; try await rig.close()
         }
     }
 }

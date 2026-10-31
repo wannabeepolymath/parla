@@ -32,15 +32,42 @@ public final class SavedAudioImportStore: @unchecked Sendable {
                   (0..<1_000_000_000).contains(changedNanoseconds), (0..<1_000_000_000).contains(birthNanoseconds) else { throw Failure.bounds }
         }
     }
+    // Ledger schema is explicit context; generic schema1 fixtures retain their old wire shape.
+    static let ledgerSchemaKey = CodingUserInfoKey(rawValue: "SavedAudioImportStore.ledgerSchema")!
     public struct Facts: Codable, Equatable, Sendable {
+        public let profile: ImportedAudio.SourceProfile
         public let rate: Int, frames: Int, outputFrames: Int, clipped: Int
-        public init(_ info: ImportedAudio.SourceInfo) {
+        public init(_ info: ImportedAudio.SourceInfo) { self.init(.wav(info)) }
+        public init(_ info: ImportedAudio.SourceFacts) {
+            profile = info.profile
             rate = info.sourceRate; frames = info.sourceFrames; outputFrames = info.outputFrames; clipped = info.clippedSamples
         }
+        private enum CodingKeys: String, CodingKey { case profile, rate, frames, outputFrames, clipped }
+        public init(from decoder: Decoder) throws {
+            let schema = decoder.userInfo[SavedAudioImportStore.ledgerSchemaKey] as? Int ?? 1
+            guard schema == 1 || schema == 2 else { throw Failure.unknown }
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            profile = schema == 1 ? .wavPCM : try c.decode(ImportedAudio.SourceProfile.self, forKey: .profile)
+            rate = try c.decode(Int.self, forKey: .rate); frames = try c.decode(Int.self, forKey: .frames)
+            outputFrames = try c.decode(Int.self, forKey: .outputFrames); clipped = try c.decode(Int.self, forKey: .clipped)
+        }
+        public func encode(to encoder: Encoder) throws {
+            let schema = encoder.userInfo[SavedAudioImportStore.ledgerSchemaKey] as? Int ?? 1
+            guard schema == 2 || (schema == 1 && profile == .wavPCM) else { throw Failure.unknown }
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            if schema == 2 { try c.encode(profile, forKey: .profile) }
+            try c.encode(rate, forKey: .rate); try c.encode(frames, forKey: .frames)
+            try c.encode(outputFrames, forKey: .outputFrames); try c.encode(clipped, forKey: .clipped)
+        }
         func validate() throws {
-            guard [8000,16000,22050,24000,32000,44100,48000].contains(rate), frames >= rate * 2 / 5,
-                  frames <= rate * 600, outputFrames >= 6400, outputFrames <= 9_600_000,
-                  clipped >= 0, clipped <= outputFrames else { throw Failure.bounds }
+            switch profile {
+            case .wavPCM:
+                guard [8000,16000,22050,24000,32000,44100,48000].contains(rate), frames >= rate * 2 / 5,
+                      frames <= rate * 600, outputFrames >= 6400, outputFrames <= 9_600_000,
+                      clipped >= 0, clipped <= outputFrames else { throw Failure.bounds }
+            case .qtPCM16kV1:
+                guard rate == 16_000, (6_400...9_600_000).contains(frames), outputFrames == frames, clipped == 0 else { throw Failure.bounds }
+            }
         }
     }
     public struct Provenance: Codable, Equatable, Sendable {
@@ -106,9 +133,12 @@ public final class SavedAudioImportStore: @unchecked Sendable {
         let id: UUID, hash: String, bytes: Int64
         var member: Member?
         var published: Bool
-        var pending: String { id.uuidString.lowercased() + (kind == .source ? ".source.pending" : ".result.pending") }
-        var final: String { id.uuidString.lowercased() + (kind == .source ? ".source.wav" : ".raw.txt") }
-        enum Kind: String, Codable { case source, result }
+        var pending: String { id.uuidString.lowercased() + (kind.isSource ? ".source.pending" : ".result.pending") }
+        var final: String { id.uuidString.lowercased() + (kind == .source ? ".source.wav" : kind == .pcmMOVSource ? ".source.mov" : ".raw.txt") }
+        enum Kind: String, Codable {
+            case source, pcmMOVSource, result
+            fileprivate var isSource: Bool { self == .source || self == .pcmMOVSource }
+        }
         let kind: Kind
     }
     public struct Accepted: Codable, Equatable, Sendable {
@@ -130,12 +160,32 @@ public final class SavedAudioImportStore: @unchecked Sendable {
     struct Ledger: Codable, Equatable {
         let schema: Int, owner: UUID, root: Identity
         var revision: UInt64, jobs: [Job]
+        init(schema: Int, owner: UUID, root: Identity, revision: UInt64, jobs: [Job]) {
+            self.schema = schema; self.owner = owner; self.root = root; self.revision = revision; self.jobs = jobs
+        }
+        private enum CodingKeys: String, CodingKey { case schema, owner, root, revision, jobs }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            schema = try c.decode(Int.self, forKey: .schema)
+            guard (schema == 1 || schema == 2),
+                  (decoder.userInfo[SavedAudioImportStore.ledgerSchemaKey] as? Int ?? 1) == schema else { throw Failure.unknown }
+            owner = try c.decode(UUID.self, forKey: .owner); root = try c.decode(Identity.self, forKey: .root)
+            revision = try c.decode(UInt64.self, forKey: .revision); jobs = try c.decode([Job].self, forKey: .jobs)
+        }
+        func encode(to encoder: Encoder) throws {
+            guard (schema == 1 || schema == 2),
+                  (encoder.userInfo[SavedAudioImportStore.ledgerSchemaKey] as? Int ?? 1) == schema else { throw Failure.unknown }
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(schema, forKey: .schema); try c.encode(owner, forKey: .owner); try c.encode(root, forKey: .root)
+            try c.encode(revision, forKey: .revision); try c.encode(jobs, forKey: .jobs)
+        }
     }
     struct Marker: Codable, Equatable { let schema: Int, owner: UUID, root: Identity }
     struct Tombstone: Codable, Equatable { let schema: Int, owner: UUID, root: Identity, job: UUID, generation: UUID }
     public struct Row: Identifiable, Sendable {
         public let id: UUID, label: String, created: Date, expires: Date, sourceBytes: Int64, state: State
         public let result: Accepted?, sourceAvailable: Bool, deleting: Bool
+        public let sourceProfile: ImportedAudio.SourceProfile
     }
     public struct Protection: Sendable {
         public let root: URL
@@ -144,6 +194,11 @@ public final class SavedAudioImportStore: @unchecked Sendable {
     }
     public struct AttemptToken: Equatable, Sendable {
         public let job: UUID, source: UUID, id: UUID, revision: UInt64
+    }
+    public struct SourceSnapshot: Sendable {
+        public let bytes: Data
+        public let facts: Facts
+        fileprivate init(bytes: Data, facts: Facts) { self.bytes = bytes; self.facts = facts }
     }
     public final class Borrow: @unchecked Sendable {
         private var owner: SavedAudioImportStore?
@@ -176,6 +231,25 @@ public final class SavedAudioImportStore: @unchecked Sendable {
         guard (original as? NSDictionary)?.isEqual(encoded) == true else { throw Failure.unknown }
         return value
     }
+    private func encodeLedger(_ value: Ledger) throws -> Data {
+        guard value.schema == 1 || value.schema == 2 else { throw Failure.unknown }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        encoder.userInfo[Self.ledgerSchemaKey] = value.schema
+        let bytes = try encoder.encode(value)
+        guard bytes.count <= Self.maximumLedger else { throw Failure.bounds }; return bytes
+    }
+    private func decodeLedger(_ bytes: Data) throws -> Ledger {
+        guard bytes.count <= Self.maximumLedger else { throw Failure.bounds }
+        struct Header: Decodable { let schema: Int }
+        let schema = try JSONDecoder().decode(Header.self, from: bytes).schema
+        guard schema == 1 || schema == 2 else { throw Failure.unknown }
+        let decoder = JSONDecoder(); decoder.userInfo[Self.ledgerSchemaKey] = schema
+        let value = try decoder.decode(Ledger.self, from: bytes)
+        let original = try JSONSerialization.jsonObject(with: bytes)
+        let roundtrip = try JSONSerialization.jsonObject(with: encodeLedger(value))
+        guard (original as? NSDictionary)?.isEqual(roundtrip) == true else { throw Failure.unknown }
+        try validate(value); return value
+    }
     private func clock(_ now: Date) throws -> TimeInterval {
         let value = now.timeIntervalSince1970
         guard value.isFinite, value >= 0, (value + 604_800).isFinite, (value + 604_800) - value == 604_800, lastClock.map({ value >= $0 }) ?? true,
@@ -183,7 +257,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
         lastClock = value; return value
     }
     private func validate(_ value: Ledger) throws {
-        guard value.schema == 1, value.root == storage.identity, value.jobs.count <= Self.maximumJobs,
+        guard (value.schema == 1 || value.schema == 2), value.root == storage.identity, value.jobs.count <= Self.maximumJobs,
               Set(value.jobs.map(\.id)).count == value.jobs.count,
               value.jobs.reduce(0, { $0 + ($1.candidate == nil ? 0 : 1) + ($1.retired == nil ? 0 : 1) }) <= 1 else { throw Failure.unknown }
         var names = Set<String>()
@@ -194,10 +268,25 @@ public final class SavedAudioImportStore: @unchecked Sendable {
                   job.accepted == nil || (job.source.published && job.accepted!.payload.published) else { throw Failure.unknown }
             guard !job.label.isEmpty, job.label.utf8.count <= 640, job.created.isFinite, job.created >= 0,
                   job.expires == job.created + 604_800, job.expires.isFinite, job.expires - job.created == 604_800,
-                  job.source.kind == .source, job.source.bytes > 0, job.source.bytes <= Self.maximumSource, job.source.bytes >= Int64(job.facts.frames * 2 + 44) else { throw Failure.unknown }
+                  job.source.kind.isSource, job.source.bytes > 0, job.source.bytes <= Self.maximumSource else { throw Failure.unknown }
+            switch job.facts.profile {
+            case .wavPCM:
+                guard job.source.kind == .source, job.source.bytes >= Int64(job.facts.frames * 2 + 44) else { throw Failure.unknown }
+            case .qtPCM16kV1:
+                let pcm = Int64(job.facts.frames).multipliedReportingOverflow(by: 2)
+                guard value.schema == 2, job.source.kind == .pcmMOVSource, !pcm.overflow,
+                      pcm.partialValue > 0, pcm.partialValue < job.source.bytes,
+                      job.source.bytes == job.original.bytes else { throw Failure.unknown }
+            }
+            if value.schema == 1 {
+                guard job.facts.profile == .wavPCM,
+                      [job.source,job.accepted?.payload,job.candidate?.payload,job.retired].compactMap({$0}).allSatisfy({$0.kind != .pcmMOVSource}) else { throw Failure.unknown }
+            } else {
+                guard [job.accepted?.payload,job.candidate?.payload,job.retired].compactMap({$0}).allSatisfy({$0.kind == .result}) else { throw Failure.unknown }
+            }
             for payload in [job.source, job.accepted?.payload, job.candidate?.payload, job.retired].compactMap({ $0 }) {
                 try Provenance.hash(payload.hash)
-                guard payload.bytes > 0, payload.bytes <= (payload.kind == .source ? Self.maximumSource : Self.maximumResult),
+                guard payload.bytes > 0, payload.bytes <= (payload.kind.isSource ? Self.maximumSource : Self.maximumResult),
                       names.insert(payload.pending).inserted, names.insert(payload.final).inserted,
                       payload.member.map({ $0.identity.device == value.root.device && $0.bytes >= 0 && $0.bytes <= payload.bytes }) ?? !payload.published else { throw Failure.unknown }
             }
@@ -211,7 +300,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
             }
         }
         guard try charge(value) <= Self.quota else { throw Failure.bounds }
-        _ = try encode(value, cap: Self.maximumLedger)
+        _ = try encodeLedger(value)
     }
     /// Peak logical charge includes source allocations, all accepted results and
     /// a global candidate, both ledgers, owner, lock and every tombstone reserve.
@@ -278,7 +367,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
                 guard let member = try storage.named("owner.json", cap: 4096, budget: budget),
                       let manifest = try storage.named("manifest.json", cap: 65_536, budget: budget) else { throw Failure.unknown }
                 let owner = try decode(Marker.self, storage.read("owner.json", expected: member, cap: 4096, payload: false, budget: budget), cap: 4096)
-                let ledger = try decode(Ledger.self, storage.read("manifest.json", expected: manifest, cap: 65_536, payload: false, budget: budget), cap: 65_536)
+                let ledger = try decodeLedger(storage.read("manifest.json", expected: manifest, cap: 65_536, payload: false, budget: budget))
                 guard owner.schema == 1, owner.owner == ledger.owner, owner.root == ledger.root else { throw Failure.unknown }
                 self.ledger = ledger; self.manifest = manifest; marker = member
                 try inspect(budget)
@@ -305,7 +394,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
     }
     private func publish(_ next: Ledger, authorized: () -> Bool, budget: SavedAudioImportStorage.Budget) throws {
         try validate(next)
-        let bytes = try encode(next, cap: 65_536)
+        let bytes = try encodeLedger(next)
         let reservation = try remaining(next,budget:budget)
         try storage.requireSpace(reservation, budget: budget)
         guard try storage.named("manifest.next", cap: 65_536, budget: budget) == nil else { throw Failure.unknown }
@@ -334,6 +423,32 @@ public final class SavedAudioImportStore: @unchecked Sendable {
         }
     }
 
+    /// Metadata-only successor. Every throwing publication exit freezes, including
+    /// exclusive create before a Member returns. Error type never proves a phase.
+    private func migrateForMOV(authorized: () -> Bool, budget: SavedAudioImportStorage.Budget) throws {
+        guard issue == nil, storage.failure == nil, let old = ledger else { throw Failure.unavailable }
+        guard old.schema == 1 else { return } // Valid schema2, including WAV-only, never downgrades.
+        guard authorized(), borrows.values.allSatisfy({ $0 == 0 }), heldSources.values.allSatisfy({ $0.isEmpty }),
+              !hasPendingStorage, old.jobs.allSatisfy({
+                  $0.state != .queued && $0.state != .running && !$0.resourcesRetired && $0.tombstone == nil
+              }), old.revision < UInt64.max else { throw Failure.unavailable }
+        let next = Ledger(schema: 2, owner: old.owner, root: old.root, revision: old.revision + 1, jobs: old.jobs)
+        // All pure/schema, binding, namespace, quiescence and space checks precede publication.
+        try validate(next); try inspect(budget)
+        let reservation = try remaining(next, budget: budget)
+        try storage.requireSpace(reservation, budget: budget)
+        guard try storage.named("manifest.next", cap: 65_536, budget: budget) == nil else { throw Failure.unknown }
+        guard authorized(), issue == nil, storage.failure == nil else { throw Failure.revoked }
+        do { try publish(next, authorized: authorized, budget: budget) }
+        catch {
+            // No compensating rename, retry, downgrade or inference from .revoked.
+            // The legacy publisher may clean only its exact owned next; otherwise preserve it.
+            issue = .uncertain
+            throw error
+        }
+        guard authorized(), storage.failure == nil else { throw Failure.revoked }
+    }
+
     private func update(_ budget: SavedAudioImportStorage.Budget, authorized: () -> Bool = { true }, _ mutate: (inout Ledger) throws -> Void) throws {
         guard var next = ledger, next.revision < UInt64.max else { throw Failure.bounds }
         next.revision += 1; try mutate(&next); try publish(next, authorized: authorized, budget: budget)
@@ -358,16 +473,35 @@ public final class SavedAudioImportStore: @unchecked Sendable {
             let budget = storage.budget(started:startedUptime,credits:priorWorkCredits)
             try original.validate(); try facts.validate(); try requested.validate()
             guard bytes.count == original.bytes, bytes.count <= Self.maximumSource, authorized() else { throw Failure.bounds }
+            // Inspect the stable whole source before even creating an absent namespace.
+            let stableData: Data
+            if facts.profile == .qtPCM16kV1 {
+                let inspection = try ImportedPCMMOV.inspect(bytes, canceled: { !authorized() })
+                guard Facts(.mov(inspection.facts)) == facts, authorized() else { throw Failure.bounds }
+                stableData = inspection.sourceBytes
+            } else { stableData = bytes }
+            guard issue == nil, storage.failure == nil else { throw Failure.unavailable }
             try initialize(budget)
             let date = try clock(now)
             guard ledger!.jobs.count < 10, !ledger!.jobs.contains(where: { $0.candidate != nil || $0.retired != nil || $0.state == .staging || $0.state == .queued || $0.state == .running || $0.state == .deleting || $0.resourcesRetired }),
                   issue == nil, !hasPendingStorage else { throw Failure.bounds }
-            let source = Payload(id: UUID(), hash: SavedAudioImportStorage.digest(bytes), bytes: Int64(bytes.count), member: nil, published: false, kind: .source)
+            let source = Payload(id: UUID(), hash: SavedAudioImportStorage.digest(stableData), bytes: Int64(stableData.count), member: nil, published: false, kind: facts.profile == .wavPCM ? .source : .pcmMOVSource)
             let job = Job(id: id, label: label, created: date, expires: date + 604_800, original: original, facts: facts, source: source, state: .staging, attempt: nil, accepted: nil, candidate: nil, retired: nil)
+            if facts.profile == .qtPCM16kV1 {
+                // Refuse the prospective slot, keys, ledger size and whole-source
+                // charge before metadata migration publishes anything.
+                var projection = Ledger(schema: 2, owner: ledger!.owner, root: ledger!.root,
+                    revision: ledger!.revision, jobs: ledger!.jobs)
+                projection.jobs.append(job)
+                try validate(projection)
+                try storage.requireSpace(remaining(projection, budget: budget), budget: budget)
+                try migrateForMOV(authorized: authorized, budget: budget)
+                guard authorized(), try clock(now) < job.expires else { throw Failure.revoked }
+            }
             try update(budget, authorized: authorized) { $0.jobs.append(job) }
             try storage.step(.allocation,budget,name:source.pending)
             let i = try index(id)
-            try writePayload(bytes, job: i, result: false, authorized: authorized, budget: budget)
+            try writePayload(stableData, job: i, result: false, authorized: authorized, budget: budget)
             return try beginLocked(id, requested: requested, now: now, authorized: authorized, budget: budget)
         }
     }
@@ -432,10 +566,18 @@ public final class SavedAudioImportStore: @unchecked Sendable {
         }
     }
     public func source(_ token: AttemptToken, now: Date, authorized: () -> Bool = {true}) throws -> Data {
+        try sourceSnapshot(token, now: now, authorized: authorized).bytes
+    }
+    public func sourceSnapshot(_ token: AttemptToken, now: Date, authorized: () -> Bool = {true}) throws -> SourceSnapshot {
         try lock.withLock {
-            let b = storage.budget(), i = try current(token, now: now, budget: b), payload = ledger!.jobs[i].source
-            guard payload.published, let member = payload.member else { throw Failure.unavailable }
-            return try storage.read(payload.final, expected: member, cap: payload.bytes, expectedHash: payload.hash, payload: true, authorized:authorized, budget: b)
+            let b = storage.budget(), i = try current(token, now: now, budget: b), job = ledger!.jobs[i]
+            let payload = job.source
+            guard authorized(), payload.published, let member = payload.member else { throw Failure.unavailable }
+            let bytes = try storage.read(payload.final, expected: member, cap: payload.bytes, expectedHash: payload.hash, payload: true, authorized: authorized, budget: b)
+            guard authorized() else { throw Failure.revoked }
+            let finalIndex = try current(token, now: now, budget: b)
+            guard ledger!.jobs[finalIndex].facts == job.facts else { throw Failure.revoked }
+            return SourceSnapshot(bytes: bytes, facts: job.facts)
         }
     }
     public func validateRAMReview(_ token: AttemptToken, now: Date) throws {
@@ -627,7 +769,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
             let deleting = job.state == .deleting || fenced.contains(job.id) || tombstones[job.id] != nil
             return Row(id: job.id, label: job.label, created: Date(timeIntervalSince1970: job.created), expires: Date(timeIntervalSince1970: job.expires),
                 sourceBytes: job.source.bytes, state: job.state == .running || job.state == .queued ? .interrupted : job.state,
-                result: deleting ? nil : job.accepted, sourceAvailable: source && job.source.published && !deleting, deleting: deleting)
+                result: deleting ? nil : job.accepted, sourceAvailable: source && job.source.published && !deleting, deleting: deleting, sourceProfile: job.facts.profile)
         }
     }
     public func rows() -> [Row] { lock.withLock { rowsLocked(storage.budget()) } }

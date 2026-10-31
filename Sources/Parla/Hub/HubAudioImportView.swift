@@ -6,18 +6,19 @@ struct HubAudioImportView: View {
     @ObservedObject var owner: AudioImportOwner
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Choose one locally resident WAV, then Start. Supported: mono signed 16-bit PCM RIFF at 8, 16, 22.05, 24, 32, 44.1 or 48 kHz, 0.4–600 seconds and up to 20 MiB. Both limits apply; higher rates may reach the byte limit sooner. Other formats need conversion outside Parla.")
+            Text("Choose one locally resident WAV or restricted MOV, then Start for raw transcription. WAV: mono signed 16-bit PCM RIFF at 8, 16, 22.05, 24, 32, 44.1 or 48 kHz, 0.4–600 seconds and up to 20 MiB. Both limits apply; higher rates may reach the byte limit sooner.")
+            Text("Restricted MOV: one video track and mono 16 kHz signed 16-bit little-endian PCM (qtPCM16kV1), 0.4–600 seconds, whole file up to 20 MiB. AAC, MP4 and other MOV variants need conversion outside Parla.")
             Text("Start uses saved global recognition settings. No microphone, target app, cleanup or automatic clipboard/history action.")
                 .foregroundStyle(.secondary)
             Text(model.recognitionCapabilityDetail).font(.caption)
             Text("Saved language: \(model.settings.language ?? "Automatic") · Dictionary hints: \(model.settings.dictionary.count)")
                 .font(.caption)
             HStack {
-                Button("Choose WAV…", action: model.chooseAudioImport).disabled(owner.busy)
+                Button("Choose WAV or restricted MOV…", action: model.chooseAudioImport).disabled(owner.busy)
                 Button("Start", action: model.startAudioImport)
                     .disabled(owner.source == nil || owner.busy || model.hasPendingSettingsSave || model.loadError != nil || model.saveError != nil)
                 Button("Start with experimental timing", action: model.startTimedAudioImport)
-                    .disabled(owner.source == nil || owner.busy || model.hasPendingSettingsSave || model.loadError != nil || model.saveError != nil)
+                    .disabled(owner.source == nil || owner.source?.format == .mov || owner.busy || model.hasPendingSettingsSave || model.loadError != nil || model.saveError != nil)
                 Button("Discard", action: model.discardAudioImport)
                     .disabled(owner.source == nil && owner.job == nil)
             }
@@ -33,10 +34,7 @@ struct HubAudioImportView: View {
                 Text("Raw review").font(.headline)
                 Text("\(review.sourceInfo.container) · \(review.sourceInfo.encoding) · mono \(review.sourceInfo.sourceRate) Hz · \(review.sourceInfo.sourceFrames) source frames")
                     .font(.caption)
-                Text(review.sourceInfo.origin == .strictPCM16k
-                    ? "16 kHz PCM · \(review.sourceInfo.outputFrames) output frames"
-                    : "Converted to 16 kHz · \(review.sourceInfo.outputFrames) output frames · \(review.sourceInfo.clippedSamples) clipped samples")
-                    .font(.caption)
+                sourceOutput(review.sourceInfo).font(.caption)
                 ScrollView {
                     Text(verbatim: review.entry.raw)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -69,6 +67,13 @@ struct HubAudioImportView: View {
             }
         }
     }
+    private func sourceOutput(_ info: ImportedAudio.SourceFacts) -> Text {
+        switch info.origin {
+        case .strictPCM16k: return Text("16 kHz PCM · \(info.outputFrames) output frames")
+        case .systemPCMConversion: return Text("Converted to 16 kHz · \(info.outputFrames) output frames · \(info.clippedSamples) clipped samples")
+        case .directMOVPCM16k: return Text("MOV PCM · 16 kHz · \(info.outputFrames) output frames")
+        }
+    }
 }
 
 
@@ -79,9 +84,9 @@ private struct SavedAudioImportView: View {
         VStack(alignment:.leading,spacing:12) {
             Divider()
             Text("Keep a private copy").font(.headline)
-            Text("Keep this WAV and its raw result in Parla for seven days. History off does not prevent this copy. It expires after seven days and is removed when Parla can safely finish deletion. Cancel keeps committed files; Delete removes the saved job. Independent History text and exports remain.")
+            Text("Keep this original WAV or MOV and its raw result privately in Parla for seven days. A MOV copy includes the whole original file, including video. History off does not prevent this copy. It expires after seven days and is removed when Parla can safely finish deletion. Cancel keeps committed files; Delete removes the saved job. Independent History text and exports remain.")
                 .font(.callout)
-            Text("Up to 10 saved jobs and 256 MiB including reserved writes. The WAV limit is 20 MiB; raw results are limited to 1 MiB. Saved transcription has no timing. Storage writes are checked; survival of device or power failure is unqualified.")
+            Text("Up to 10 saved jobs and 256 MiB including reserved writes. The whole WAV or MOV limit is 20 MiB; raw results are limited to 1 MiB. Saved transcription has no timing. Storage writes are checked; survival of device or power failure is unqualified.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Keep a private copy and transcribe",action:model.keepAudioImportAndTranscribe)
@@ -97,6 +102,7 @@ private struct SavedAudioImportView: View {
             ForEach(owner.rows) { row in
                 VStack(alignment:.leading,spacing:6) {
                     Text(verbatim:row.label).font(.headline)
+                    Text(row.sourceProfile == .qtPCM16kV1 ? "Stored MOV PCM profile" : "Stored WAV PCM profile").font(.caption)
                     Text("Created \(row.created.formatted()) · Expires \(row.expires.formatted()) · \(row.sourceBytes) bytes").font(.caption)
                     Text(row.deleting ? "Deletion pending; private files may remain." : "Latest attempt: \(row.state.rawValue)")
                         .font(.caption).foregroundStyle(.secondary)

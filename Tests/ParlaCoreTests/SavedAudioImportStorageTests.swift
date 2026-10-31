@@ -329,3 +329,27 @@ extension SavedAudioImportStorageTests {
         XCTAssertFalse(SavedAudioImportStorage.validName("ABCDEFAB-0000-0000-0000-000000000001.source.wav"))
     }
 }
+
+
+extension SavedAudioImportStorageTests {
+    func testConnectedMOVCanonicalSuffixAndWholeByteCap() throws {
+        let id = "01234567-89ab-cdef-0123-456789abcdef"
+        for suffix in [".source.wav",".source.mov",".source.pending",".result.pending",".raw.txt",".delete"] {
+            XCTAssertTrue(SavedAudioImportStorage.validName(id+suffix))
+        }
+        for name in [id+".source.MOV",id.uppercased()+".source.mov",id+".source.mp4",id+".mov",id+".source.mov/child","../"+id+".source.mov",id+".source.mov.pending"] {
+            XCTAssertFalse(SavedAudioImportStorage.validName(name))
+        }
+        let fixture = try SavedImportFixture(), storage = fixture.storage(), b = storage.budget()
+        defer {do {try storage.close(); try fixture.closed()} catch {try? fixture.receipt("close-uncertain")}}
+        XCTAssertTrue(try storage.open(create:true,budget:b))
+        let bytes = ConnectedMOVBytes.make(), pending = id+".source.pending", final = id+".source.mov"
+        let (fd,allocated) = try storage.create(pending,cap:Int64(bytes.count),budget:b)
+        let member = try storage.write(bytes,fd:fd,name:pending,allocated:allocated,remaining:Int64(bytes.count),authorized:{true},budget:b)
+        try storage.rename(pending,member:member,to:final,replacing:nil,authorized:{true},budget:b)
+        let named = try XCTUnwrap(storage.named(final,cap:Int64(bytes.count),budget:b))
+        XCTAssertEqual(try storage.read(final,expected:named,cap:Int64(bytes.count),expectedHash:SavedAudioImportStorage.digest(bytes),payload:true,budget:b),bytes)
+        XCTAssertThrowsError(try storage.named(final,cap:Int64(bytes.count - 1),budget:b))
+        XCTAssertThrowsError(try storage.read(final,expected:named,cap:Int64(bytes.count),expectedHash:String(repeating:"0",count:64),payload:true,budget:b))
+    }
+}

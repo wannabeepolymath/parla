@@ -99,7 +99,7 @@ public final class SavedAudioImportStorage: @unchecked Sendable {
     public static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func validName(_ name: String) -> Bool {
         if ["owner.json", "lock", "manifest.json", "manifest.next"].contains(name) { return true }
-        for suffix in [".source.pending", ".source.wav", ".result.pending", ".raw.txt", ".delete"] where name.hasSuffix(suffix) {
+        for suffix in [".source.pending", ".source.wav", ".source.mov", ".result.pending", ".raw.txt", ".delete"] where name.hasSuffix(suffix) {
             let id = String(name.dropLast(suffix.count))
             return UUID(uuidString: id)?.uuidString.lowercased() == id
         }

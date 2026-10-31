@@ -19,6 +19,67 @@ public enum ImportedAudio {
         public let samples: [Float]
         public let transientSourceInfo: SourceInfo
     }
+    /// Closed, extension-selected source routing. No sniffing or native MOV fallback.
+    public enum SourceFormat: Equatable, Sendable { case wav, mov }
+    public enum SourceProfile: String, Codable, Sendable { case wavPCM, qtPCM16kV1 }
+    public enum SourceFacts: Equatable, Sendable {
+        case wav(SourceInfo)
+        case mov(ImportedPCMMOV.Facts)
+        public enum Origin: Equatable, Sendable { case strictPCM16k, systemPCMConversion, directMOVPCM16k }
+        public var profile: SourceProfile {
+            switch self { case .wav: return .wavPCM; case .mov: return .qtPCM16kV1 }
+        }
+        public var container: String {
+            switch self { case .wav(let info): return info.container; case .mov(let facts): return facts.container }
+        }
+        public var encoding: String {
+            switch self { case .wav(let info): return info.encoding; case .mov(let facts): return facts.encoding }
+        }
+        public var sourceRate: Int {
+            switch self { case .wav(let info): return info.sourceRate; case .mov(let facts): return facts.rate }
+        }
+        public var sourceChannels: Int {
+            switch self { case .wav(let info): return info.sourceChannels; case .mov(let facts): return facts.channels }
+        }
+        public var sourceFrames: Int {
+            switch self { case .wav(let info): return info.sourceFrames; case .mov(let facts): return facts.sourceFrames }
+        }
+        public var outputFrames: Int {
+            switch self { case .wav(let info): return info.outputFrames; case .mov(let facts): return facts.outputFrames }
+        }
+        public var outputRate: Int {
+            switch self { case .wav(let info): return info.outputRate; case .mov(let facts): return facts.outputRate }
+        }
+        public var clippedSamples: Int {
+            switch self { case .wav(let info): return info.clippedSamples; case .mov(let facts): return facts.clipped }
+        }
+        public var origin: Origin {
+            switch self {
+            case .wav(let info):
+                switch info.origin { case .strictPCM16k: return .strictPCM16k; case .systemPCMConversion: return .systemPCMConversion }
+            case .mov: return .directMOVPCM16k
+            }
+        }
+    }
+    public struct SourceDecoded: Sendable {
+        public let samples: [Float]
+        public let transientSourceInfo: SourceFacts
+        fileprivate init(_ decoded: Decoded) {
+            samples = decoded.samples; transientSourceInfo = .wav(decoded.transientSourceInfo)
+        }
+        fileprivate init(_ decoded: ImportedPCMMOV.Decoded) {
+            samples = decoded.samples; transientSourceInfo = .mov(decoded.facts)
+        }
+    }
+    public static func decodeSource(_ bytes: Data, format: SourceFormat,
+                                    canceled: () -> Bool = { false },
+                                    makeNative: () -> Native = { Native() }) throws -> SourceDecoded {
+        switch format {
+        case .wav: return SourceDecoded(try decode(bytes, canceled: canceled, native: makeNative()))
+        case .mov: return SourceDecoded(try ImportedPCMMOV.decode(bytes, canceled: canceled))
+        }
+    }
+
     public enum Failure: Error, Equatable {
         case format, structure, duration, native, output
         public var message: String {

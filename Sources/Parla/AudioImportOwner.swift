@@ -47,13 +47,13 @@ final class AudioImportOwner: ObservableObject {
     }
     struct Completed {
         let raw: String
-        let sourceInfo: ImportedAudio.SourceInfo
+        let sourceInfo: ImportedAudio.SourceFacts
         var segments: RecognitionSegments? = nil
     }
     struct Review {
         let job: Job
         let entry: HistoryEntry
-        let sourceInfo: ImportedAudio.SourceInfo
+        let sourceInfo: ImportedAudio.SourceFacts
         let segments: RecognitionSegments?
         var saved = false, saveFailed = false
     }
@@ -102,7 +102,11 @@ final class AudioImportOwner: ObservableObject {
         catch { message = Self.failure(error) }
     }
     func start(settings: Settings, selectionEpoch: UUID, preparationEpoch: UUID?, diagnostics: DiagnosticStore, mode: Mode = .raw) -> Job? {
-        guard !busy, let source else { message = "Choose one WAV before Start."; return nil }
+        guard !busy, let source else { message = "Choose one WAV or restricted MOV before Start."; return nil }
+        guard mode != .experimentalTimed || source.format == .wav else {
+            message = "Experimental timing requires an original mono 16 kHz PCM WAV. Use Start for raw MOV transcription."
+            return nil // Keep the untouched selection available for explicit raw Start.
+        }
         let job = Job(source: source, settings: settings, selectionEpoch: selectionEpoch, preparationEpoch: preparationEpoch, diagnostics: diagnostics, mode: mode)
         self.source = nil; self.job = job; review = nil; busy = true
         message = "Import queued. Cancellation waits for the active reader or recognizer to exit."
@@ -117,7 +121,7 @@ final class AudioImportOwner: ObservableObject {
             switch result {
             case .success(let completed):
                 var metrics = PipelineMetrics(); metrics.model = job.configuration.request.metricLabel
-                let timing = job.mode == .experimentalTimed && completed.sourceInfo.origin == .strictPCM16k
+                let timing = job.mode == .experimentalTimed && completed.sourceInfo.profile == .wavPCM && completed.sourceInfo.origin == .strictPCM16k
                     && completed.segments?.sourceSampleCount == completed.sourceInfo.sourceFrames ? completed.segments : nil
                 self.review = Review(job: job, entry: HistoryEntry(id: job.resultID, date: completedAt, raw: completed.raw, metrics: metrics), sourceInfo: completed.sourceInfo, segments: timing)
                 self.message = job.mode == .experimentalTimed && timing == nil
@@ -177,6 +181,13 @@ final class AudioImportOwner: ObservableObject {
     static func failure(_ error: Error) -> String {
         if let error = error as? ImportedAudio.Failure { return error.message }
         if let error = error as? ImportedWAV.Failure { return error.message }
+        if let error = error as? ImportedPCMMOV.Failure {
+            switch error {
+            case .canceled: return "Import canceled. Choose the file again to retry."
+            case .encodedLimit, .duration: return "Restricted MOV must be 0.4–600 seconds and the whole file must fit within 20 MiB."
+            default: return "Use a qtPCM16kV1 MOV with one video track and mono 16 kHz signed 16-bit little-endian PCM. Convert AAC, MP4 and other MOV variants outside Parla."
+            }
+        }
         if let error = error as? FileImportSource.Failure { return error.message }
         if let error = error as? PreparationRefusal { return error.description }
         if let error = error as? ParakeetInstallationRefusal { return error.message }
@@ -192,7 +203,10 @@ final class AudioImportOwner: ObservableObject {
 @MainActor enum AudioImportExecution {
     private final class Completion { var result: Result<AudioImportOwner.Completed, Error> = .failure(CancellationError()) }
     nonisolated static func validateSource(_ info: ImportedAudio.SourceInfo, mode: AudioImportOwner.Mode) throws {
-        guard mode != .experimentalTimed || info.origin == .strictPCM16k else {
+        try validateSource(.wav(info), mode: mode)
+    }
+    nonisolated static func validateSource(_ info: ImportedAudio.SourceFacts, mode: AudioImportOwner.Mode) throws {
+        guard mode != .experimentalTimed || (info.profile == .wavPCM && info.origin == .strictPCM16k) else {
             throw RecordingStore.Failure("Experimental timing requires an original mono 16 kHz PCM WAV. Converted input was not sent to recognition.")
         }
     }
@@ -208,7 +222,10 @@ final class AudioImportOwner: ObservableObject {
         return PendingOperationQueue.enqueue(previous: previous, operation: job.operation, completes: true, work: {
             let result: Result<AudioImportOwner.Completed, Error>
             do {
-                var sourceInfo: ImportedAudio.SourceInfo?
+                guard job.mode != .experimentalTimed || job.source.format == .wav else {
+                    throw RecordingStore.Failure("Experimental timing requires an original mono 16 kHz PCM WAV. MOV was not decoded.")
+                }
+                var sourceInfo: ImportedAudio.SourceFacts?
                 let recognition = try await FileRecognitionBatch.runResult(request: job.configuration.request, operation: job.operation,
                     samples: {
                         let decoded = try job.source.samples(canceled: { !job.current || job.operation.shouldAbort })

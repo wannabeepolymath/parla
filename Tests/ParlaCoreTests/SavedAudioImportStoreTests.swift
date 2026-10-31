@@ -242,7 +242,8 @@ extension SavedAudioImportStoreTests {
     func testClosedSchemaAndOversizedMetadataRefuseWithoutRewriting() throws {
         for mutation in 0..<4 {
             let fixture = try SavedImportFixture(), input = try SavedFixtureInput(fixture), store = SavedAudioImportStore(storage:fixture.storage())
-            _ = try input.admit(store); try store.close()
+            let token = try input.admit(store); try store.close()
+            let sourcePath = fixture.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov")
             let path = fixture.root.appendingPathComponent("manifest.json"), before = try Data(contentsOf:path)
             var document = try XCTUnwrap(JSONSerialization.jsonObject(with:before) as? [String:Any])
             if mutation == 0 {document["schema"] = 99}
@@ -265,7 +266,7 @@ private struct SavedPhaseCut: Equatable, CustomStringConvertible {
 private func savedPhaseMember(_ name: String?) -> String? {
     guard let name else {return nil}
     if name == "manifest.next" || name == "manifest.json" {return name}
-    for suffix in [".source.pending",".source.wav",".result.pending",".raw.txt"] where name.hasSuffix(suffix) {return suffix}
+    for suffix in [".source.pending",".source.wav",".source.mov",".result.pending",".raw.txt"] where name.hasSuffix(suffix) {return suffix}
     return nil
 }
 extension SavedAudioImportStoreTests {
@@ -490,5 +491,522 @@ extension SavedAudioImportStoreTests {
         let meeting = Data("{\"d\":\"parla.meeting.1\",\"v\":1}".utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(SavedAudioImportStore.Marker.self,from:meeting))
         XCTAssertThrowsError(try SavedAudioImportStore.Provenance.hash(String(repeating:"f",count:65)))
+    }
+}
+
+
+private struct ConnectedMOVInput {
+    let bytes: Data, facts: SavedAudioImportStore.Facts, original: SavedAudioImportStore.Original
+    let requested: SavedAudioImportStore.Provenance
+    init(_ fixture: SavedImportFixture, video: UInt8 = 0xa5, tail: UInt8 = 0x7f) throws {
+        bytes = ConnectedMOVBytes.make(video:video,tail:tail)
+        facts = .init(try ImportedAudio.decodeSource(bytes,format:.mov).transientSourceInfo)
+        // Original is protection metadata, never a pathname opened by the Store.
+        original = .init(lexical:fixture.parent.appendingPathComponent("original.mov").path,
+            resolved:fixture.parent.appendingPathComponent("original.mov").path,identity:fixture.identity,
+            bytes:Int64(bytes.count),modifiedSeconds:1,modifiedNanoseconds:0,changedSeconds:1,changedNanoseconds:0,flags:0)
+        var settings = Settings(); settings.whisperModelPath = "/synthetic/never-opened.bin"
+        requested = try .init(request:RecognitionRequest(settings:settings))
+    }
+    func admit(_ store: SavedAudioImportStore, now: Date = Date(timeIntervalSince1970:1_000_001),
+               started: TimeInterval? = nil, credits: Int = 0, authorized: () -> Bool = {true}) throws -> SavedAudioImportStore.AttemptToken {
+        try store.admit(id:UUID(),bytes:bytes,original:original,facts:facts,label:"Inert MOV",requested:requested,
+            now:now,startedUptime:started,priorWorkCredits:credits,authorized:authorized)
+    }
+}
+private func connectedDocument(_ bytes: Data) throws -> [String:Any] {
+    try XCTUnwrap(JSONSerialization.jsonObject(with:bytes) as? [String:Any])
+}
+private func connectedJobs(_ bytes: Data) throws -> [[String:Any]] {
+    try XCTUnwrap(connectedDocument(bytes)["jobs"] as? [[String:Any]])
+}
+private func connectedLedger(_ bytes: Data) throws -> SavedAudioImportStore.Ledger {
+    let schema = try XCTUnwrap(connectedDocument(bytes)["schema"] as? Int)
+    let decoder = JSONDecoder(); decoder.userInfo[SavedAudioImportStore.ledgerSchemaKey] = schema
+    return try decoder.decode(SavedAudioImportStore.Ledger.self,from:bytes)
+}
+private func connectedPreserve(_ fixture: SavedImportFixture, _ store: SavedAudioImportStore) {
+    do { try store.close(); try fixture.closed() } catch { try? fixture.receipt("close-uncertain") }
+}
+
+extension SavedAudioImportStoreTests {
+    func testConnectedMOVSchemaGoldenKeysWholeSourceAndSameTokenSnapshot() throws {
+        let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+        let store = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,store)}
+        let oldToken = try wav.admit(store)
+        _ = try store.saveResult(oldToken,resultID:UUID(),bytes:Data("legacy text".utf8),observed:.init(observed:nil),now:Date(timeIntervalSince1970:1_000_000),authorized:{true})
+        let path = fixture.root.appendingPathComponent("manifest.json"), before = try Data(contentsOf:path)
+        let oldLedger = try JSONDecoder().decode(SavedAudioImportStore.Ledger.self,from:before)
+        let oldJob = try XCTUnwrap(oldLedger.jobs.first)
+        let oldFacts = try connectedDocument(JSONEncoder().encode(oldJob.facts))
+        XCTAssertEqual(Set(oldFacts.keys),Set(["rate","frames","outputFrames","clipped"]))
+        XCTAssertEqual(oldFacts["rate"] as? Int,16000); XCTAssertEqual(oldFacts["frames"] as? Int,8000)
+        XCTAssertEqual(oldFacts["outputFrames"] as? Int,8000); XCTAssertEqual(oldFacts["clipped"] as? Int,0)
+        XCTAssertEqual(oldJob.source.kind,.source); XCTAssertTrue(oldJob.source.final.hasSuffix(".source.wav"))
+        let token = try mov.admit(store), bytes = try Data(contentsOf:path), ledger = try connectedLedger(bytes)
+        XCTAssertEqual(ledger.schema,2); XCTAssertEqual(ledger.jobs.first,oldJob)
+        XCTAssertThrowsError(try JSONDecoder().decode(SavedAudioImportStore.Ledger.self,from:bytes))
+        XCTAssertThrowsError(try JSONEncoder().encode(ledger))
+        let document = try connectedDocument(bytes)
+        XCTAssertEqual(Set(document.keys),Set(["schema","owner","root","revision","jobs"]))
+        let jobs = try connectedJobs(bytes), job = try XCTUnwrap(jobs.last)
+        let facts = try XCTUnwrap(job["facts"] as? [String:Any])
+        XCTAssertEqual(Set(facts.keys),Set(["profile","rate","frames","outputFrames","clipped"]))
+        XCTAssertEqual(facts["profile"] as? String,"qtPCM16kV1")
+        let source = try XCTUnwrap(ledger.jobs.last?.source)
+        XCTAssertEqual(source.kind,.pcmMOVSource); XCTAssertTrue(source.final.hasSuffix(".source.mov"))
+        XCTAssertEqual(source.hash,SavedAudioImportStorage.digest(mov.bytes)); XCTAssertEqual(source.bytes,Int64(mov.bytes.count))
+        XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(source.final)),mov.bytes)
+        let snapshot = try store.sourceSnapshot(token,now:Date(timeIntervalSince1970:1_000_001))
+        XCTAssertEqual(snapshot.bytes,mov.bytes); XCTAssertEqual(snapshot.facts,mov.facts)
+        let invalid = [
+            SavedAudioImportStore.AttemptToken(job:oldToken.job,source:token.source,id:token.id,revision:token.revision),
+            .init(job:token.job,source:UUID(),id:token.id,revision:token.revision),
+            .init(job:token.job,source:token.source,id:UUID(),revision:token.revision),
+            .init(job:token.job,source:token.source,id:token.id,revision:token.revision + 1)]
+        for other in invalid {XCTAssertThrowsError(try store.sourceSnapshot(other,now:Date(timeIntervalSince1970:1_000_001)))}
+        XCTAssertThrowsError(try store.sourceSnapshot(token,now:Date(timeIntervalSince1970:1_000_001),authorized:{false}))
+        let marker = try connectedDocument(Data(contentsOf:fixture.root.appendingPathComponent("owner.json")))
+        XCTAssertEqual(marker["schema"] as? Int,1)
+        try store.intentDelete(token.job)
+        let tombstone = try connectedDocument(Data(contentsOf:fixture.root.appendingPathComponent(token.job.uuidString.lowercased()+".delete")))
+        XCTAssertEqual(tombstone["schema"] as? Int,1)
+    }
+
+    func testConnectedMOVSchemaClosedProfilesKindsAndCanonicalRoundtripPreserveBytes() throws {
+        // Independent exact mutations, one fresh owned namespace per case.
+        for cut in 0..<11 {
+            let fixture = try SavedImportFixture(), input = try ConnectedMOVInput(fixture), store = SavedAudioImportStore(storage:fixture.storage())
+            let token = try input.admit(store); try store.close()
+            let sourcePath = fixture.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov")
+            let path = fixture.root.appendingPathComponent("manifest.json")
+            var document = try connectedDocument(Data(contentsOf:path)), jobs = try XCTUnwrap(document["jobs"] as? [[String:Any]])
+            var job = jobs[0], facts = try XCTUnwrap(job["facts"] as? [String:Any]), source = try XCTUnwrap(job["source"] as? [String:Any])
+            switch cut {
+            case 0: facts.removeValue(forKey:"profile")
+            case 1: facts["profile"] = NSNull()
+            case 2: facts["profile"] = "future"
+            case 3: facts["version"] = 1
+            case 4: document["schema"] = 3
+            case 5: document["schema"] = 1; facts.removeValue(forKey:"profile")
+            case 6: source["kind"] = "source"
+            case 7: facts["profile"] = "wavPCM"
+            case 8: facts["outputFrames"] = 7999
+            case 9: facts["clipped"] = 1
+            default: var original = try XCTUnwrap(job["original"] as? [String:Any]); original["bytes"] = input.bytes.count - 1; job["original"] = original
+            }
+            job["facts"] = facts; job["source"] = source; jobs[0] = job; document["jobs"] = jobs
+            let invalid = try JSONSerialization.data(withJSONObject:document,options:[.sortedKeys]); try invalid.write(to:path)
+            let reopened = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,reopened)}
+            XCTAssertThrowsError(try reopened.bootstrap(),"cut \(cut)")
+            XCTAssertNotNil(reopened.failure); XCTAssertEqual(try Data(contentsOf:path),invalid)
+            XCTAssertEqual(try Data(contentsOf:sourcePath),input.bytes)
+        }
+    }
+
+    func testConnectedMOVSchemaPureAdmissionRejectsDetachedFactsBeforeStorageGrant() throws {
+        let fixture = try SavedImportFixture(), input = try ConnectedMOVInput(fixture)
+        let store = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,store)}
+        var encoded = try connectedDocument({ () throws -> Data in
+            let e = JSONEncoder(); e.userInfo[SavedAudioImportStore.ledgerSchemaKey] = 2; return try e.encode(input.facts)
+        }())
+        encoded["frames"] = 8001; encoded["outputFrames"] = 8001
+        let d = JSONDecoder(); d.userInfo[SavedAudioImportStore.ledgerSchemaKey] = 2
+        let detached = try d.decode(SavedAudioImportStore.Facts.self,from:JSONSerialization.data(withJSONObject:encoded))
+        for bytes in [Data(input.bytes.dropLast()),savedFixtureWAV(),input.bytes] {
+            XCTAssertThrowsError(try store.admit(id:UUID(),bytes:bytes,original:input.original,facts:detached,label:"detached",requested:input.requested,now:Date(timeIntervalSince1970:1_000_000),authorized:{true}))
+            XCTAssertFalse(FileManager.default.fileExists(atPath:fixture.root.path))
+        }
+        XCTAssertThrowsError(try input.admit(store,credits:65_536))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:fixture.root.path))
+        XCTAssertThrowsError(try input.admit(store,authorized:{false}))
+        XCTAssertFalse(FileManager.default.fileExists(atPath:fixture.root.path))
+    }
+
+    func testConnectedMOVMigrationPreservesSettledJobsAndNeverReadsOldPayloads() throws {
+        let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+        var armed = false, oldPayloadEvents = 0, oldNames = Set<String>()
+        var system = SavedAudioImportStorage.System()
+        system.event = { boundary,name in
+            if armed, let name, oldNames.contains(name), [.payloadRead,.hash,.write,.rename,.unlink].contains(boundary) {oldPayloadEvents += 1}
+        }
+        let store = SavedAudioImportStore(storage:fixture.storage(system:system)); defer {connectedPreserve(fixture,store)}
+        let token = try wav.admit(store), now = Date(timeIntervalSince1970:1_000_001)
+        let result = try store.saveResult(token,resultID:UUID(),bytes:Data("legacy exact raw".utf8),observed:.init(observed:nil),now:now,authorized:{true})
+        try store.association(token.job,resultID:result.id,state:.saved,now:now,authorized:{true})
+        let path = fixture.root.appendingPathComponent("manifest.json"), old = try connectedLedger(Data(contentsOf:path))
+        let job = try XCTUnwrap(old.jobs.first)
+        let savedBeforeMigration = try XCTUnwrap(job.accepted)
+        var expectedSaved = result; expectedSaved.association = .saved
+        XCTAssertEqual(savedBeforeMigration,expectedSaved) // Only the explicit association action changed it.
+        oldNames = [job.source.final,(try XCTUnwrap(job.accepted)).id.uuidString.lowercased()+".raw.txt"]
+        var snapshots: [String:Data] = [:]
+        for name in oldNames {snapshots[name] = try Data(contentsOf:fixture.root.appendingPathComponent(name))}
+        armed = true; _ = try mov.admit(store); armed = false
+        let next = try connectedLedger(Data(contentsOf:path))
+        XCTAssertEqual(next.schema,2); XCTAssertEqual(next.owner,old.owner); XCTAssertEqual(next.root,old.root)
+        XCTAssertEqual(next.jobs.first,job); XCTAssertEqual(oldPayloadEvents,0)
+        for name in oldNames {XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(name)),snapshots[name])}
+        XCTAssertEqual(try store.openResult(token.job,now:now).0,savedBeforeMigration)
+        try store.close()
+        var reads = 0; var reopenSystem = SavedAudioImportStorage.System(); reopenSystem.checkpoint = {if $0 == .payloadRead {reads += 1}}
+        let reopened = SavedAudioImportStore(storage:fixture.storage(system:reopenSystem)); defer {connectedPreserve(fixture,reopened)}
+        _ = try reopened.bootstrap(); XCTAssertEqual(reads,0)
+        XCTAssertEqual(Set(reopened.rows().map(\.sourceProfile)),Set([.wavPCM,.qtPCM16kV1]))
+        XCTAssertEqual(try reopened.openResult(token.job,now:now).1,Data("legacy exact raw".utf8))
+    }
+
+    func testConnectedMOVMigrationQuiescenceAndSchema2WAVOnlyNeverDowngrades() throws {
+        let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+        var failAllocation = false, hit = false; var system = SavedAudioImportStorage.System()
+        system.event = {boundary,name in
+            if failAllocation, !hit, boundary == .allocation, name?.hasSuffix(".source.pending") == true {hit = true; throw SavedAudioImportStorage.Failure.io}
+        }
+        let store = SavedAudioImportStore(storage:fixture.storage(system:system)); defer {connectedPreserve(fixture,store)}
+        let token = try wav.admit(store), path = fixture.root.appendingPathComponent("manifest.json")
+        let queued = try Data(contentsOf:path)
+        XCTAssertThrowsError(try mov.admit(store)); XCTAssertEqual(try Data(contentsOf:path),queued)
+        let borrow = try store.borrow(token,now:Date(timeIntervalSince1970:1_000_001)); defer {borrow.end()}
+        try store.finish(token,canceled:true)
+        let settled = try Data(contentsOf:path)
+        XCTAssertThrowsError(try mov.admit(store)); XCTAssertEqual(try Data(contentsOf:path),settled)
+        borrow.end()
+        // Acknowledge migration, fail the separate source transaction before allocation.
+        failAllocation = true; XCTAssertThrowsError(try mov.admit(store)); XCTAssertTrue(hit)
+        let schema2 = try connectedLedger(Data(contentsOf:path)); XCTAssertEqual(schema2.schema,2)
+        // Preserve the fully valid schema2 WAV-only projection, removing only the
+        // authored unallocated staging row in this explicit corruption-test fixture.
+        let wavOnly = SavedAudioImportStore.Ledger(schema:2,owner:schema2.owner,root:schema2.root,revision:schema2.revision,jobs:[schema2.jobs[0]])
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.userInfo[SavedAudioImportStore.ledgerSchemaKey] = 2
+        try store.close(); let bytes = try encoder.encode(wavOnly); try bytes.write(to:path)
+        let reopened = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,reopened)}
+        XCTAssertEqual(try reopened.bootstrap().count,1)
+        try reopened.maintenance(now:Date(timeIntervalSince1970:1_000_001))
+        XCTAssertEqual(try Data(contentsOf:path),bytes)
+        let retry = try reopened.begin(token.job,requested:wav.requested,now:Date(timeIntervalSince1970:1_000_001),authorized:{true})
+        XCTAssertEqual(try reopened.sourceSnapshot(retry,now:Date(timeIntervalSince1970:1_000_001)).facts.profile,.wavPCM)
+        XCTAssertEqual(try connectedLedger(Data(contentsOf:path)).schema,2)
+    }
+}
+
+
+extension SavedAudioImportStoreTests {
+    func testConnectedMOVMigrationCutsExactAllocationRevocationAndPostRenameUncertainty() throws {
+        // a: expire only AFTER O_EXCL, before create returns its Member.
+        // b: revoke at the actual pre-rename authorization guard.
+        // c: one-shot .revoked at the post-rename directory sync (disk may be schema2).
+        for cut in 0..<3 {
+            let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+            var armed = false, hit = false, authorized = true, tick: TimeInterval = 100
+            var allocationFD: Int32?, retired = 0, nextCreates = 0, sourceCreates = 0
+            var system = SavedAudioImportStorage.System(); system.uptime = {tick}
+            system.inspect = {fd,s in
+                let result = Darwin.fstat(fd,s)
+                if result == 0, armed, allocationFD == nil {
+                    var named = stat()
+                    if lstat(fixture.root.appendingPathComponent("manifest.next").path,&named) == 0,
+                       named.st_dev == s.pointee.st_dev, named.st_ino == s.pointee.st_ino {allocationFD = fd}
+                }
+                return result
+            }
+            system.close = {fd in if fd == allocationFD {retired += 1}; return Darwin.close(fd)}
+            system.event = {boundary,name in
+                guard armed else {return}
+                if boundary == .create, name == "manifest.next" {nextCreates += 1}
+                if boundary == .create, name?.hasSuffix(".source.pending") == true {sourceCreates += 1}
+                guard !hit else {return}
+                if cut == 0, boundary == .created, name == "manifest.next" {hit = true; tick = 131}
+                if cut == 1, boundary == .rename, name == "manifest.next" {hit = true; authorized = false}
+                if cut == 2, boundary == .directorySync, name == "manifest.json" {hit = true; throw SavedAudioImportStorage.Failure.revoked}
+            }
+            let store = SavedAudioImportStore(storage:fixture.storage(system:system))
+            defer {armed = false; connectedPreserve(fixture,store)}
+            let token = try wav.admit(store), now = Date(timeIntervalSince1970:1_000_001)
+            let accepted = try store.saveResult(token,resultID:UUID(),bytes:Data("unchanged linked result".utf8),observed:.init(observed:nil),now:now,authorized:{true})
+            try store.association(token.job,resultID:accepted.id,state:.saved,now:now,authorized:{true})
+            let path = fixture.root.appendingPathComponent("manifest.json"), before = try Data(contentsOf:path), old = try connectedLedger(before)
+            let oldJob = try XCTUnwrap(old.jobs.first), sourceName = oldJob.source.final, textName = (try XCTUnwrap(oldJob.accepted)).id.uuidString.lowercased()+".raw.txt"
+            let sourceBytes = try Data(contentsOf:fixture.root.appendingPathComponent(sourceName)), textBytes = try Data(contentsOf:fixture.root.appendingPathComponent(textName))
+            armed = true
+            XCTAssertThrowsError(try mov.admit(store,started:100,authorized:{authorized})) {error in
+                XCTAssertEqual(error as? SavedAudioImportStorage.Failure,cut == 0 ? .bounds : .revoked)
+            }
+            // Test the fd BEFORE subsequent filesystem helpers can reuse its integer.
+            if cut == 0 {
+                let fd = try XCTUnwrap(allocationFD); XCTAssertEqual(retired,1)
+                errno = 0; XCTAssertEqual(fcntl(fd,F_GETFD),-1); XCTAssertEqual(errno,EBADF)
+            }
+            XCTAssertTrue(hit); XCTAssertEqual(nextCreates,1); XCTAssertEqual(sourceCreates,0)
+            XCTAssertEqual(store.failure,.uncertain)
+            armed = false
+            let disk = try Data(contentsOf:path), onDisk = try connectedLedger(disk)
+            XCTAssertEqual(onDisk.jobs,[oldJob]); XCTAssertEqual(onDisk.owner,old.owner); XCTAssertEqual(onDisk.root,old.root)
+            XCTAssertEqual(onDisk.schema,cut == 2 ? 2 : 1)
+            if cut != 2 {XCTAssertEqual(disk,before)}
+            let next = fixture.root.appendingPathComponent("manifest.next")
+            XCTAssertEqual(FileManager.default.fileExists(atPath:next.path),cut == 0)
+            if cut == 0 {XCTAssertEqual(try Data(contentsOf:next),Data())}
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(sourceName)),sourceBytes)
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(textName)),textBytes)
+            XCTAssertEqual(store.rows().map(\.id),[token.job]) // No MOV token/job/payload grant.
+            XCTAssertThrowsError(try store.begin(token.job,requested:wav.requested,now:now,authorized:{true}))
+            XCTAssertThrowsError(try mov.admit(store))
+            try store.close()
+            let reopened = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,reopened)}
+            if cut == 0 {
+                XCTAssertThrowsError(try reopened.bootstrap())
+                XCTAssertEqual(try Data(contentsOf:next),Data()) // Unknown next is preserved, never salvaged.
+            } else {
+                XCTAssertEqual(try reopened.bootstrap().map(\.id),[token.job])
+                XCTAssertEqual(try reopened.openResult(token.job,now:now).1,textBytes)
+                XCTAssertEqual(try connectedLedger(Data(contentsOf:path)).schema,cut == 2 ? 2 : 1)
+            }
+        }
+    }
+
+    func testConnectedMOVMigrationCutsFinitePerMemberPublicationSchedule() throws {
+        let cuts: [(SavedAudioImportStorage.Boundary,String)] = [
+            (.create,"manifest.next"),(.created,"manifest.next"),(.write,"manifest.next"),
+            (.fileSync,"manifest.next"),(.close,"manifest.next"),(.verify,"manifest.next"),
+            (.payloadRead,"manifest.next"),(.hash,"manifest.next"),(.rename,"manifest.next"),(.directorySync,"manifest.json")]
+        for (boundary,member) in cuts {
+            let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+            var armed = false, hit = false, occurrence = 0, movAllocations = 0
+            var system = SavedAudioImportStorage.System()
+            system.event = {at,name in
+                guard armed else {return}
+                if at == .create, name?.hasSuffix(".source.pending") == true {movAllocations += 1}
+                if at == boundary, name == member {
+                    occurrence += 1
+                    if occurrence == 1 {hit = true; throw SavedAudioImportStorage.Failure.io}
+                }
+            }
+            let store = SavedAudioImportStore(storage:fixture.storage(system:system)); defer {armed = false; connectedPreserve(fixture,store)}
+            let token = try wav.admit(store); try store.finish(token,canceled:false)
+            let path = fixture.root.appendingPathComponent("manifest.json"), before = try Data(contentsOf:path), old = try connectedLedger(before)
+            armed = true; XCTAssertThrowsError(try mov.admit(store)); armed = false
+            XCTAssertTrue(hit,"\(boundary):\(member)#1"); XCTAssertEqual(occurrence,1); XCTAssertEqual(movAllocations,0)
+            XCTAssertEqual(store.failure,.uncertain)
+            let disk = try Data(contentsOf:path), next = try connectedLedger(disk)
+            XCTAssertEqual(next.jobs,old.jobs); XCTAssertEqual(next.owner,old.owner); XCTAssertEqual(next.root,old.root)
+            XCTAssertEqual(next.schema,boundary == .directorySync ? 2 : 1)
+            if boundary != .directorySync {XCTAssertEqual(disk,before)}
+            // This exact schedule's cleanup rules, independent of the mere throw.
+            let shouldRetainNext = [SavedAudioImportStorage.Boundary.created,.close,.rename].contains(boundary)
+            XCTAssertEqual(FileManager.default.fileExists(atPath:fixture.root.appendingPathComponent("manifest.next").path),shouldRetainNext && boundary != .directorySync)
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(old.jobs[0].source.final)),wav.bytes)
+        }
+        // Complete rename AND actual directory fsync before faulting only the
+        // final named manifest readback's temporary descriptor close.
+        do {
+            let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+            let manifest = fixture.root.appendingPathComponent("manifest.json")
+            var armed = false, pendingSync = false, synced = false, hit = false
+            var finalReadFD: Int32?, readbackCloses = 0, movAllocations = 0
+            var system = SavedAudioImportStorage.System()
+            system.event = {boundary,name in
+                guard armed else {return}
+                if boundary == .directorySync, name == "manifest.json" {pendingSync = true}
+                if boundary == .create, name?.hasSuffix(".source.pending") == true {movAllocations += 1}
+            }
+            system.sync = {fd in
+                let status = Darwin.fsync(fd)
+                if armed, pendingSync, status == 0 {pendingSync = false; synced = true}
+                return status
+            }
+            system.inspect = {fd,value in
+                let status = Darwin.fstat(fd,value)
+                if status == 0, armed, synced, finalReadFD == nil, value.pointee.st_mode & S_IFMT == S_IFREG {
+                    var named = stat()
+                    if lstat(manifest.path,&named) == 0, named.st_dev == value.pointee.st_dev, named.st_ino == value.pointee.st_ino {finalReadFD = fd}
+                }
+                return status
+            }
+            system.close = {fd in
+                let status = Darwin.close(fd)
+                if armed, fd == finalReadFD {
+                    readbackCloses += 1
+                    if !hit {hit = true; errno = EIO; return -1}
+                }
+                return status
+            }
+            let store = SavedAudioImportStore(storage:fixture.storage(system:system))
+            defer {armed = false; connectedPreserve(fixture,store)}
+            let token = try wav.admit(store), now = Date(timeIntervalSince1970:1_000_001)
+            _ = try store.saveResult(token,resultID:UUID(),bytes:Data("preserved readback result".utf8),observed:.init(observed:nil),now:now,authorized:{true})
+            let before = try connectedLedger(Data(contentsOf:manifest)), oldJob = try XCTUnwrap(before.jobs.first)
+            let textName = (try XCTUnwrap(oldJob.accepted)).id.uuidString.lowercased()+".raw.txt"
+            let oldSource = try Data(contentsOf:fixture.root.appendingPathComponent(oldJob.source.final))
+            let oldText = try Data(contentsOf:fixture.root.appendingPathComponent(textName))
+            armed = true; XCTAssertThrowsError(try mov.admit(store))
+            XCTAssertTrue(synced); XCTAssertTrue(hit); XCTAssertEqual(readbackCloses,1)
+            let fd = try XCTUnwrap(finalReadFD)
+            errno = 0; XCTAssertEqual(fcntl(fd,F_GETFD),-1); XCTAssertEqual(errno,EBADF)
+            armed = false
+            XCTAssertEqual(store.failure,.uncertain); XCTAssertEqual(movAllocations,0)
+            let disk = try connectedLedger(Data(contentsOf:manifest))
+            XCTAssertEqual(disk.schema,2); XCTAssertEqual(disk.jobs,before.jobs)
+            XCTAssertEqual(disk.owner,before.owner); XCTAssertEqual(disk.root,before.root)
+            XCTAssertFalse(FileManager.default.fileExists(atPath:fixture.root.appendingPathComponent("manifest.next").path))
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(oldJob.source.final)),oldSource)
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(textName)),oldText)
+            XCTAssertEqual(store.rows().map(\.id),[token.job])
+            XCTAssertThrowsError(try store.begin(token.job,requested:wav.requested,now:now,authorized:{true}))
+            XCTAssertThrowsError(try mov.admit(store))
+        }
+
+    }
+
+    func testConnectedMOVMigrationPreflightHeadroomBudgetAndUnknownNamespacePreserveSchema1() throws {
+        for cut in 0..<4 {
+            let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+            var armed = false, allocations = 0; var system = SavedAudioImportStorage.System()
+            system.freeBytes = {_ in armed && cut == 0 ? 0 : Int64.max}
+            system.event = {boundary,name in if armed, boundary == .create, name == "manifest.next" {allocations += 1}}
+            let store = SavedAudioImportStore(storage:fixture.storage(system:system)); defer {armed = false; connectedPreserve(fixture,store)}
+            let token = try wav.admit(store); try store.finish(token,canceled:true)
+            let path = fixture.root.appendingPathComponent("manifest.json"), before = try Data(contentsOf:path)
+            if cut == 2 {try Data([17]).write(to:fixture.root.appendingPathComponent("manifest.next"),options:[]); XCTAssertEqual(chmod(fixture.root.appendingPathComponent("manifest.next").path,0o600),0)}
+            if cut == 3 {try Data([29]).write(to:fixture.root.appendingPathComponent("unexplained")); XCTAssertEqual(chmod(fixture.root.appendingPathComponent("unexplained").path,0o600),0)}
+            armed = true; XCTAssertThrowsError(try mov.admit(store,credits:cut == 1 ? 65_500 : 0)); armed = false
+            XCTAssertEqual(allocations,0); XCTAssertEqual(try Data(contentsOf:path),before)
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.wav")),wav.bytes)
+            if cut == 2 {XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent("manifest.next")),Data([17]))}
+            if cut == 3 {XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent("unexplained")),Data([29]))}
+        }
+    }
+
+    func testConnectedMOVMixedJobsQuotaExpiryMissingSourceAndHashRefusal() throws {
+        let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+        let store = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,store)}
+        let old = try wav.admit(store), now = Date(timeIntervalSince1970:1_000_001)
+        _ = try store.saveResult(old,resultID:UUID(),bytes:Data("WAV result".utf8),observed:.init(observed:nil),now:now,authorized:{true})
+        let token = try mov.admit(store)
+        _ = try store.saveResult(token,resultID:UUID(),bytes:Data("MOV result".utf8),observed:.init(observed:nil),now:now,authorized:{true})
+        let expiry = try XCTUnwrap(store.rows().first(where:{$0.id == token.job})?.expires)
+        let fresh = try store.begin(token.job,requested:mov.requested,now:now,authorized:{true})
+        XCTAssertEqual(store.rows().first(where:{$0.id == token.job})?.expires,expiry)
+        let source = fixture.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov")
+        var corrupt = mov.bytes; corrupt[32] ^= 1; try corrupt.write(to:source)
+        XCTAssertThrowsError(try store.sourceSnapshot(fresh,now:now))
+        XCTAssertThrowsError(try store.openResult(old.job,now:now)) // Changed member freezes the shared metadata projection.
+        XCTAssertEqual(unlink(source.path),0)
+        XCTAssertEqual(try store.openResult(old.job,now:now).1,Data("WAV result".utf8))
+        XCTAssertThrowsError(try store.sourceSnapshot(fresh,now:now))
+        XCTAssertEqual(try store.openResult(token.job,now:now).1,Data("MOV result".utf8))
+        try store.finish(fresh,canceled:true)
+        for _ in 0..<8 {let t = try mov.admit(store); try store.finish(t,canceled:true)}
+        XCTAssertEqual(store.rows().count,10)
+        let ids = store.rows().map(\.id); XCTAssertThrowsError(try mov.admit(store)); XCTAssertEqual(store.rows().map(\.id),ids)
+        XCTAssertThrowsError(try store.sourceSnapshot(fresh,now:expiry))
+        XCTAssertEqual(try Data(contentsOf:URL(fileURLWithPath:wav.original.lexical)),wav.bytes)
+    }
+}
+
+
+extension SavedAudioImportStoreTests {
+    func testConnectedMOVSchemaLegacyWAVFactsRemainLooseAcrossMetadataProjectionAndRetry() throws {
+        let fixture = try SavedImportFixture(), input = try SavedFixtureInput(fixture,frames:40000)
+        let store = SavedAudioImportStore(storage:fixture.storage()), token = try input.admit(store)
+        try store.finish(token,canceled:true); try store.close()
+        let path = fixture.root.appendingPathComponent("manifest.json")
+        var doc = try connectedDocument(Data(contentsOf:path)), jobs = try XCTUnwrap(doc["jobs"] as? [[String:Any]])
+        // These old numeric predicates deliberately do not assert converter output
+        // floor/ceil or equality to a later decode. Keep their old acceptance.
+        jobs[0]["facts"] = ["rate":44100,"frames":17641,"outputFrames":6401,"clipped":5]
+        doc["jobs"] = jobs
+        let legacy = try JSONSerialization.data(withJSONObject:doc,options:[.sortedKeys]); try legacy.write(to:path)
+        let reopened = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,reopened)}
+        XCTAssertEqual(try reopened.bootstrap().count,1); XCTAssertEqual(try Data(contentsOf:path),legacy)
+        let before = try connectedLedger(legacy), oldJob = before.jobs[0], mov = try ConnectedMOVInput(fixture)
+        _ = try mov.admit(reopened)
+        let mixed = try connectedLedger(Data(contentsOf:path)); XCTAssertEqual(mixed.schema,2); XCTAssertEqual(mixed.jobs[0],oldJob)
+        // Settle MOV before the ordinary WAV retry; do not mutate old WAV facts.
+        let movRow = try XCTUnwrap(reopened.rows().last)
+        let movToken = try reopened.begin(movRow.id,requested:mov.requested,now:Date(timeIntervalSince1970:1_000_001),authorized:{true})
+        try reopened.finish(movToken,canceled:true)
+        let fresh = try reopened.begin(token.job,requested:input.requested,now:Date(timeIntervalSince1970:1_000_001),authorized:{true})
+        let snapshot = try reopened.sourceSnapshot(fresh,now:Date(timeIntervalSince1970:1_000_001))
+        XCTAssertEqual(snapshot.facts,oldJob.facts); XCTAssertEqual(snapshot.facts.profile,.wavPCM)
+        XCTAssertEqual(try ImportedAudio.decodeSource(snapshot.bytes,format:.wav).samples.count,40000)
+        XCTAssertEqual(snapshot.facts.outputFrames,6401); XCTAssertEqual(snapshot.facts.clipped,5)
+    }
+
+    func testConnectedMOVMigrationBoundsRevisionAndProspectiveQuotaRefuseBeforePublication() throws {
+        for cut in 0..<2 {
+            let fixture = try SavedImportFixture(), input = try SavedFixtureInput(fixture), store = SavedAudioImportStore(storage:fixture.storage())
+            if cut == 0 {let token = try input.admit(store); try store.finish(token,canceled:true)}
+            else {for _ in 0..<10 {let token = try input.admit(store); try store.finish(token,canceled:true)}}
+            try store.close()
+            let path = fixture.root.appendingPathComponent("manifest.json")
+            if cut == 0 {
+                var doc = try connectedDocument(Data(contentsOf:path)); doc["revision"] = UInt64.max
+                try JSONSerialization.data(withJSONObject:doc,options:[.sortedKeys]).write(to:path)
+            }
+            let before = try Data(contentsOf:path), mov = try ConnectedMOVInput(fixture)
+            var writes = 0; var system = SavedAudioImportStorage.System()
+            system.event = {boundary,name in if boundary == .create, name == "manifest.next" {writes += 1}}
+            let reopened = SavedAudioImportStore(storage:fixture.storage(system:system)); defer {connectedPreserve(fixture,reopened)}
+            _ = try reopened.bootstrap(); XCTAssertThrowsError(try mov.admit(reopened))
+            XCTAssertEqual(writes,0); XCTAssertEqual(try Data(contentsOf:path),before)
+            XCTAssertFalse(FileManager.default.fileExists(atPath:fixture.root.appendingPathComponent("manifest.next").path))
+        }
+    }
+}
+
+
+extension SavedAudioImportStoreTests {
+    func testConnectedMOVMigrationSerializedActiveAndPendingMatrixNeverRepairsOrPublishes() throws {
+        for cut in 0..<7 {
+            let fixture = try SavedImportFixture(), wav = try SavedFixtureInput(fixture), mov = try ConnectedMOVInput(fixture)
+            let store = SavedAudioImportStore(storage:fixture.storage()), token = try wav.admit(store)
+            _ = try store.saveResult(token,resultID:UUID(),bytes:Data("old linked text".utf8),observed:.init(observed:nil),now:Date(timeIntervalSince1970:1_000_000),authorized:{true})
+            try store.close()
+            let path = fixture.root.appendingPathComponent("manifest.json")
+            var doc = try connectedDocument(Data(contentsOf:path)), jobs = try XCTUnwrap(doc["jobs"] as? [[String:Any]])
+            var job = jobs[0]
+            switch cut {
+            case 0: job["state"] = "queued"
+            case 1: job["state"] = "running"
+            case 2: job["state"] = "staging"
+            case 3: job["state"] = "deleting"
+            case 4: job["candidate"] = job.removeValue(forKey:"accepted")
+            case 5:
+                let accepted = try XCTUnwrap(job.removeValue(forKey:"accepted") as? [String:Any]); job["retired"] = accepted["payload"]
+            default: job["state"] = "deleting"; job["resourcesRetired"] = true
+            }
+            jobs[0] = job; doc["jobs"] = jobs
+            let before = try JSONSerialization.data(withJSONObject:doc,options:[.sortedKeys]); try before.write(to:path)
+            let names = try FileManager.default.contentsOfDirectory(atPath:fixture.root.path).sorted()
+            var publications = 0; var system = SavedAudioImportStorage.System()
+            system.event = {boundary,name in if boundary == .create, name == "manifest.next" {publications += 1}}
+            let reopened = SavedAudioImportStore(storage:fixture.storage(system:system)); defer {connectedPreserve(fixture,reopened)}
+            if cut == 6 {XCTAssertThrowsError(try reopened.bootstrap())}
+            else {_ = try reopened.bootstrap()}
+            XCTAssertThrowsError(try mov.admit(reopened),"active/pending cut \(cut)")
+            XCTAssertEqual(publications,0); XCTAssertEqual(try Data(contentsOf:path),before)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:fixture.root.path).sorted(),names)
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.wav")),wav.bytes)
+        }
+    }
+    func testConnectedMOVSchemaOversizedManifestAndAcceptedHashBindingsPreserveInvalidBytes() throws {
+        for cut in 0..<4 {
+            let fixture = try SavedImportFixture(), mov = try ConnectedMOVInput(fixture), store = SavedAudioImportStore(storage:fixture.storage())
+            let token = try mov.admit(store)
+            _ = try store.saveResult(token,resultID:UUID(),bytes:Data("MOV linked result".utf8),observed:.init(observed:nil),now:Date(timeIntervalSince1970:1_000_001),authorized:{true})
+            try store.close()
+            let path = fixture.root.appendingPathComponent("manifest.json")
+            var doc = try connectedDocument(Data(contentsOf:path)), jobs = try XCTUnwrap(doc["jobs"] as? [[String:Any]])
+            var accepted = try XCTUnwrap(jobs[0]["accepted"] as? [String:Any])
+            if cut == 0 {accepted["sourceHash"] = String(repeating:"0",count:64)}
+            if cut == 1 {accepted["sourceGeneration"] = UUID().uuidString}
+            if cut == 2 {doc["unknown"] = true}
+            jobs[0]["accepted"] = accepted; doc["jobs"] = jobs
+            let invalid = cut == 3 ? Data(repeating:32,count:65_537) : try JSONSerialization.data(withJSONObject:doc,options:[.sortedKeys])
+            try invalid.write(to:path)
+            let reopened = SavedAudioImportStore(storage:fixture.storage()); defer {connectedPreserve(fixture,reopened)}
+            XCTAssertThrowsError(try reopened.bootstrap()); XCTAssertEqual(try Data(contentsOf:path),invalid)
+            XCTAssertEqual(try Data(contentsOf:fixture.root.appendingPathComponent(token.source.uuidString.lowercased()+".source.mov")),mov.bytes)
+        }
     }
 }
