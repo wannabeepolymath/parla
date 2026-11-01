@@ -271,5 +271,8 @@ The connected slice passed 103 distinct focused methods across four staged
 test-only correction snapshots (57 + 20 + 17 + 9), including all 34 new methods.
 Source review and corrected test-oracle review found no remaining blockers.
 This is neither a full-package pass nor exporter, installed-backend or native-UI
-qualification. General MOV/MP4 import, AAC native eligibility and B40 remain
-incomplete; the macOS completion count stays 23/43.
+qualification for that historical snapshot. The later guarded AVFoundation
+dialect and one authored-file reader observation are described above. General
+MOV/MP4 and AAC native eligibility remain unqualified. Canonical B40 is accepted
+for the declared bounded WAV/restricted PCM MOV workflow; see
+[qualification and limits](../qualification/macos/2026-11-01-audio-video-file-import.md).
