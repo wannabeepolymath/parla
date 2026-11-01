@@ -5,8 +5,9 @@ import XCTest
 final class B26AppCredentials: CredentialBackend {
     var reads = 0, statuses = 0
     var onRead: () -> Void = {}
+    var result: CredentialRead = .value("owned-test-key")
     func status(_ scope: CredentialScope) -> CredentialStatus { statuses += 1; XCTFail("No status discovery"); return .missing }
-    func read(_ scope: CredentialScope, interactive: Bool) -> CredentialRead { reads += 1; onRead(); return .value("owned-test-key") }
+    func read(_ scope: CredentialScope, interactive: Bool) -> CredentialRead { reads += 1; onRead(); return result }
     func add(_ value: String, scope: CredentialScope, interactive: Bool) -> CredentialMutation { XCTFail("No Keychain mutation"); return .error }
     func update(_ value: String, scope: CredentialScope, interactive: Bool) -> CredentialMutation { XCTFail("No Keychain mutation"); return .error }
     func delete(_ scope: CredentialScope) -> CredentialMutation { XCTFail("No Keychain mutation"); return .error }
@@ -14,6 +15,7 @@ final class B26AppCredentials: CredentialBackend {
 final class B26AppDocument {
     let id = UUID(), backend = B26AppCredentials()
     var bytes: Data?, failWrite = false
+    var onDocumentRead: () -> Void = {}
     var historyBytes = Data("[]".utf8)
     init(provider: String = "openai-compatible", history: Bool = true) throws {
         var s = Settings(); s.cleanup.provider = provider; s.cleanup.baseURL = "https://context.test/v1"; s.cleanup.model = "exact-model"; s.cleanupModel = "exact-model"
@@ -23,7 +25,7 @@ final class B26AppDocument {
     }
     lazy var store = SettingsStore(url: URL(fileURLWithPath: "/synthetic-b26-app/settings.json"), credentials: CredentialStore(backend: backend),
         scratchpadIO: .init(read: { _ in self.bytes }, write: { bytes, _ in try self.write(bytes) }),
-        documentIO: .init(read: { self.bytes }), atomicWrite: { bytes, _ in try self.write(bytes) })
+        documentIO: .init(read: { self.onDocumentRead(); return self.bytes }), atomicWrite: { bytes, _ in try self.write(bytes) })
     lazy var history = HistoryStore(url: URL(fileURLWithPath: "/synthetic-b26-app/history.json"), persistence: .init(read: { _ in self.historyBytes }, writeAtomically: { bytes, _ in self.historyBytes = bytes }))
     func write(_ bytes: Data) throws { if failWrite { throw CocoaError(.fileWriteOutOfSpace) }; self.bytes = bytes }
     func patch(_ change: (inout [String: Any]) -> Void) throws {
@@ -78,24 +80,26 @@ final class B26AppHTTP: @unchecked Sendable {
     var constructed = 0, resumed = 0, canceled = 0
     var requests: [URLRequest] = []
     var callbacks: HistoryRetryHTTPCallbacks?
+    weak var handle: B26AppHandle?
     var held = false, completeOnly = false, exitOnly = false
     var status = 200
     var model: String? = "exact-model", text = "PREFIX_QUOTED_SENTINEL"
-    var onConstruct: () -> Void = {}, onResume: () -> Void = {}
+    var onConstruct: () -> Void = {}, onResume: () -> Void = {}, onCancel: () -> Void = {}
     var driver: HistoryRetryHTTP.Driver {
         { request, callbacks in
             self.constructed += 1; self.requests.append(request); self.callbacks = callbacks
             self.onConstruct()
-            return B26AppHandle(start: {
+            let handle = B26AppHandle(start: {
                 self.resumed += 1; self.onResume()
                 if !self.held { self.respond(request, callbacks) }
             }, stop: {
-                self.canceled += 1
+                self.canceled += 1; self.onCancel()
                 if !self.held {
                     if !self.exitOnly { callbacks.completed(CancellationError()) }
                     if !self.completeOnly { callbacks.exited() }
                 }
             })
+            self.handle = handle; return handle
         }
     }
     func respond(_ request: URLRequest, _ c: HistoryRetryHTTPCallbacks) {
@@ -120,6 +124,7 @@ final class B26AppHTTP: @unchecked Sendable {
     var pending: (DictationSession.Session, DictationSession.Landed)?
     var posted: [String] = [], learned: [String] = [], originals: [String] = []
     var pendingLearner = true, activeLearner = true, disarms = 0
+    var onDisarm: () -> Void = {}
     var primitiveUsageCalls = 0
     var onOriginalConfiguration: (() -> Void)?
     var onPosterConfiguration: (() -> Void)?
@@ -155,17 +160,30 @@ final class B26AppHTTP: @unchecked Sendable {
         keyboardAllowed: { true }, automationAllowed: { true }, explicitEntry: {}, send: { self.send($0) })
     init(_ document: B26AppDocument) throws {
         d = document
-        // Explicit new private filesystem control for the existing recording owner's
-        // bounded empty-directory policy read. No historical or app resource is used.
-        let directory = URL(fileURLWithPath: "/private/tmp/parla-implementation-2026-10-28/wave7h1-resume1-child-fixture-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        if let path = ProcessInfo.processInfo.environment["PARLA_TEST_FIXTURE_MANIFEST"] {
-            let data = try JSONSerialization.data(withJSONObject: ["path": directory.path, "ownerPID": ProcessInfo.processInfo.processIdentifier, "purpose": "B26 empty recording directory", "cleanup": "preserved"])
-            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path)); try handle.seekToEnd(); try handle.write(contentsOf: data + Data([10])); try handle.close()
-        } else { XCTFail("Exclusive fixture manifest required") }
+        // Future runner owns this parent and a precreated private manifest.
+        // No historical task root, directory sweep, or recording payload access.
+        let environment = ProcessInfo.processInfo.environment
+        guard let manifest = environment["PARLA_TEST_FIXTURE_MANIFEST"], !manifest.isEmpty else {
+            XCTFail("Exclusive fixture manifest required"); throw CocoaError(.fileNoSuchFile)
+        }
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: manifest))
+        defer { try? handle.close() }
+        let parent = environment["PARLA_B26_FIXTURE_ROOT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.temporaryDirectory
+        let attributes = try FileManager.default.attributesOfItem(atPath: parent.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory else { throw CocoaError(.fileReadUnsupportedScheme) }
+        if environment["PARLA_B26_FIXTURE_ROOT"] != nil {
+            guard (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700 else { throw CocoaError(.fileReadNoPermission) }
+        }
+        let directory = parent.appendingPathComponent("parla-b26-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        let data = try JSONSerialization.data(withJSONObject: ["path": directory.path, "ownerPID": ProcessInfo.processInfo.processIdentifier,
+            "purpose": "B26 empty recording directory", "cleanup": "preserved", "recordingReadScope": "fresh-owned-empty-only", "retention": "existing-policy-on-empty-directory"])
+        try handle.seekToEnd(); try handle.write(contentsOf: data + Data([10]))
         recordings = RecordingStore(directory: directory, keepAll: false, writer: { _, _ in XCTFail("No audio writer") }, remover: { _ in XCTFail("No audio remover") })
     }
-    func disarm() { disarms += 1; pendingLearner = false; activeLearner = false }
+    func disarm() { disarms += 1; pendingLearner = false; activeLearner = false; onDisarm() }
     func send(_ event: DictationSession.Event) {
         original.observe(event); sink.beginEvent(for: event, currentGeneration: machine.gen)
         machine.send(event) { effect in
@@ -687,5 +705,690 @@ extension SurroundingTextContextIntegrationTests {
         })
         XCTAssertFalse(advanced); release.signal(); await second.value
         XCTAssertTrue(advanced); XCTAssertEqual(h.resumed, 1); XCTAssertEqual(r.posted, [h.text])
+    }
+}
+
+// Stage A finite fakes only. No native worker/qualification or quality oracle.
+// Observation timers report failure; they NEVER represent operation exit.
+private final class B26StageObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+    func resolve(_ value: Bool) {
+        let continuation = lock.withLock { let old = self.continuation; self.continuation = nil; return old }
+        continuation?.resume(returning: value)
+    }
+}
+private final class B26StageEvent: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signaled = false
+    private var observers: [B26StageObservation] = []
+    var occurred: Bool { lock.withLock { signaled } }
+    func signal() {
+        let observers = lock.withLock { () -> [B26StageObservation] in
+            signaled = true; let old = self.observers; self.observers = []; return old
+        }
+        for observer in observers { observer.resolve(true) }
+    }
+    func observe() async -> Bool {
+        await withCheckedContinuation { continuation in
+            let observer = B26StageObservation(continuation)
+            let ready = lock.withLock { if signaled { return true }; observers.append(observer); return false }
+            if ready { observer.resolve(true) }
+            else { DispatchQueue.global().asyncAfter(deadline: .now() + 4) { observer.resolve(false) } }
+        }
+    }
+}
+private final class B26StageHold: @unchecked Sendable {
+    let id = UUID(), entered = B26StageEvent(), returned = B26StageEvent()
+    private let lock = NSLock()
+    private var released = false, armed = false, failed = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    var timedOut: Bool { lock.withLock { failed } }
+    func release() {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            released = true; let old = self.waiters; self.waiters = []; return old
+        }
+        for waiter in waiters { waiter.resume() }
+    }
+    private func failRelease() {
+        lock.withLock { if !released { failed = true } }
+        release()
+    }
+    func wait() async {
+        let arm = lock.withLock { if armed { return false }; armed = true; return true }
+        if arm {
+            // Independent non-MainActor fail-release; sticky failure cannot be
+            // erased by a later normal release. No cancellation-dependent timer.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in self?.failRelease() }
+        }
+        entered.signal()
+        await withCheckedContinuation { continuation in
+            let ready = lock.withLock { if released { return true }; waiters.append(continuation); return false }
+            if ready { continuation.resume() }
+        }
+        returned.signal()
+    }
+}
+private final class B26StageOwnedTask {
+    let id = UUID(), completed = B26StageEvent()
+    let task: Task<Void, Never>
+    private let observer: Task<Void, Never>
+    init(_ task: Task<Void, Never>) {
+        self.task = task
+        let completed = self.completed
+        observer = Task { await task.value; completed.signal() }
+    }
+    func joinObserved(_ expected: UUID, file: StaticString = #filePath, line: UInt = #line) async -> Bool {
+        XCTAssertEqual(id, expected, file: file, line: line)
+        let returned = await completed.observe()
+        XCTAssertTrue(returned, "Actual task return unobserved; keep its scope/lane pending", file: file, line: line)
+        guard returned else { return false } // Not an exit signal or cleanup claim.
+        await task.value; await observer.value
+        return true
+    }
+}
+private final class B26StageTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Int] = [:]
+    private var held: UUID?
+    weak var scope: SurroundingTextOperation?
+    weak var backend: B26StageBackend?
+    weak var admissionToken: B26StageAdmissionToken?
+    weak var proofToken: B26StageProofToken?
+    let phaseReturned = B26StageEvent(), canceledRead = B26StageEvent()
+    func note(_ key: String) -> Int { lock.withLock { values[key, default: 0] += 1; return values[key]! } }
+    func count(_ key: String) -> Int { lock.withLock { values[key, default: 0] } }
+    func heldBy(_ id: UUID) { lock.withLock { held = id } }
+    var heldID: UUID? { lock.withLock { held } }
+}
+private final class B26StageAdmissionToken {
+    let trace: B26StageTrace
+    init(_ trace: B26StageTrace) { self.trace = trace }
+    deinit { _ = trace.note("admissionReleased") }
+}
+private final class B26StageProofToken {
+    let trace: B26StageTrace
+    init(_ trace: B26StageTrace) { self.trace = trace }
+    deinit { _ = trace.note("proofReleased") }
+}
+private final class B26StageBackend {
+    let trace: B26StageTrace, field: SurroundingTextField
+    let hold: B26StageHold?
+    let phase: Int // 0 read, 1...6 proof, 7 cleanup; finite selected site only.
+    var savedAdmission: SurroundingTextOperation.Admit?
+    let refuseFirst: Bool, throwIssue: Bool, cancelOnIssue: Bool
+    let failure: Int
+    let onProof: @MainActor (Int) -> Void
+    let afterFinish: @MainActor () -> Void
+    init(trace: B26StageTrace, hold: B26StageHold?, phase: Int, refuseFirst: Bool,
+         throwIssue: Bool, cancelOnIssue: Bool, failure: Int, onProof: @escaping @MainActor (Int) -> Void,
+         afterFinish: @escaping @MainActor () -> Void) {
+        self.trace = trace; self.hold = hold; self.phase = phase; self.refuseFirst = refuseFirst
+        self.throwIssue = throwIssue; self.cancelOnIssue = cancelOnIssue; self.failure = failure
+        self.onProof = onProof; self.afterFinish = afterFinish
+        field = .init(pid: 23, window: 42, field: 93, app: "test.editor", caret: 7)
+    }
+    deinit { _ = trace.note("backendReleased") }
+    func pause(_ site: Int) async {
+        if site == phase, let hold { trace.heldBy(hold.id); await hold.wait(); trace.phaseReturned.signal() }
+    }
+    func proof(_ admit: @escaping SurroundingTextOperation.Admit) async throws -> SurroundingTextField? {
+        let number = trace.note("proof")
+        if savedAdmission == nil {
+            let token = B26StageAdmissionToken(trace); trace.admissionToken = token
+            savedAdmission = { [token] in try withExtendedLifetime(token) { try admit() } }
+        }
+        await pause(number)
+        _ = try admit() // Fresh per-job entry, AFTER any synthetic scheduling hold.
+        _ = trace.note("metadataEntry")
+        if failure == number { throw SurroundingTextFailure.refused }
+        await MainActor.run { onProof(number) }
+        return refuseFirst && number == 1 ? nil : field
+    }
+    @MainActor func issue(_ field: SurroundingTextField, _ range: NSRange, _ remaining: TimeInterval,
+                          _ admit: @escaping SurroundingTextOperation.Admit) throws -> SurroundingTextRead {
+        _ = trace.note("issue")
+        XCTAssertEqual(range, field.request); XCTAssertGreaterThan(remaining, 0); XCTAssertLessThanOrEqual(remaining, 1)
+        _ = try admit()
+        if throwIssue { throw SurroundingTextFailure.refused }
+        if cancelOnIssue { trace.scope?.cancel() }
+        return SurroundingTextRead(value: {
+            _ = self.trace.note("readStart")
+            defer { _ = self.trace.note("readExit") }
+            await self.pause(0)
+            _ = try admit()
+            if self.failure == 0 { throw SurroundingTextFailure.refused }
+            return .init(field: field, range: range, units: Array("Stage A".utf16), startBoundaryProved: true)
+        }, cancel: {
+            _ = self.trace.note("readCancel"); self.trace.canceledRead.signal()
+        })
+    }
+    func finish() async {
+        _ = trace.note("finishEntry")
+        await pause(7)
+        savedAdmission = nil
+        await MainActor.run { afterFinish() }
+        _ = trace.note("finishExit")
+    }
+    static func port(_ trace: B26StageTrace, hold: B26StageHold? = nil, phase: Int = -1,
+                     refuseFirst: Bool = false, throwIssue: Bool = false, cancelOnIssue: Bool = false, failure: Int = -1,
+                     onProof: @escaping @MainActor (Int) -> Void = { _ in },
+                     afterFinish: @escaping @MainActor () -> Void = {}) -> SurroundingTextPort {
+        .init(open: { id, target in
+            _ = trace.note("open")
+            let backend = B26StageBackend(trace: trace, hold: hold, phase: phase, refuseFirst: refuseFirst,
+                throwIssue: throwIssue, cancelOnIssue: cancelOnIssue, failure: failure, onProof: onProof, afterFinish: afterFinish)
+            trace.backend = backend
+            let proofToken = B26StageProofToken(trace); trace.proofToken = proofToken
+            let scope = SurroundingTextOperation(operationID: id, target: target,
+                proof: { admit in
+                    defer { withExtendedLifetime(proofToken) {} }
+                    return try await backend.proof(admit)
+                },
+                issue: { try backend.issue($0, $1, $2, $3) }, finishAndWaitForExit: { await backend.finish() })
+            trace.scope = scope; return scope
+        })
+    }
+}
+
+extension SurroundingTextContextIntegrationTests {
+    @MainActor func testStageA01NilOpenIsInertBeforePolicyOrParticipation() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP()
+        var opened = 0, slept = 0
+        r.sleep = { _ in slept += 1; XCTFail("Nil open cannot create a watchdog") }
+        let port = SurroundingTextPort(open: { id, target in
+            opened += 1; XCTAssertEqual(id, s.operation.id); XCTAssertTrue(target == "test.editor"); return nil
+        })
+        XCTAssertNil(SurroundingTextPort.unsupported.open(s.operation.id, "test.editor"))
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertEqual(opened, 1); XCTAssertEqual(slept, 0); XCTAssertEqual(f.proofs, 0); XCTAssertEqual(f.issues, 0)
+        XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 1); XCTAssertEqual(r.primitiveUsageCalls, 1)
+        XCTAssertFalse(s.surroundingTextRun.participated); XCTAssertTrue(SurroundingTextPort.nativeQualifications.isEmpty)
+    }
+
+    @MainActor func testStageA02HeldMetadataAndCleanupOwnLaneThroughGrantAndParentCancellation() async throws {
+        // First, pre-read, post-credential, post-response, post-watchdog, drain.
+        for phase in [1, 2, 4, 5, 6, 7] {
+            for parentCancel in [false, true] {
+                let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP()
+                let hold = B26StageHold(), trace = B26StageTrace()
+                defer { hold.release() }
+                let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, hold: hold, phase: phase)))
+                let identity = task.id
+                let entered = await hold.entered.observe(); XCTAssertTrue(entered)
+                guard entered else { hold.release(); _ = await task.joinObserved(identity); return }
+                XCTAssertEqual(trace.heldID, hold.id); XCTAssertEqual(trace.scope?.operationID, s.operation.id)
+                XCTAssertFalse(task.completed.occurred); XCTAssertFalse(s.operation.hasExited)
+                let attempted = B26StageEvent(), revoked = B26StageEvent()
+                if parentCancel { s.operation.requestAbort(); attempted.signal(); revoked.signal() }
+                else {
+                    // Independent contender: no MainActor hop and no same-thread
+                    // recursive-lock success masquerading as cross-thread proof.
+                    let store = d.store
+                    DispatchQueue.global().async { attempted.signal(); store.revokeSurroundingTextContext(); revoked.signal() }
+                }
+                let didAttempt = await attempted.observe(), didRevoke = await revoked.observe()
+                XCTAssertTrue(didAttempt); XCTAssertTrue(didRevoke)
+                XCTAssertThrowsError(try trace.scope?.checkCancellation())
+                let queued = B26StageEvent(), advanced = B26StageEvent()
+                let successor = PendingOperation(name: "Stage A successor", diagnostics: nil)
+                let second = B26StageOwnedTask(Task {
+                    let barrier = PendingOperationQueue.enqueue(previous: task.task, operation: successor, completes: true, work: { advanced.signal() })
+                    queued.signal(); await barrier.value
+                })
+                let successorID = second.id
+                let didQueue = await queued.observe(); XCTAssertTrue(didQueue)
+                XCTAssertFalse(advanced.occurred); XCTAssertFalse(s.operation.hasExited)
+                hold.release()
+                let returned = await hold.returned.observe(), phaseReturned = await trace.phaseReturned.observe()
+                XCTAssertTrue(returned); XCTAssertTrue(phaseReturned); XCTAssertEqual(trace.heldID, hold.id)
+                guard await task.joinObserved(identity), await second.joinObserved(successorID) else { return }
+                XCTAssertTrue(advanced.occurred); XCTAssertTrue(s.operation.hasExited); XCTAssertFalse(hold.timedOut)
+                XCTAssertEqual(trace.count("finishEntry"), 1); XCTAssertEqual(trace.count("finishExit"), 1)
+                XCTAssertNil(trace.backend); XCTAssertNil(trace.admissionToken)
+                if phase >= 4 || parentCancel { XCTAssertEqual(r.categories, 0) }
+                else { XCTAssertEqual(r.categories, 1) }
+                if phase >= 5 { XCTAssertNil(r.runtime.results.read()) } // Independent ordinary authority, prearm only.
+                if phase <= 4 { XCTAssertEqual(h.constructed, 0) }
+                XCTAssertFalse(r.posted == [h.text])
+            }
+        }
+    }
+
+    @MainActor func testStageA03RegistrationAndCancelBeforeStartDrainWithoutMetadataEntry() async throws {
+        for cancelBeforeOpen in [false, true] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let base = B26StageBackend.port(trace)
+            let port = SurroundingTextPort(open: { id, target in
+                let scope = base.open(id, target)
+                if cancelBeforeOpen { scope?.cancel() } // Latch-only, still inert.
+                return scope
+            })
+            if !cancelBeforeOpen { d.store.revokeSurroundingTextContext() }
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertEqual(trace.count("proof"), 0); XCTAssertEqual(trace.count("metadataEntry"), 0)
+            XCTAssertEqual(trace.count("issue"), 0); XCTAssertEqual(trace.count("finishExit"), 1)
+            XCTAssertEqual(h.constructed, 0); XCTAssertFalse(s.surroundingTextRun.participated)
+        }
+    }
+
+    @MainActor func testStageA04IssueThrowAndArmedCanceledReadNeverResendCategory() async throws {
+        for throwIssue in [false, true] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let port = B26StageBackend.port(trace, throwIssue: throwIssue, cancelOnIssue: !throwIssue)
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertTrue(s.surroundingTextRun.participated); XCTAssertEqual(trace.count("issue"), 1)
+            XCTAssertEqual(trace.count("readStart"), 0); XCTAssertEqual(trace.count("finishExit"), 1)
+            XCTAssertEqual(trace.count("readCancel"), throwIssue ? 0 : 1)
+            XCTAssertEqual(d.backend.reads, 0); XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 0)
+            XCTAssertTrue(r.posted == [r.raw]); XCTAssertTrue(r.learned.isEmpty)
+        }
+    }
+
+    @MainActor func testStageA05ArmedNeverInvokedHandleAndRepeatedFinishOwnCleanup() async throws {
+        let trace = B26StageTrace(), id = UUID(), port = B26StageBackend.port(trace)
+        let scope = try XCTUnwrap(port.open(id, "test.editor"))
+        let observed = try await scope.proof(admit: { 1 })
+        let field = try XCTUnwrap(observed)
+        let read = try scope.issue(field, range: field.request, admit: { 1 })
+        XCTAssertEqual(trace.count("readStart"), 0); scope.cancel(); read.cancel()
+        let done = B26StageOwnedTask(Task { await scope.finishAndWaitForExit(); await scope.finishAndWaitForExit() }), identity = done.id
+        guard await done.joinObserved(identity) else { return }
+        XCTAssertEqual(trace.count("readCancel"), 1); XCTAssertEqual(trace.count("readStart"), 0)
+        XCTAssertEqual(trace.count("finishExit"), 1); XCTAssertNil(trace.backend); XCTAssertNil(trace.admissionToken)
+        do { _ = try await scope.proof(admit: { 1 }); XCTFail("Closed scope cannot schedule") } catch {}
+    }
+
+    @MainActor func testStageA06DisarmRevocationParticipatesWithoutIssueCredentialsOrHTTP() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+        r.onDisarm = { r.onDisarm = {}; d.store.revokeSurroundingTextContext() }
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace))), identity = task.id
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertTrue(s.surroundingTextRun.participated); XCTAssertEqual(trace.count("proof"), 2)
+        XCTAssertEqual(trace.count("issue"), 0); XCTAssertEqual(trace.count("readStart"), 0)
+        XCTAssertEqual(trace.count("finishExit"), 1); XCTAssertEqual(d.backend.reads, 0)
+        XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 0); XCTAssertTrue(r.posted == [r.raw])
+        XCTAssertEqual(r.primitiveUsageCalls, 0); XCTAssertTrue(r.learned.isEmpty)
+    }
+
+    @MainActor func testStageA07HeldActualReadDeliversFakeCancelOutsideStoreAndWaitsForReturn() async throws {
+        for parentCancel in [false, true] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let hold = B26StageHold(); defer { hold.release() }
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, hold: hold, phase: 0))), identity = task.id
+            let entered = await hold.entered.observe(); XCTAssertTrue(entered)
+            guard entered else { hold.release(); _ = await task.joinObserved(identity); return }
+            XCTAssertEqual(trace.heldID, hold.id); XCTAssertEqual(trace.count("readStart"), 1)
+            let revoked = B26StageEvent(), store = d.store
+            if parentCancel { s.operation.requestAbort(); revoked.signal() }
+            else { DispatchQueue.global().async { store.revokeSurroundingTextContext(); revoked.signal() } }
+            let didRevoke = await revoked.observe(), delivered = await trace.canceledRead.observe()
+            XCTAssertTrue(didRevoke); XCTAssertTrue(delivered)
+            XCTAssertFalse(hold.returned.occurred); XCTAssertFalse(task.completed.occurred)
+            XCTAssertEqual(trace.count("finishEntry"), 0); XCTAssertFalse(s.operation.hasExited)
+            hold.release()
+            let returned = await hold.returned.observe(); XCTAssertTrue(returned); XCTAssertEqual(trace.heldID, hold.id)
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertEqual(trace.count("readCancel"), 1); XCTAssertEqual(trace.count("finishExit"), 1)
+            XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 0); XCTAssertEqual(d.backend.reads, 0)
+            XCTAssertFalse(hold.timedOut); XCTAssertTrue(s.operation.hasExited)
+        }
+    }
+
+    @MainActor func testStageA08NilMetadataWaitsForFinalCleanupBeforeCategory() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+        let hold = B26StageHold(); defer { hold.release() }
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, hold: hold, phase: 7, refuseFirst: true))), identity = task.id
+        let entered = await hold.entered.observe(); XCTAssertTrue(entered)
+        guard entered else { hold.release(); _ = await task.joinObserved(identity); return }
+        XCTAssertEqual(trace.heldID, hold.id); XCTAssertEqual(trace.count("proof"), 1)
+        XCTAssertEqual(r.categories, 0); XCTAssertEqual(h.constructed, 0); XCTAssertFalse(s.operation.hasExited)
+        hold.release(); let returned = await hold.returned.observe(); XCTAssertTrue(returned)
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertEqual(r.categories, 1); XCTAssertEqual(trace.count("finishExit"), 1)
+        XCTAssertFalse(s.surroundingTextRun.participated); XCTAssertFalse(hold.timedOut)
+    }
+
+    @MainActor func testStageA09LogicalWindowsIncludeProofAndFinalDrainEquality() async throws {
+        for site in [1, 2, 7] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let port = B26StageBackend.port(trace, onProof: { phase in
+                if phase == site { r.time += site == 1 ? 15 : 1 }
+            }, afterFinish: { if site == 7 { r.time += 15 } })
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertEqual(trace.count("finishExit"), 1)
+            if site <= 2 { XCTAssertEqual(trace.count("issue"), 0); XCTAssertEqual(h.constructed, 0) }
+            else { XCTAssertEqual(h.resumed, 1); XCTAssertEqual(r.categories, 0); XCTAssertFalse(r.posted == [h.text]) }
+        }
+    }
+
+    @MainActor func testStageA10SuccessfulDrainReleasesBackendAndAdmissionButKeepsRunAuthority() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+        let hold = B26StageHold(); defer { hold.release() }
+        var checked = false
+        r.beforeCompleted = {
+            checked = true
+            XCTAssertNil(trace.backend); XCTAssertNil(trace.admissionToken); XCTAssertNil(trace.proofToken); XCTAssertNil(trace.scope)
+            XCTAssertEqual(trace.count("backendReleased"), 1); XCTAssertEqual(trace.count("admissionReleased"), 1); XCTAssertEqual(trace.count("proofReleased"), 1)
+            do { try s.surroundingTextRun.check() } catch { XCTFail("Successful drain unexpectedly revoked run authority") }
+            XCTAssertTrue(s.surroundingTextRun.insertionRequiresAuthority)
+        }
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, hold: hold, phase: 7))), identity = task.id
+        let entered = await hold.entered.observe(); XCTAssertTrue(entered)
+        guard entered else { hold.release(); _ = await task.joinObserved(identity); return }
+        XCTAssertEqual(trace.heldID, hold.id); XCTAssertEqual(trace.scope?.operationID, s.operation.id)
+        XCTAssertNotNil(trace.backend); XCTAssertNotNil(trace.admissionToken); XCTAssertNotNil(trace.proofToken); XCTAssertFalse(checked)
+        XCTAssertFalse(s.operation.hasExited); XCTAssertFalse(task.completed.occurred)
+        hold.release(); let returned = await hold.returned.observe(); XCTAssertTrue(returned)
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertFalse(hold.timedOut); XCTAssertTrue(checked); XCTAssertEqual(trace.count("proof"), 6); XCTAssertEqual(trace.count("finishExit"), 1)
+        XCTAssertTrue(r.posted == [h.text]); XCTAssertEqual(r.categories, 0); XCTAssertTrue(r.learned.isEmpty)
+        XCTAssertNoThrow(try s.surroundingTextRun.check())
+    }
+
+    @MainActor func testStageA11RevocationDuringFreshSubscriptionIsCoveredByTransientAuthority() async throws {
+        for handoffRead in [1, 2] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            var handedOff = 0, observations = 0
+            let port = B26StageBackend.port(trace, afterFinish: {
+                d.onDocumentRead = {
+                    observations += 1
+                    guard observations == handoffRead else { return }
+                    d.onDocumentRead = {}; handedOff += 1
+                    XCTAssertNil(trace.backend); XCTAssertNil(trace.admissionToken); XCTAssertNil(trace.proofToken)
+                    do { try s.surroundingTextRun.check() } catch { XCTFail("Run authority was absent before handoff revocation") }
+                    d.store.revokeSurroundingTextContext()
+                    do { try s.surroundingTextRun.check(); XCTFail("Revoked run authority remained usable") } catch { }
+                    if handoffRead == 2 {
+                        // Transient observer has been removed. The final run-only
+                        // observer vetoes without closing/retaining the old scope.
+                        do { try trace.scope?.checkCancellation() } catch { XCTFail("Run-only handoff unexpectedly canceled the retired scope") }
+                    }
+                }
+            })
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertEqual(handedOff, 1); XCTAssertEqual(observations, handoffRead)
+            XCTAssertEqual(h.resumed, 1); XCTAssertEqual(r.categories, 0)
+            XCTAssertFalse(r.posted == [h.text]); XCTAssertFalse(s.surroundingTextRun.insertionRequiresAuthority)
+            XCTAssertThrowsError(try s.surroundingTextRun.check()); XCTAssertNil(trace.backend)
+        }
+    }
+}
+
+extension SurroundingTextContextIntegrationTests {
+    @MainActor func testStageA12HTTPCancelKeepsScopeSlotAndRequiresCompletionPlusExit() async throws {
+        for parentCancel in [false, true] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let entered = B26StageEvent(), canceled = B26StageEvent(), release = B26StageHold()
+            defer { release.release() }
+            // Even failure/early assertion paths independently release BOTH HTTP
+            // acknowledgments. This task is owned and observed before its join.
+            let callbacks = B26StageHTTPRelease()
+            let failRelease = B26StageOwnedTask(Task { await release.wait(); callbacks.release() }), releaseID = failRelease.id
+            let releaseEntered = await release.entered.observe(); XCTAssertTrue(releaseEntered)
+            h.held = true; h.onResume = { [weak h] in guard let h else { XCTFail("HTTP fake released before resume"); return }; callbacks.install(h.callbacks, handleID: h.handle.map(ObjectIdentifier.init)); entered.signal() }; h.onCancel = { canceled.signal() }
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace))), identity = task.id
+            let didEnter = await entered.observe(); XCTAssertTrue(didEnter)
+            guard didEnter else {
+                release.release(); _ = await failRelease.joinObserved(releaseID); _ = await task.joinObserved(identity); return
+            }
+            let handleID = h.handle.map(ObjectIdentifier.init)
+            XCTAssertNotNil(handleID); XCTAssertEqual(callbacks.handleID, handleID)
+            XCTAssertEqual(trace.count("proof"), 4); XCTAssertEqual(trace.count("readExit"), 1)
+            XCTAssertEqual(trace.scope?.operationID, s.operation.id)
+            if parentCancel { s.operation.requestAbort() } else { d.store.revokeSurroundingTextContext() }
+            let didCancel = await canceled.observe(); XCTAssertTrue(didCancel)
+            XCTAssertThrowsError(try trace.scope?.checkCancellation())
+            XCTAssertFalse(task.completed.occurred); XCTAssertFalse(s.operation.hasExited)
+            h.callbacks?.completed(CancellationError())
+            XCTAssertFalse(task.completed.occurred); XCTAssertEqual(trace.count("proof"), 4)
+            let queued = B26StageEvent(), advanced = B26StageEvent()
+            let next = B26StageOwnedTask(Task {
+                let barrier = PendingOperationQueue.enqueue(previous: task.task,
+                    operation: PendingOperation(name: "Stage A HTTP successor", diagnostics: nil), completes: true, work: { advanced.signal() })
+                queued.signal(); await barrier.value
+            }), nextID = next.id
+            let didQueue = await queued.observe(); XCTAssertTrue(didQueue); XCTAssertFalse(advanced.occurred)
+            release.release()
+            let released = await release.returned.observe(); XCTAssertTrue(released)
+            XCTAssertEqual(callbacks.handleID, handleID)
+            guard await failRelease.joinObserved(releaseID), await task.joinObserved(identity), await next.joinObserved(nextID) else { return }
+            XCTAssertEqual(trace.count("proof"), 4); XCTAssertEqual(trace.count("finishExit"), 1)
+            XCTAssertTrue(advanced.occurred); XCTAssertTrue(s.operation.hasExited); XCTAssertEqual(r.categories, 0)
+            XCTAssertFalse(r.posted == [h.text]); XCTAssertFalse(release.timedOut)
+        }
+    }
+
+    @MainActor func testStageA13HTTPActualExitPrecedesNextOwnedMetadata() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+        let httpEntered = B26StageEvent(), proofHold = B26StageHold(), httpHold = B26StageHold(), callbacks = B26StageHTTPRelease()
+        defer { proofHold.release(); httpHold.release() }
+        let httpRelease = B26StageOwnedTask(Task { await httpHold.wait(); callbacks.release() }), httpReleaseID = httpRelease.id
+        let releaseEntered = await httpHold.entered.observe(); XCTAssertTrue(releaseEntered)
+        h.held = true; h.onResume = { [weak h] in guard let h else { XCTFail("HTTP fake released before resume"); return }; callbacks.install(h.callbacks, handleID: h.handle.map(ObjectIdentifier.init)); httpEntered.signal() }
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, hold: proofHold, phase: 5))), identity = task.id
+        let entered = await httpEntered.observe(); XCTAssertTrue(entered)
+        guard entered else {
+            httpHold.release(); proofHold.release(); _ = await httpRelease.joinObserved(httpReleaseID); _ = await task.joinObserved(identity); return
+        }
+        let handleID = h.handle.map(ObjectIdentifier.init)
+        XCTAssertNotNil(handleID); XCTAssertEqual(callbacks.handleID, handleID)
+        // Deliver valid result and completion while withholding actual exit.
+        if let request = h.requests.first, let c = h.callbacks {
+            let response = try b26AppResponse(request)
+            _ = c.response(response.1); _ = c.data(response.0); c.completed(nil)
+        } else { XCTFail("Missing owned fake HTTP handle") }
+        XCTAssertEqual(trace.count("proof"), 4); XCTAssertFalse(proofHold.entered.occurred)
+        httpHold.release()
+        let httpReturned = await httpHold.returned.observe(), proofEntered = await proofHold.entered.observe()
+        XCTAssertTrue(httpReturned); XCTAssertTrue(proofEntered)
+        guard proofEntered else {
+            proofHold.release(); _ = await httpRelease.joinObserved(httpReleaseID); _ = await task.joinObserved(identity); return
+        }
+        XCTAssertEqual(trace.heldID, proofHold.id); XCTAssertEqual(trace.count("proof"), 5)
+        XCTAssertFalse(s.operation.hasExited)
+        let revoked = B26StageEvent(), store = d.store
+        DispatchQueue.global().async { store.revokeSurroundingTextContext(); revoked.signal() }
+        let didRevoke = await revoked.observe(); XCTAssertTrue(didRevoke)
+        XCTAssertThrowsError(try trace.scope?.checkCancellation()); XCTAssertFalse(task.completed.occurred)
+        proofHold.release(); let returned = await proofHold.returned.observe(); XCTAssertTrue(returned)
+        XCTAssertEqual(callbacks.handleID, handleID)
+        guard await httpRelease.joinObserved(httpReleaseID), await task.joinObserved(identity) else { return }
+        XCTAssertEqual(trace.count("finishExit"), 1); XCTAssertEqual(r.categories, 0)
+        XCTAssertFalse(proofHold.timedOut); XCTAssertFalse(httpHold.timedOut); XCTAssertFalse(r.posted == [h.text])
+    }
+
+    @MainActor func testStageA14WatchdogReturnThenFinalProofStillHaveParentCancellationOwner() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+        let watchdog = B26StageHold(), finalProof = B26StageHold(), httpReturned = B26StageEvent()
+        defer { watchdog.release(); finalProof.release() }
+        r.sleep = { _ in await watchdog.wait() }
+        h.onResume = { httpReturned.signal() }
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, hold: finalProof, phase: 6))), identity = task.id
+        let entered = await watchdog.entered.observe(), http = await httpReturned.observe()
+        XCTAssertTrue(entered); XCTAssertTrue(http)
+        guard entered && http else {
+            watchdog.release(); finalProof.release(); _ = await task.joinObserved(identity); return
+        }
+        XCTAssertFalse(s.operation.hasExited); XCTAssertFalse(finalProof.entered.occurred)
+        let queued = B26StageEvent(), advanced = B26StageEvent()
+        let next = B26StageOwnedTask(Task {
+            let barrier = PendingOperationQueue.enqueue(previous: task.task,
+                operation: PendingOperation(name: "Stage A watchdog successor", diagnostics: nil), completes: true, work: { advanced.signal() })
+            queued.signal(); await barrier.value
+        }), nextID = next.id
+        let didQueue = await queued.observe(); XCTAssertTrue(didQueue); XCTAssertFalse(advanced.occurred)
+        watchdog.release()
+        let watchdogReturned = await watchdog.returned.observe(), finalEntered = await finalProof.entered.observe()
+        XCTAssertTrue(watchdogReturned); XCTAssertTrue(finalEntered)
+        guard finalEntered else { finalProof.release(); _ = await task.joinObserved(identity); _ = await next.joinObserved(nextID); return }
+        XCTAssertEqual(trace.heldID, finalProof.id); XCTAssertEqual(trace.scope?.operationID, s.operation.id)
+        s.operation.requestAbort()
+        XCTAssertThrowsError(try trace.scope?.checkCancellation()); XCTAssertFalse(s.operation.hasExited); XCTAssertFalse(advanced.occurred)
+        finalProof.release(); let returned = await finalProof.returned.observe(); XCTAssertTrue(returned)
+        guard await task.joinObserved(identity), await next.joinObserved(nextID) else { return }
+        XCTAssertTrue(advanced.occurred); XCTAssertEqual(trace.count("finishExit"), 1)
+        XCTAssertFalse(watchdog.timedOut); XCTAssertFalse(finalProof.timedOut); XCTAssertEqual(r.categories, 0)
+    }
+
+    @MainActor func testStageA15LegacyMainActorCallbacksAndCancelReturnAreOwned() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP()
+        let readHold = B26StageHold(), cancelEntered = B26StageEvent()
+        defer { readHold.release() }
+        let field = try XCTUnwrap(f.field)
+        var proofCalls = 0, issues = 0
+        // A synchronous fake cancel can stall. It is NEVER called on Settings'
+        // stack: an independent revoke must return while this callback is held.
+        let synchronousCancel = B26StageSynchronousHold()
+        defer { synchronousCancel.release() }
+        let port = SurroundingTextPort(proof: {
+            MainActor.preconditionIsolated(); proofCalls += 1; return field
+        }, issue: { field, range, remaining in
+            MainActor.preconditionIsolated(); issues += 1
+            XCTAssertGreaterThan(remaining, 0); XCTAssertLessThanOrEqual(remaining, 1)
+            return SurroundingTextRead(value: {
+                await readHold.wait()
+                return .init(field: field, range: range, units: Array(f.prefix.utf16), startBoundaryProved: true)
+            }, cancel: { cancelEntered.signal(); synchronousCancel.wait() })
+        })
+        // A separate finite observer is unnecessary for the synchronous hold;
+        // its own global fail-release is independent of MainActor/cooperative work.
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+        let entered = await readHold.entered.observe(); XCTAssertTrue(entered)
+        guard entered else { readHold.release(); synchronousCancel.release(); _ = await task.joinObserved(identity); return }
+        let revoked = B26StageEvent(), store = d.store
+        DispatchQueue.global().async { store.revokeSurroundingTextContext(); revoked.signal() }
+        let didRevoke = await revoked.observe(), didCancel = await cancelEntered.observe()
+        XCTAssertTrue(didRevoke); XCTAssertTrue(didCancel)
+        XCTAssertFalse(s.operation.hasExited); XCTAssertFalse(task.completed.occurred)
+        readHold.release(); let readReturned = await readHold.returned.observe(); XCTAssertTrue(readReturned)
+        XCTAssertFalse(task.completed.occurred) // Read return alone cannot hide held cancellation handoff.
+        synchronousCancel.release()
+        let cancelReturned = await synchronousCancel.returned.observe(); XCTAssertTrue(cancelReturned)
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertEqual(proofCalls, 2); XCTAssertEqual(issues, 1); XCTAssertFalse(readHold.timedOut); XCTAssertFalse(synchronousCancel.timedOut)
+        XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 0)
+    }
+}
+
+/// Owns one exact HTTP callback handle. Release-before-install is remembered;
+/// only the test's real callbacks settle the transfer, never an observation timer.
+private final class B26StageHTTPRelease: @unchecked Sendable {
+    private let lock = NSLock()
+    private var callbacks: HistoryRetryHTTPCallbacks?
+    private var released = false
+    private var identity: ObjectIdentifier?
+    var handleID: ObjectIdentifier? { lock.withLock { identity } }
+    func install(_ callbacks: HistoryRetryHTTPCallbacks?, handleID: ObjectIdentifier?) {
+        let release = lock.withLock { self.callbacks = callbacks; identity = handleID; return released }
+        if release { callbacks?.completed(nil); callbacks?.exited() }
+    }
+    func release() {
+        let callbacks = lock.withLock { () -> HistoryRetryHTTPCallbacks? in
+            guard !released else { return nil }; released = true; return self.callbacks
+        }
+        callbacks?.completed(nil); callbacks?.exited()
+    }
+}
+/// Deliberately blocking legacy TEST callback, never a native worker. A timed
+/// condition has an independent global release and sticky failure; it cannot
+/// block Settings, main, or teardown indefinitely. Production cancel is a latch.
+private final class B26StageSynchronousHold: @unchecked Sendable {
+    let returned = B26StageEvent()
+    private let condition = NSCondition()
+    private var released = false, failed = false
+    var timedOut: Bool { condition.lock(); defer { condition.unlock() }; return failed }
+    func release() { condition.lock(); released = true; condition.broadcast(); condition.unlock() }
+    func wait() {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.condition.lock()
+            if !self.released { self.failed = true }
+            self.released = true; self.condition.broadcast(); self.condition.unlock()
+        }
+        // One bounded wait. A spurious wake refuses this hold rather than polling.
+        condition.lock()
+        if !released {
+            let signaled = condition.wait(until: Date().addingTimeInterval(5))
+            if !released || !signaled { failed = true }
+        }
+        condition.unlock(); returned.signal()
+    }
+}
+
+extension SurroundingTextContextIntegrationTests {
+    @MainActor func testStageA16FiniteProofReadCredentialAndTransportErrorsAlwaysDrain() async throws {
+        for failure in [0, 1, 2, 3, 4, 5, 6, 8, 9] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let credentialReadsBeforeWork = d.backend.reads
+            if failure == 8 { d.backend.result = .denied }
+            if failure == 9 { h.status = 503 }
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: B26StageBackend.port(trace, failure: failure))), identity = task.id
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertEqual(trace.count("finishEntry"), 1); XCTAssertEqual(trace.count("finishExit"), 1)
+            XCTAssertNil(trace.backend); XCTAssertNil(trace.admissionToken); XCTAssertTrue(s.operation.hasExited)
+            if failure == 1 || failure == 2 {
+                XCTAssertFalse(s.surroundingTextRun.participated); XCTAssertEqual(r.categories, 1)
+            } else {
+                XCTAssertTrue(s.surroundingTextRun.participated); XCTAssertEqual(r.categories, 0)
+                XCTAssertTrue(r.posted == [r.raw]); XCTAssertTrue(r.learned.isEmpty)
+            }
+            if failure == 8 { XCTAssertEqual(d.backend.reads, credentialReadsBeforeWork + 1) }
+            if failure <= 4 || failure == 8 { XCTAssertEqual(h.constructed, 0) }
+        }
+    }
+}
+
+extension SurroundingTextContextIntegrationTests {
+    @MainActor func testStageA17ExactOperationBindingAndNormalCloseDoNotBorrowAuthority() async throws {
+        for wrongTarget in [false, true] {
+            let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+            let base = B26StageBackend.port(trace)
+            let port = SurroundingTextPort(open: { id, target in
+                base.open(wrongTarget ? id : UUID(), wrongTarget ? "test.other" : target)
+            })
+            let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+            guard await task.joinObserved(identity) else { return }
+            XCTAssertEqual(trace.count("proof"), 0); XCTAssertEqual(trace.count("issue"), 0)
+            XCTAssertEqual(trace.count("finishExit"), 1); XCTAssertEqual(h.constructed, 0)
+            XCTAssertFalse(s.surroundingTextRun.participated)
+        }
+        let trace = B26StageTrace(), port = B26StageBackend.port(trace)
+        let scope = try XCTUnwrap(port.open(UUID(), "test.editor"))
+        let task = B26StageOwnedTask(Task { await scope.finishAndWaitForExit() }), identity = task.id
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertNoThrow(try scope.checkCancellation()) // Normal close is NOT cancel/revoke.
+        do { _ = try await scope.proof(admit: { 1 }); XCTFail("Closed scope cannot schedule") } catch {}
+        XCTAssertEqual(trace.count("proof"), 0); XCTAssertEqual(trace.count("finishExit"), 1); XCTAssertNil(trace.backend)
+    }
+}
+
+extension SurroundingTextContextIntegrationTests {
+    @MainActor func testStageA18SubscriptionRefusalStillDrainsInertScopeBeforeCategory() async throws {
+        let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP(), trace = B26StageTrace()
+        let base = B26StageBackend.port(trace)
+        var admissions = 0
+        let port = SurroundingTextPort(open: { id, target in
+            let scope = base.open(id, target)
+            // Pure test-scaffolding assignment, no query/job in the factory.
+            d.onDocumentRead = {
+                admissions += 1
+                if admissions == 2 {
+                    d.onDocumentRead = {}; d.store.revokeSurroundingTextContext()
+                }
+            }
+            return scope
+        })
+        let task = B26StageOwnedTask(r.work(s, field: f, http: h, port: port)), identity = task.id
+        guard await task.joinObserved(identity) else { return }
+        XCTAssertEqual(admissions, 2); XCTAssertEqual(trace.count("proof"), 0)
+        XCTAssertEqual(trace.count("issue"), 0); XCTAssertEqual(trace.count("finishExit"), 1)
+        XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 1); XCTAssertFalse(s.surroundingTextRun.participated)
     }
 }
