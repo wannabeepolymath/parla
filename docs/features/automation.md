@@ -66,3 +66,8 @@ bash -n scripts/make-app.sh
 ```
 
 Adapter tests exercise the actual validation/install functions. Producer/packager tests exercise the actual entry with fake bottom command execution and selected-tool resolution, including host arm64/x86_64/universal, build-once/path-query distinction, actual-command/source/map matching, full resource copy, receipt/input mutation/expiration refusals, output collisions and build/extract/copy/sign/seal failure rollback. Shell entry fixtures run only owned copies with inert command spies: default-off performs no producer/extraction; native exec has no second build/fallback. Developer ID preservation is checked only through source/arguments, without certificates. These fixtures are distinct from explicitly authorized fresh full-module native host/universal build/extract/ad-hoc-sign smoke checks; neither category establishes runtime discovery/support.
+
+
+## Acknowledged Start cancellation — 2026-11-02
+
+Cancellation detected after recorder acknowledgement or at the native wrapper's final Start validation now settles only the matching active automation session. It revokes publication authority and clears the reservation before host cancellation; stale Start identities cannot cancel a successor. No waiter, task, timer or native route was added. Three deterministic inert regressions cover acknowledgement→cancellation→resumption, canceled validation, and successor preservation. Before the correction two regressions failed with eight assertions; after it all 44 AutomationTests passed. A fresh independent second-round source review approved the correction. Native wrapper scheduling, discovery, cold launch and packaged automation remain unqualified; B19 stays implementing/PARTIAL.

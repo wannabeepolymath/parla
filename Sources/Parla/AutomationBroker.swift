@@ -110,12 +110,18 @@ enum AutomationCancel: Equatable, Sendable { case canceled, alreadyCanceled, alr
         await start(requestID: active?.request ?? makeRequestID())
     }
     func validateStart(_ id: AutomationSessionID) -> AutomationFailure? {
-        if Task.isCancelled { return .canceled }
+        if Task.isCancelled { return cancelStart(id) }
         if let failure = gate() { return failure }
         prune()
         if active?.id == id { return nil }
         guard let terminal = terminals.first(where: { $0.id == id }) else { return .staleSession }
         return terminal.failure
+    }
+
+    private func cancelStart(_ id: AutomationSessionID) -> AutomationFailure {
+        // Acknowledgement removes the waiter before the caller resumes.
+        if active?.id == id { settle(.canceled, cancelWork: true) }
+        return .canceled
     }
 
     func start(requestID: AutomationRequestID) async -> Result<AutomationStart, AutomationFailure> {
@@ -142,7 +148,7 @@ enum AutomationCancel: Equatable, Sendable { case canceled, alreadyCanceled, alr
         guard let id = active?.id else { return .failure(.unavailable) }
         let failure = await wait(id, kind: .start) { self.launchIfReady() }
         // No suspension after validation. A canceled command never reads the RAM slot.
-        if Task.isCancelled { return .failure(.canceled) }
+        if Task.isCancelled { return .failure(cancelStart(id)) }
         if let failure = gate() { return .failure(failure) }
         if let failure { return .failure(failure) }
         prune()

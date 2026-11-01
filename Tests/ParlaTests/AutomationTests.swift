@@ -991,3 +991,56 @@ extension AutomationTests {
         XCTAssertEqual(apple.requests + apple.reserves, mutations)
     }
 }
+
+
+extension AutomationTests {
+    @MainActor func testStartCancellationAfterAcknowledgementRetiresMatchingCapture() async throws {
+        let rig = AutomationRig(), captured = expectation(description: "unacknowledged capture")
+        rig.acknowledge = false; rig.captureObserved = { captured.fulfill() }; rig.register()
+        let request = rig.request(), start = Task { await rig.broker.start(requestID: request) }
+        await fulfillment(of: [captured], timeout: 2)
+        let session = try XCTUnwrap(rig.accepted)
+        rig.send(.recorderStarted(gen: rig.machine.gen))
+        XCTAssertEqual(rig.broker.waiterCount, 0)
+        start.cancel() // No actor suspension between acknowledgement and cancellation.
+        expectEqual(await start.value, .failure(.canceled))
+        XCTAssertNil(rig.broker.reservedSessionID)
+        XCTAssertTrue(session.operation.shouldAbort)
+        XCTAssertEqual(rig.stops, 1)
+        rig.complete(session, text: "late canceled result")
+        XCTAssertNil(rig.results.read())
+        XCTAssertTrue(rig.insertions.isEmpty)
+    }
+
+    @MainActor func testCanceledStartValidationRetiresMatchingCapture() async throws {
+        let rig = AutomationRig(); rig.register()
+        let started = try await rig.start(), session = try XCTUnwrap(rig.accepted)
+        let validation = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return rig.broker.validateStart(started.sessionID)
+        }
+        expectEqual(await validation.value, .canceled)
+        XCTAssertNil(rig.broker.reservedSessionID)
+        XCTAssertTrue(session.operation.shouldAbort)
+        XCTAssertEqual(rig.stops, 1)
+        rig.complete(session, text: "late canceled result")
+        XCTAssertNil(rig.results.read())
+    }
+
+    @MainActor func testCanceledOldStartValidationPreservesSuccessorCapture() async throws {
+        let rig = AutomationRig(); rig.register()
+        let old = try await rig.start()
+        XCTAssertEqual(rig.broker.cancel(sessionID: old.sessionID), .success(.canceled))
+        let next = try await rig.start(), session = try XCTUnwrap(rig.accepted)
+        let validation = Task { @MainActor in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return rig.broker.validateStart(old.sessionID)
+        }
+        expectEqual(await validation.value, .canceled)
+        XCTAssertEqual(rig.broker.reservedSessionID, next.sessionID)
+        XCTAssertFalse(session.operation.shouldAbort)
+        guard case .recording(let current) = rig.machine.state else { return XCTFail("successor capture must remain active") }
+        XCTAssertEqual(current.operation, session.operation)
+        XCTAssertEqual(rig.broker.cancel(sessionID: next.sessionID), .success(.canceled))
+    }
+}
