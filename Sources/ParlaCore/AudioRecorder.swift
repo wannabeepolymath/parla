@@ -1193,7 +1193,7 @@ final class Resampler {
 /// Meeting-specific bounded converter. Never changes legacy Resampler semantics.
 /// Source shape/representation/finiteness was checked before constructing this object.
 /// No supplied tap buffer survives feed. Only fixed owned input/output buffers persist.
-private final class NativeMeetingConverter: MeetingPCMConverting {
+final class NativeMeetingConverter: MeetingPCMConverting {
     private let format: AVAudioFormat
     private let converter: AVAudioConverter?
     private let input: AVAudioPCMBuffer?, output: AVAudioPCMBuffer?
