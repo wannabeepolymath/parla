@@ -346,6 +346,53 @@ extension MeetingHubControllerTests {
     private(set) var checks = 0, contextChecks = 0, starts = 0, stops = 0, didComplete = false
     private(set) var context: MeetingAudioIngress.Context?, initialFacts: MeetingAudioIngress.Facts?, error: Error?
     var notStarted = false, unknownRetirement = false
+    var accessEarly = false, accessFalsePreActual = false
+    let accessNativeReturn = AccessTestHold(), accessCleanup = AccessTestHold(), accessTail = AccessTestHold()
+    let accessPublished = XCTestExpectation(description:"synchronous evidence sink returned")
+    private(set) var accessKey: ApplicationAudioAccessKey?, accessOutcome: ApplicationAudioAccessOutcome?
+    private var accessSink: (@MainActor (ApplicationAudioAccessOutcome) -> Void)?
+    private var uncertainAccess: CheckedContinuation<Void,Never>?
+    var accessPort: MeetingSelectedApplicationCapture.CorePort {
+        .init(validate:port.validate,validateContext:port.validateContext,startMode:{ [self] value,ingress,mode,nonce,sink in
+            if mode == .retainedRecording { return port.start(value,ingress) }
+            stopped.open(); bodyExit.open(); cleanup.open() // retained-only fixture latches have no access role
+            starts += 1; self.ingress = ingress; initialFacts = ingress.facts
+            let key = ApplicationAudioAccessKey(binding:value,context:ingress.context,nonce:nonce)
+            accessKey = key; accessSink = sink
+            let evidence = ApplicationAudioAccessOutcome(key:key,progress:unknownRetirement ? .failed(.retirement) : .nativeStartReturned,
+                disposition:unknownRetirement ? .heldOrUnknownCleanup : .appOwnedRetired)
+            if notStarted {
+                if accessFalsePreActual { sink(evidence) } // hostile fake: adapter/controller must discard it
+                return .notStarted
+            }
+            if accessEarly { endAccessIngress(ingress) }
+            let actual = Task { @MainActor [self] in
+                entered.fulfill()
+                if !accessEarly {
+                    await accessNativeReturn.wait(); cleanupEntered.fulfill(); await accessCleanup.wait()
+                    endAccessIngress(ingress)
+                    accessOutcome = evidence; sink(evidence); accessPublished.fulfill()
+                }
+                if unknownRetirement { await withCheckedContinuation { uncertainAccess = $0 }; return }
+                await accessTail.wait()
+            }
+            task = actual // registered before the hostile synchronous early delivery
+            if !unknownRetirement {
+                completionObserver = Task { [self] in await actual.value; didComplete = true; completed.fulfill() }
+            }
+            if accessEarly { accessOutcome = evidence; sink(evidence); accessPublished.fulfill() }
+            return .actual(.init(task:actual,requestStop:{ [self] in
+                stops += 1; ingress.fence()
+                if stops == 1 { stopRequested.fulfill() }
+            }))
+        })
+    }
+    private func endAccessIngress(_ ingress: MeetingAudioIngress) {
+        do { _ = try ingress.end(ingress.fence(),tail:UnsafeBufferPointer<Float>(start:nil,count:0)) }
+        catch { self.error = error }
+    }
+    func replayAccess(_ value: ApplicationAudioAccessOutcome) { accessSink?(value) }
+    var accessTimedOut: Bool { accessNativeReturn.timedOut || accessCleanup.timedOut || accessTail.timedOut }
     init(_ binding: SelectedApplicationBinding) { self.binding = binding }
     var port: MeetingSelectedApplicationCapture.CorePort {
         .init(validate:{ [self] value in
@@ -385,7 +432,7 @@ extension MeetingHubControllerTests {
             }))
         })
     }
-    func release() { ingress?.fence(); stopped.open(); bodyExit.open(); cleanup.open() }
+    func release() { ingress?.fence(); stopped.open(); bodyExit.open(); cleanup.open(); accessNativeReturn.open(); accessCleanup.open(); accessTail.open() }
     var timedOut: Bool { stopped.timedOut || bodyExit.timedOut || cleanup.timedOut }
     func latePCM() throws -> Int {
         let ingress = try XCTUnwrap(ingress), body = try XCTUnwrap(body)
@@ -424,6 +471,7 @@ extension MeetingHubControllerTests {
     var factoryEntered: XCTestExpectation?, heldGates: [HubOwnedLatch] = []
     var validation: HubOwnedLatch?, validationEntered: XCTestExpectation?, factoryUnavailable = false, notStarted = false
     var unknownRetirement = false, allowSettingsEvent = false, auxiliaryRoots: [URL] = []
+    var accessEarly = false, accessFalsePreActual = false, rawPreActualEvidence = false
     enum BindingMutation {case none,source,generation,epoch,label}
     var bindingMutation = BindingMutation.none, clock: Int64 = 1_000_000_000_000, wallOverride: (() throws -> Int64)?
     init(capability: Bool = true,applicationCapability: MeetingHubController.ApplicationCapability = .injectedContractOnly,
@@ -450,14 +498,21 @@ extension MeetingHubControllerTests {
                 sourceGeneration:bindingMutation == .generation ? b.sourceGeneration+1 : b.sourceGeneration,
                 captureEpoch:bindingMutation == .epoch ? UUID() : b.captureEpoch,pid:b.pid,launchNanoseconds:b.launchNanoseconds,
                 bundleID:b.bundleID,bundlePath:b.bundlePath,executablePath:b.executablePath,label:bindingMutation == .label ? "Cafe\u{301}" : b.label)
-            let backend = HubApplicationBackend(binding); backend.notStarted = notStarted; backend.unknownRetirement = unknownRetirement; backends.append(backend);factoryEntered?.fulfill()
-            let adapter = MeetingSelectedApplicationCapture(binding:binding,core:backend.port,enabled:true); adapters.append(adapter)
-            let port = adapter.port
+            let backend = HubApplicationBackend(binding); backend.notStarted = notStarted; backend.unknownRetirement = unknownRetirement
+            backend.accessEarly = accessEarly; backend.accessFalsePreActual = accessFalsePreActual
+            backends.append(backend); factoryEntered?.fulfill()
+            let adapter = MeetingSelectedApplicationCapture(binding:binding,core:attempt.mode == .accessAttempt ? backend.accessPort : backend.port,
+                enabled:true,mode:attempt.mode,attemptNonce:attempt.nonce,outcome:attempt.receiveAccessOutcome); adapters.append(adapter)
+            let port = adapter.port, rawPreActual = rawPreActualEvidence
             return .injected(.init(validate:{ [unowned self] selection in
                 if let validation { validationEntered?.fulfill(); await validation.wait() }
                 return await port.validate(selection)
             },start:{ selection,ingress in
                 let producer = port.start(selection,ingress)
+                if rawPreActual {
+                    attempt.receiveAccessOutcome(.init(key:.init(binding:binding,context:ingress.context,nonce:attempt.nonce),
+                        progress:.nativeStartReturned,disposition:.appOwnedRetired))
+                }
                 if case .actual(let actual) = producer.exit {
                     backend.forwarded = actual
                     XCTAssertEqual(actual,backend.task,"accepted adapter must return the exact actual task")
@@ -475,10 +530,11 @@ extension MeetingHubControllerTests {
     func operation(_ action: @escaping @MainActor () async -> Bool) -> HubApplicationOperation {
         precondition(operations.count < 16); let value = HubApplicationOperation(action); operations.append(value); return value
     }
-    private var gatesHealthy: Bool {validation?.timedOut != true && !heldGates.contains(where:{$0.timedOut}) && !backends.contains(where:{$0.timedOut})}
+    private var gatesHealthy: Bool {validation?.timedOut != true && !heldGates.contains(where:{$0.timedOut}) && !backends.contains(where:{$0.timedOut || $0.accessTimedOut})}
+    var observationContext = ""
     func observe(_ test: XCTestCase,_ expectations: [XCTestExpectation]) async -> Bool {
         let result = await XCTWaiter.fulfillment(of:expectations,timeout:4)
-        guard result == .completed,gatesHealthy else { XCTFail("No bounded application observation or watchdog fired; retained without a teardown join");HubApplicationFailureResources.retain(self);return false }
+        guard result == .completed,gatesHealthy else { XCTFail("No bounded application observation or watchdog fired [\(observationContext); \(expectations.map(\.expectationDescription).joined(separator: ", "))]; retained without a teardown join");HubApplicationFailureResources.retain(self);return false }
         return true
     }
     func finish(_ test: XCTestCase,_ operation: HubApplicationOperation) async -> Bool {
@@ -686,5 +742,162 @@ extension MeetingHubControllerTests {
         XCTAssertEqual(backend.stops,0);XCTAssertTrue(try XCTUnwrap(backend.ingress).facts.open);XCTAssertEqual(r.factories,1)
         r.controller.stopAndSave();backend.bodyExit.open();backend.cleanup.open()
         guard await r.joinedActual(self,backend),await r.drain(self),await r.detach(self) else {return}
+    }
+}
+
+extension HubApplicationRig {
+    func accessDetach(_ test: XCTestCase) async -> Bool {
+        controller.reserveShutdown()
+        let operation = operation { [controller] in await controller.drainRestart() }
+        guard await observe(test,[operation.entered]),await finish(test,operation) else { return false }
+        XCTAssertEqual(operation.result,true); controller.releaseRestart(); return operation.result == true
+    }
+    func accessOpen(_ test: XCTestCase) async -> Bool {
+        let settled = XCTestExpectation(description:"new metadata work published its actual settlement")
+        var sawBusy = false, seen = false
+        let sub = controller.$model.sink { model in
+            if model.busy { sawBusy = true }
+            if sawBusy,!model.busy,!seen { seen = true; settled.fulfill() }
+        }
+        defer { sub.cancel() }
+        controller.openPage()
+        return await observe(test,[settled])
+    }
+    func accessBegin(_ test: XCTestCase,early: Bool = false,afterOpen: () -> Void = {}) async -> HubApplicationBackend? {
+        accessEarly = early
+        guard await accessOpen(test) else { return nil }
+        afterOpen()
+        guard controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())) else { return nil }
+        let factory = XCTestExpectation(description:"explicit access factory returned a frozen port")
+        factoryEntered = factory
+        guard let challenge = controller.prepareApplicationStart(purpose:.audioAccessAttemptContract) else { XCTFail("No access challenge"); return nil }
+        controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        guard await observe(test,[factory]),let backend = backends.last,await observe(test,[backend.entered]) else { return nil }
+        if early {
+            guard await observe(test,[backend.accessPublished,backend.accessTail.entered]) else { return nil }
+        } else {
+            guard await observe(test,[backend.accessNativeReturn.entered]) else { return nil }
+        }
+        return backend
+    }
+    func accessDisposition(_ test: XCTestCase,_ backend: HubApplicationBackend) async -> Bool {
+        backend.accessNativeReturn.open()
+        guard await observe(test,[backend.accessNativeReturn.returned,backend.cleanupEntered,backend.accessCleanup.entered]) else { return false }
+        backend.accessCleanup.open()
+        guard await observe(test,[backend.accessCleanup.returned,backend.accessPublished]) else { return false }
+        if !backend.unknownRetirement { return await observe(test,[backend.accessTail.entered]) }
+        return true
+    }
+    func accessFinish(_ test: XCTestCase,_ backend: HubApplicationBackend) async -> Bool {
+        guard !backend.unknownRetirement else { XCTFail("Unknown cleanup has no final join"); return false }
+        backend.accessTail.open()
+        guard await observe(test,[backend.accessTail.returned]),await joinedActual(test,backend) else { return false }
+        return await state(test,{$0.state == .stopped && !$0.busy})
+    }
+}
+extension MeetingHubControllerTests {
+    @MainActor func testAccessConsentPurposeIsExactSingleUseAndDefaultOff() async throws {
+        for gates in [(false,MeetingHubController.ApplicationCapability.injectedContractOnly),(true,.unavailable)] {
+            let r = try HubApplicationRig(capability:gates.0,applicationCapability:gates.1); defer { r.release() }
+            XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+            XCTAssertNil(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+            XCTAssertEqual(r.stores,0); XCTAssertEqual(r.bottom.calls,0)
+            guard await r.accessOpen(self) else { return }
+            XCTAssertNil(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+            r.controller.confirmApplicationStart(challengeID:UUID(),affirmed:true,purpose:.audioAccessAttemptContract)
+            XCTAssertEqual(r.factories,0); XCTAssertEqual(r.settingsReads,0)
+            guard await r.accessDetach(self) else { return }
+        }
+        let r = try HubApplicationRig(); defer { r.release() }; guard await r.accessOpen(self) else { return }
+        let a = hubApplicationSnapshot(), b = hubApplicationSnapshot(pid:124)
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(a)))
+        let retained = try XCTUnwrap(r.controller.prepareApplicationStart())
+        r.controller.confirmApplicationStart(challengeID:retained.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        r.controller.confirmApplicationStart(challengeID:retained.id,affirmed:true) // consumed wrong purpose
+        let access = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+        r.controller.confirmApplicationStart(challengeID:access.id,affirmed:true) // retained reply cannot authorize access
+        r.controller.confirmApplicationStart(challengeID:access.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        for wrongID in [false,true] {
+            let value = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+            r.controller.confirmApplicationStart(challengeID:wrongID ? UUID() : value.id,affirmed:wrongID,purpose:.audioAccessAttemptContract)
+            r.controller.confirmApplicationStart(challengeID:value.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        }
+        let old = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(b))); XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(a)))
+        r.controller.confirmApplicationStart(challengeID:old.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        let page = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+        r.controller.leavePage(); guard await r.state(self,{!$0.busy}),await r.accessOpen(self) else { return }
+        r.controller.confirmApplicationStart(challengeID:page.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        let owner = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+        guard await r.accessDetach(self),await r.accessOpen(self) else { return }
+        r.controller.confirmApplicationStart(challengeID:owner.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        XCTAssertEqual(r.factories,0); XCTAssertNil(r.controller.applicationAccessOutcome); XCTAssertEqual(r.settingsReads,0)
+        let fresh = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+        XCTAssertNotEqual(owner.ownerEpoch,fresh.ownerEpoch); XCTAssertEqual(fresh.purpose,.audioAccessAttemptContract)
+        r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:false,purpose:.audioAccessAttemptContract)
+        guard await r.accessDetach(self) else { return }
+    }
+    @MainActor func testAccessOutcomeIsBoundedPermissionUnknownAndNeverStarts() async throws {
+        for unknown in [false,true] {
+            let r = try HubApplicationRig(); defer { r.release() }; r.unknownRetirement = unknown
+            guard let backend = await r.accessBegin(self) else { return }
+            let attempt = try XCTUnwrap(r.attempts.last), key = try XCTUnwrap(backend.accessKey), c = key.context
+            XCTAssertEqual(attempt.mode,.accessAttempt); XCTAssertEqual(r.controller.applicationState,.actualAttemptOwned)
+            XCTAssertNil(r.controller.applicationAccessOutcome)
+            // Every ingress identity field and the per-attempt nonce is independently foreign.
+            let contexts: [MeetingAudioIngress.Context] = [
+                .init(session:UUID(),ownerGeneration:c.ownerGeneration,source:c.source,sourceGeneration:c.sourceGeneration,segment:c.segment,epoch:c.epoch),
+                .init(session:c.session,ownerGeneration:c.ownerGeneration+1,source:c.source,sourceGeneration:c.sourceGeneration,segment:c.segment,epoch:c.epoch),
+                .init(session:c.session,ownerGeneration:c.ownerGeneration,source:UUID(),sourceGeneration:c.sourceGeneration,segment:c.segment,epoch:c.epoch),
+                .init(session:c.session,ownerGeneration:c.ownerGeneration,source:c.source,sourceGeneration:c.sourceGeneration+1,segment:c.segment,epoch:c.epoch),
+                .init(session:c.session,ownerGeneration:c.ownerGeneration,source:c.source,sourceGeneration:c.sourceGeneration,segment:UUID(),epoch:c.epoch),
+                .init(session:c.session,ownerGeneration:c.ownerGeneration,source:c.source,sourceGeneration:c.sourceGeneration,segment:c.segment,epoch:UUID())]
+            for context in contexts {
+                attempt.receiveAccessOutcome(.init(key:.init(binding:key.binding,context:context,nonce:key.nonce),progress:.nativeStartReturned,disposition:.appOwnedRetired))
+            }
+            attempt.receiveAccessOutcome(.init(key:.init(binding:key.binding,context:c,nonce:UUID()),progress:.nativeStartReturned,disposition:.appOwnedRetired))
+            let b = key.binding
+            for field in 0..<11 {
+                let foreign = SelectedApplicationBinding(selection:field == 0 ? UUID() : b.selection,source:field == 1 ? UUID() : b.source,
+                    sourceGeneration:field == 2 ? b.sourceGeneration+1 : b.sourceGeneration,captureEpoch:field == 3 ? UUID() : b.captureEpoch,
+                    pid:field == 4 ? b.pid+1 : b.pid,launchNanoseconds:field == 5 ? b.launchNanoseconds+1 : b.launchNanoseconds,
+                    bundleID:field == 6 ? b.bundleID+"x" : b.bundleID,bundlePath:field == 7 ? b.bundlePath+"x" : b.bundlePath,
+                    executablePath:field == 8 ? b.executablePath+"x" : b.executablePath,label:field == 9 ? b.label+"x" : b.label)
+                let nonce = field == 10 ? UUID() : key.nonce
+                attempt.receiveAccessOutcome(.init(key:.init(binding:foreign,context:c,nonce:nonce),progress:.nativeStartReturned,disposition:.appOwnedRetired))
+            }
+            XCTAssertNil(r.controller.applicationAccessOutcome); XCTAssertEqual(backend.stops,0); XCTAssertEqual(r.factories,1)
+            guard await r.accessDisposition(self,backend) else { return }
+            let cached = try XCTUnwrap(r.controller.applicationAccessOutcome), outcome = cached.outcome
+            XCTAssertEqual(cached.consent,attempt.consent)
+            XCTAssertEqual(outcome,backend.accessOutcome); XCTAssertEqual(outcome.permission,.unknown)
+            XCTAssertEqual(outcome.disposition,unknown ? .heldOrUnknownCleanup : .appOwnedRetired)
+            attempt.receiveAccessOutcome(outcome); backend.replayAccess(outcome)
+            XCTAssertEqual(r.controller.applicationAccessOutcome,cached); XCTAssertEqual(r.factories,1)
+            XCTAssertFalse(backend.didComplete); XCTAssertFalse(r.controller.acceptSourceChoice(.microphone))
+            r.allowSettingsEvent = true; r.controller.savedConfigurationChanged(); r.allowSettingsEvent = false
+            XCTAssertEqual(r.factories,1); XCTAssertNil(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+            if unknown {
+                XCTAssertEqual(r.controller.applicationState,.heldOrUnavailable); XCTAssertNil(backend.completionObserver)
+                r.controller.reserveShutdown(); r.controller.releaseRestart(); XCTAssertFalse(r.controller.restartReady())
+                HubApplicationFailureResources.retain(r) // no observer/final join for unknown task
+            } else {
+                guard await r.accessFinish(self,backend) else { return }
+                attempt.receiveAccessOutcome(outcome); XCTAssertEqual(r.factories,1)
+                r.controller.openPage(); guard await r.state(self,{$0.state == .stopped && !$0.busy}) else { return }
+                attempt.receiveAccessOutcome(outcome); XCTAssertNil(r.controller.applicationAccessOutcome)
+                guard await r.accessDetach(self) else { return }
+            }
+        }
+        let r = try HubApplicationRig(); defer { r.release() }
+        r.notStarted = true; r.accessFalsePreActual = true; r.rawPreActualEvidence = true
+        guard await r.accessOpen(self) else { return }
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+        let challenge = try XCTUnwrap(r.controller.prepareApplicationStart(purpose:.audioAccessAttemptContract))
+        r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true,purpose:.audioAccessAttemptContract)
+        guard await r.drain(self) else { return }
+        XCTAssertNil(r.controller.applicationAccessOutcome); XCTAssertEqual(r.controller.applicationState,.refusedBeforeStart)
+        XCTAssertNil(r.backends.first?.task); XCTAssertEqual(r.factories,1)
+        guard await r.accessDetach(self) else { return }
     }
 }

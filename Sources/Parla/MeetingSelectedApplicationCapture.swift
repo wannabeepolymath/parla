@@ -8,14 +8,32 @@ import ParlaCore
         let requestStop: () -> Void
     }
     enum Start { case notStarted, actual(Recording) }
-    /// Internal app-test seam: value validation and an actual task, never a native fake backend.
+    /// Old injected clients retain their original contract and explicitly refuse access mode.
     @MainActor struct CorePort {
         let validate: (SelectedApplicationBinding) -> Bool
         let validateContext: (SelectedApplicationBinding,MeetingAudioIngress.Context) -> Bool
         let start: (SelectedApplicationBinding,MeetingAudioIngress) -> Start
+        let startMode: (SelectedApplicationBinding,MeetingAudioIngress,ApplicationAudioMode,UUID,
+                        @escaping @MainActor (ApplicationAudioAccessOutcome) -> Void) -> Start
+        init(validate: @escaping (SelectedApplicationBinding) -> Bool,
+             validateContext: @escaping (SelectedApplicationBinding,MeetingAudioIngress.Context) -> Bool,
+             start: @escaping (SelectedApplicationBinding,MeetingAudioIngress) -> Start) {
+            self.validate = validate; self.validateContext = validateContext; self.start = start
+            startMode = { binding,ingress,mode,_,_ in
+                guard mode == .retainedRecording else { return .notStarted }
+                return start(binding,ingress)
+            }
+        }
+        init(validate: @escaping (SelectedApplicationBinding) -> Bool,
+             validateContext: @escaping (SelectedApplicationBinding,MeetingAudioIngress.Context) -> Bool,
+             startMode: @escaping (SelectedApplicationBinding,MeetingAudioIngress,ApplicationAudioMode,UUID,
+                                  @escaping @MainActor (ApplicationAudioAccessOutcome) -> Void) -> Start) {
+            self.validate = validate; self.validateContext = validateContext; self.startMode = startMode
+            start = { binding,ingress in startMode(binding,ingress,.retainedRecording,UUID(),{ _ in }) }
+        }
         static func live(_ capture: MeetingApplicationAudioCapture) -> Self {
-            .init(validate:{ capture.validate($0) },validateContext:{ capture.validate($0,context:$1) },start:{ binding,ingress in
-                switch capture.startSelectedApplication(binding:binding,ingress:ingress,enabled:true) {
+            .init(validate:{ capture.validate($0) },validateContext:{ capture.validate($0,context:$1) },startMode:{ binding,ingress,mode,nonce,outcome in
+                switch capture.startSelectedApplication(binding:binding,ingress:ingress,enabled:true,mode:mode,attemptNonce:nonce,outcome:outcome) {
                 case .notStarted: return .notStarted
                 case .actual(let recording):
                     return .actual(.init(task:recording.task,requestStop:{ recording.requestStop() }))
@@ -24,15 +42,22 @@ import ParlaCore
         }
     }
     private let binding: SelectedApplicationBinding, core: CorePort, enabled: Bool
-    private var attempted = false
-    // Retain the complete recording/stop closure for this adapter's lifetime. No observer task
-    // clears it or substitutes its own exit for Core's callback/cleanup task.
+    let mode: ApplicationAudioMode, attemptNonce: UUID
+    private let outcome: @MainActor (ApplicationAudioAccessOutcome) -> Void
+    private var attempted = false, starting = false, delivered = false
+    private var expectedKey: ApplicationAudioAccessKey?, pending: ApplicationAudioAccessOutcome?
+    // Retain the complete recording/stop closure. Publication is weak; resource ownership is not.
     private var recording: Recording?
-    convenience init(binding: SelectedApplicationBinding, enabled: Bool = false) {
-        self.init(binding:binding,core:.live(MeetingApplicationAudioCapture()),enabled:enabled)
+    convenience init(binding: SelectedApplicationBinding, enabled: Bool = false,
+                     mode: ApplicationAudioMode = .retainedRecording, attemptNonce: UUID = UUID(),
+                     outcome: @escaping @MainActor (ApplicationAudioAccessOutcome) -> Void = { _ in }) {
+        self.init(binding:binding,core:.live(MeetingApplicationAudioCapture()),enabled:enabled,mode:mode,attemptNonce:attemptNonce,outcome:outcome)
     }
-    init(binding: SelectedApplicationBinding, core: CorePort, enabled: Bool = false) {
+    init(binding: SelectedApplicationBinding, core: CorePort, enabled: Bool = false,
+         mode: ApplicationAudioMode = .retainedRecording, attemptNonce: UUID = UUID(),
+         outcome: @escaping @MainActor (ApplicationAudioAccessOutcome) -> Void = { _ in }) {
         self.binding = binding; self.core = core; self.enabled = enabled
+        self.mode = mode; self.attemptNonce = attemptNonce; self.outcome = outcome
     }
     func validate(_ selection: MeetingSession.Selection) -> Bool {
         // Pure, nonreserving: no fabricated ingress context, factories, OS checks or leases.
@@ -40,16 +65,30 @@ import ParlaCore
         selection.generation == binding.sourceGeneration && selection.label.utf8.elementsEqual(binding.label.utf8) &&
         core.validate(binding)
     }
+    private func receive(_ value: ApplicationAudioAccessOutcome) {
+        guard mode == .accessAttempt,!delivered,value.key == expectedKey else { return }
+        if starting { if pending == nil { pending = value }; return }
+        guard recording != nil else { return } // .notStarted cannot publish native evidence
+        delivered = true; outcome(value)
+    }
     func start(_ selection: MeetingSession.Selection, ingress: MeetingAudioIngress) -> MeetingSessionOwner.Producer {
         guard !attempted else { return .init(source:selection.instance,exit:.notStarted) }
         attempted = true // Even refusal consumes this identity; no retry or successor.
         guard validate(selection),core.validateContext(binding,ingress.context) else {
             return .init(source:selection.instance,exit:.notStarted)
         }
-        switch core.start(binding,ingress) {
-        case .notStarted: return .init(source:selection.instance,exit:.notStarted)
+        expectedKey = .init(binding:binding,context:ingress.context,nonce:attemptNonce)
+        starting = true
+        let result = core.startMode(binding,ingress,mode,attemptNonce,{ [weak self] in self?.receive($0) })
+        starting = false
+        switch result {
+        case .notStarted:
+            pending = nil; expectedKey = nil
+            return .init(source:selection.instance,exit:.notStarted)
         case .actual(let actual):
             recording = actual
+            let early = pending; pending = nil
+            if let early { receive(early) }
             return .init(source:selection.instance,exit:.actual(actual.task))
         }
     }

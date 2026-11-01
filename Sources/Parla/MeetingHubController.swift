@@ -30,13 +30,18 @@ import ParlaCore
         }
     }
     enum ApplicationCapability: Equatable { case unavailable, injectedContractOnly }
-    enum ApplicationPurpose: Equatable { case injectedRecordingContract }
+    enum ApplicationPurpose: Equatable {
+        case injectedRecordingContract, audioAccessAttemptContract
+        var mode: ApplicationAudioMode {
+            switch self { case .injectedRecordingContract: return .retainedRecording; case .audioAccessAttemptContract: return .accessAttempt }
+        }
+    }
     struct StartChallenge: Equatable {
         let id: UUID, pageLifetime: UUID, ownerEpoch: UUID, sourceRevision: UUID
         let snapshot: ApplicationSnapshot, purpose: ApplicationPurpose
-        fileprivate init(pageLifetime: UUID,ownerEpoch: UUID,sourceRevision: UUID,snapshot: ApplicationSnapshot) {
+        fileprivate init(pageLifetime: UUID,ownerEpoch: UUID,sourceRevision: UUID,snapshot: ApplicationSnapshot,purpose: ApplicationPurpose) {
             id = UUID(); self.pageLifetime = pageLifetime; self.ownerEpoch = ownerEpoch
-            self.sourceRevision = sourceRevision; self.snapshot = snapshot; purpose = .injectedRecordingContract
+            self.sourceRevision = sourceRevision; self.snapshot = snapshot; self.purpose = purpose
         }
     }
     struct ApplicationStartConsent: Equatable {
@@ -46,8 +51,14 @@ import ParlaCore
             self.challenge = challenge; startIntent = intent; session = UUID(); source = UUID(); captureEpoch = UUID(); sourceGeneration = 1
         }
     }
+    /// One cached observation binds Core's key to the complete consumed app authority.
+    struct ApplicationAccessObservation: Equatable {
+        let consent: ApplicationStartConsent, outcome: ApplicationAudioAccessOutcome
+    }
     struct ApplicationAttempt {
-        let consent: ApplicationStartConsent, owner: UUID, segment: UUID
+        let consent: ApplicationStartConsent, owner: UUID, segment: UUID, nonce: UUID
+        let receiveAccessOutcome: @MainActor (ApplicationAudioAccessOutcome) -> Void
+        var mode: ApplicationAudioMode { consent.challenge.purpose.mode }
         var binding: SelectedApplicationBinding {
             let s = consent.challenge.snapshot
             return .init(selection:s.selectionID,source:consent.source,sourceGeneration:consent.sourceGeneration,captureEpoch:consent.captureEpoch,
@@ -57,7 +68,7 @@ import ParlaCore
     enum ApplicationFactoryResult { case unavailable, injected(MeetingSessionOwner.SingleSourceStreamPort) }
     // Cached contract observations only. Neither .actual nor owner.recording proves OS permission.
     enum ApplicationState: Equatable {
-        case unavailable, needsConsent, refusedBeforeStart, injectedRecording, retiring, retiredPermissionUnknown, heldOrUnavailable
+        case unavailable, needsConsent, refusedBeforeStart, injectedRecording, actualAttemptOwned, retiring, retiredPermissionUnknown, heldOrUnavailable
     }
     struct Dependencies {
         let captureCapability: Bool
@@ -103,6 +114,7 @@ import ParlaCore
     private var page = false, pageIntent = UUID(), startIntent: UUID?, batch: MeetingRecognitionExecution.Authority?
     @Published private(set) var sourceChoice = SourceChoice.microphone
     @Published private(set) var applicationState = ApplicationState.unavailable
+    @Published private(set) var applicationAccessOutcome: ApplicationAccessObservation?
     private var pageLifetime = UUID(), sourceRevision = UUID(), challenge: StartChallenge?
     private var frozenInput: AudioRecorder.MeetingInput?
     private final class ActiveCapture {
@@ -110,10 +122,13 @@ import ParlaCore
         let session: UUID, segment: UUID, epoch: UUID, selection: MeetingSession.Selection
         let consent: ApplicationStartConsent?, port: MeetingSessionOwner.SingleSourceStreamPort
         var actual: Task<Void,Never>?
+        var accessKey: ApplicationAudioAccessKey?, pendingAccessOutcome: ApplicationAudioAccessOutcome?
+        var acceptedAccessOutcome = false
+        let nonce: UUID
         init(intent: UUID,ownerEpoch: UUID,pageLifetime: UUID,sourceRevision: UUID,session: UUID,segment: UUID,epoch: UUID,
-             selection: MeetingSession.Selection,consent: ApplicationStartConsent?,port: MeetingSessionOwner.SingleSourceStreamPort) {
+             selection: MeetingSession.Selection,consent: ApplicationStartConsent?,port: MeetingSessionOwner.SingleSourceStreamPort,nonce: UUID = UUID()) {
             self.intent = intent; self.ownerEpoch = ownerEpoch; self.pageLifetime = pageLifetime; self.sourceRevision = sourceRevision
-            self.session = session; self.segment = segment; self.epoch = epoch; self.selection = selection; self.consent = consent; self.port = port
+            self.session = session; self.segment = segment; self.epoch = epoch; self.selection = selection; self.consent = consent; self.port = port; self.nonce = nonce
         }
         func matches(_ selection: MeetingSession.Selection) -> Bool {
             self.selection.instance == selection.instance && self.selection.kind == selection.kind &&
@@ -157,7 +172,7 @@ import ParlaCore
         if let owner,owner.state != .detached { return owner }
         if owner != nil {
             guard explicitReentry,reservation == nil,lifecycleDriver == nil,retirement?.success == true,work.isEmpty,permission == nil,output == nil else { throw MeetingSession.Failure.held }
-            self.owner = nil; ownerEpoch = UUID(); retirement = nil
+            self.owner = nil; ownerEpoch = UUID(); retirement = nil; applicationAccessOutcome = nil
         }
         let stream = MeetingSessionOwner.SingleSourceStreamPort(validate:{ [weak self] selection in
             guard let self,let active = self.activeCapture,self.captureCurrent(active),active.matches(selection) else { return false }
@@ -168,12 +183,27 @@ import ParlaCore
                   ingress.context.session == active.session,ingress.context.source == selection.instance,
                   ingress.context.sourceGeneration == selection.generation,ingress.context.segment == active.segment,
                   ingress.context.epoch == active.epoch,ingress.context.ownerGeneration > 0 else { return .init(source:selection.instance,exit:.notStarted) }
+            // Register the exact context BEFORE an injected start may synchronously deliver evidence.
+            if let consent = active.consent,consent.challenge.purpose == .audioAccessAttemptContract {
+                let s = consent.challenge.snapshot
+                let binding = SelectedApplicationBinding(selection:s.selectionID,source:consent.source,sourceGeneration:consent.sourceGeneration,
+                    captureEpoch:consent.captureEpoch,pid:s.pid,launchNanoseconds:s.launchNanoseconds,bundleID:s.bundleID,
+                    bundlePath:s.bundlePath,executablePath:s.executablePath,label:s.label)
+                active.accessKey = .init(binding:binding,context:ingress.context,nonce:active.nonce)
+            }
             let producer = active.port.start(selection,ingress)
-            if case .actual(let task) = producer.exit {
-                active.actual = task
-                if active.consent != nil {
-                    self.applicationState = producer.source != selection.instance ? .heldOrUnavailable : self.captureCurrent(active) ? .injectedRecording : .retiring
+            switch producer.exit {
+            case .actual(let task):
+                active.actual = task // retain the ORIGINAL task before accepting the buffered value
+                if producer.source != selection.instance { active.accessKey = nil; active.pendingAccessOutcome = nil }
+                if let consent = active.consent {
+                    self.applicationState = producer.source != selection.instance ? .heldOrUnavailable : self.captureCurrent(active) ?
+                        (consent.challenge.purpose == .audioAccessAttemptContract ? .actualAttemptOwned : .injectedRecording) : .retiring
+                    let early = active.pendingAccessOutcome; active.pendingAccessOutcome = nil
+                    if let early,producer.source == selection.instance { self.receiveAccessOutcome(early,consent:consent,nonce:active.nonce) }
                 }
+            case .notStarted:
+                active.pendingAccessOutcome = nil; active.accessKey = nil // never a native outcome
             }
             return producer
         },requestStop:{ [weak self] in
@@ -202,11 +232,11 @@ import ParlaCore
     }
     private func applicationCurrent(_ value: StartChallenge) -> Bool {
         admits && value.pageLifetime == pageLifetime && value.ownerEpoch == ownerEpoch && value.sourceRevision == sourceRevision &&
-        value.purpose == .injectedRecordingContract && sourceChoice == .selectedApplication(value.snapshot)
+        sourceChoice == .selectedApplication(value.snapshot)
     }
     private func revokeCaptureAuthority(newPage: Bool = false) {
         challenge = nil; startIntent = nil
-        if newPage { pageLifetime = UUID(); sourceRevision = UUID() }
+        if newPage { pageLifetime = UUID(); sourceRevision = UUID(); applicationAccessOutcome = nil }
         if activeCapture?.consent != nil,applicationState != .heldOrUnavailable { applicationState = .retiring }
     }
     private func captureRetired(_ value: MeetingSessionOwner) {
@@ -220,28 +250,32 @@ import ParlaCore
               owner == nil || owner?.state == .idle || owner?.state == .stopped else { return false }
         if case .selectedApplication(let snapshot) = choice, !snapshot.valid { return false }
         guard choice != sourceChoice else { return true }
-        revokeCaptureAuthority(); sourceRevision = UUID(); sourceChoice = choice
+        revokeCaptureAuthority(); sourceRevision = UUID(); applicationAccessOutcome = nil; sourceChoice = choice
         if case .selectedApplication = choice,dependencies?.captureCapability == true,dependencies?.applicationCapability == .injectedContractOnly {
             applicationState = .needsConsent
         } else { applicationState = .unavailable }
         return true
     }
-    func prepareApplicationStart() -> StartChallenge? {
+    func prepareApplicationStart(purpose: ApplicationPurpose = .injectedRecordingContract) -> StartChallenge? {
         challenge = nil
         guard admits,idle,activeCapture == nil,let d = dependencies,d.captureCapability,d.applicationCapability == .injectedContractOnly,
               let owner,owner.state == .idle,owner.metadata == nil,!owner.snapshot.pendingStart,!owner.snapshot.phaseActive,
               case .selectedApplication(let snapshot) = sourceChoice,snapshot.valid else { return nil }
-        let value = StartChallenge(pageLifetime:pageLifetime,ownerEpoch:ownerEpoch,sourceRevision:sourceRevision,snapshot:snapshot)
+        let value = StartChallenge(pageLifetime:pageLifetime,ownerEpoch:ownerEpoch,sourceRevision:sourceRevision,snapshot:snapshot,purpose:purpose)
         challenge = value; applicationState = .needsConsent; return value
     }
-    func confirmApplicationStart(challengeID: UUID,affirmed: Bool) {
+    func confirmApplicationStart(challengeID: UUID,affirmed: Bool,purpose: ApplicationPurpose = .injectedRecordingContract) {
         let pending = challenge; challenge = nil // every reply is single use, including denial and a wrong ID
         guard let pending else { return }
-        guard affirmed,pending.id == challengeID,applicationCurrent(pending),admits,idle,activeCapture == nil,
+        guard affirmed,pending.id == challengeID,pending.purpose == purpose,applicationCurrent(pending),admits,idle,activeCapture == nil,
               let d = dependencies,d.captureCapability,d.applicationCapability == .injectedContractOnly,
               let value = owner,value.state == .idle,value.metadata == nil else { applicationState = .refusedBeforeStart; return }
         let intent = UUID(), frozen = ApplicationStartConsent(challenge:pending,intent:intent)
-        let attempt = ApplicationAttempt(consent:frozen,owner:UUID(),segment:UUID())
+        let nonce = UUID()
+        let attempt = ApplicationAttempt(consent:frozen,owner:UUID(),segment:UUID(),nonce:nonce,receiveAccessOutcome:{ [weak self] in
+            self?.receiveAccessOutcome($0,consent:frozen,nonce:nonce)
+        })
+        applicationAccessOutcome = nil
         startIntent = intent
         launch(.start) { [weak self,value] in
             guard let self else { return }
@@ -262,7 +296,7 @@ import ParlaCore
                 let binding = attempt.binding
                 let selection = MeetingSession.Selection(instance:binding.source,kind:.selectedApplication,label:binding.label,generation:binding.sourceGeneration)
                 let active = ActiveCapture(intent:intent,ownerEpoch:self.ownerEpoch,pageLifetime:self.pageLifetime,sourceRevision:self.sourceRevision,
-                    session:frozen.session,segment:attempt.segment,epoch:binding.captureEpoch,selection:selection,consent:frozen,port:port)
+                    session:frozen.session,segment:attempt.segment,epoch:binding.captureEpoch,selection:selection,consent:frozen,port:port,nonce:nonce)
                 self.activeCapture = active
                 guard self.captureCurrent(active) else { self.captureRetired(value); return }
                 let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:binding.captureEpoch,mapping:.unknown)
@@ -277,10 +311,27 @@ import ParlaCore
             }
         }
     }
+    /// Bounded synchronous sink. It never awaits the source/owner/writer, nor starts capture.
+    private func receiveAccessOutcome(_ outcome: ApplicationAudioAccessOutcome,consent: ApplicationStartConsent,nonce: UUID) {
+        guard let active = activeCapture,active.consent == consent,active.intent == consent.startIntent,
+              consent.challenge.purpose == .audioAccessAttemptContract,active.nonce == nonce,
+              ownerEpoch == active.ownerEpoch,pageLifetime == active.pageLifetime,sourceRevision == active.sourceRevision,
+              applicationCurrent(consent.challenge),!active.acceptedAccessOutcome,outcome.key == active.accessKey else { return }
+        guard active.actual != nil else {
+            if active.pendingAccessOutcome == nil { active.pendingAccessOutcome = outcome }
+            return
+        }
+        active.acceptedAccessOutcome = true
+        applicationAccessOutcome = .init(consent:consent,outcome:outcome)
+        if outcome.disposition == .heldOrUnknownCleanup { applicationState = .heldOrUnavailable }
+        // work.start is registered before the factory. Stop waits that admission task;
+        // the original producer NEVER awaits Stop, including very early synchronous fake delivery.
+        stopAndSave()
+    }
     /// Only exact injected-run loss evidence fences that run; stale receipts cannot affect a successor.
     func applicationSourceInvalidated(_ consent: ApplicationStartConsent) {
         guard activeCapture?.consent == consent else { return }
-        revokeCaptureAuthority(); sourceRevision = UUID(); owner?.requestStopSaving(); stopAndSave()
+        revokeCaptureAuthority(); sourceRevision = UUID(); applicationAccessOutcome = nil; owner?.requestStopSaving(); stopAndSave()
     }
     private var admits: Bool { page && reservation == nil && lifecycleDriver == nil && !quarantine && protection == nil && output == nil }
     private var idle: Bool { work.isEmpty && permission == nil }

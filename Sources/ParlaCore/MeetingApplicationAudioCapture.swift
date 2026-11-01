@@ -17,6 +17,11 @@ public struct SelectedApplicationBinding: Equatable, Sendable {
         self.captureEpoch = captureEpoch; self.pid = pid; self.launchNanoseconds = launchNanoseconds
         self.bundleID = bundleID; self.bundlePath = bundlePath; self.executablePath = executablePath; self.label = label
     }
+    // New evidence authority is byte-exact without changing legacy Equatable semantics.
+    func exactlyMatches(_ other: Self) -> Bool {
+        self == other && bundleID.utf8.elementsEqual(other.bundleID.utf8) && bundlePath.utf8.elementsEqual(other.bundlePath.utf8) &&
+        executablePath.utf8.elementsEqual(other.executablePath.utf8) && label.utf8.elementsEqual(other.label.utf8)
+    }
     static func text(_ s: String, cap: Int) -> Bool {
         !s.isEmpty && s.utf8.count <= cap && !s.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
@@ -28,6 +33,30 @@ public struct SelectedApplicationBinding: Equatable, Sendable {
     }
     func matches(_ context: MeetingAudioIngress.Context) -> Bool {
         valid && source == context.source && sourceGeneration == context.sourceGeneration && captureEpoch == context.epoch
+    }
+}
+
+public enum ApplicationAudioMode: Equatable, Sendable { case retainedRecording, accessAttempt }
+
+/// Local operation evidence only. No native handles, status codes, messages or permission inference.
+public struct ApplicationAudioAccessKey: Equatable, Sendable {
+    public let binding: SelectedApplicationBinding, context: MeetingAudioIngress.Context, nonce: UUID
+    public init(binding: SelectedApplicationBinding, context: MeetingAudioIngress.Context, nonce: UUID) {
+        self.binding = binding; self.context = context; self.nonce = nonce
+    }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.binding.exactlyMatches(rhs.binding) && lhs.context == rhs.context && lhs.nonce == rhs.nonce
+    }
+}
+public struct ApplicationAudioAccessOutcome: Equatable, Sendable {
+    public enum Permission: Equatable, Sendable { case unknown }
+    public enum Phase: Equatable, Sendable { case factory, identity, resolve, tap, aggregate, listeners, readback, io, start, retirement }
+    public enum Progress: Equatable, Sendable { case stoppedBeforeNativeStart, nativeStartReturned, failed(Phase) }
+    public enum Disposition: Equatable, Sendable { case appOwnedRetired, heldOrUnknownCleanup }
+    public let key: ApplicationAudioAccessKey, progress: Progress, disposition: Disposition
+    public var permission: Permission { .unknown }
+    public init(key: ApplicationAudioAccessKey, progress: Progress, disposition: Disposition) {
+        self.key = key; self.progress = progress; self.disposition = disposition
     }
 }
 
@@ -66,17 +95,20 @@ public enum ApplicationAudioStart { case notStarted, actual(ApplicationAudioReco
         binding.matches(context)
     }
     public func startSelectedApplication(binding: SelectedApplicationBinding, ingress: MeetingAudioIngress,
-                                         enabled: Bool = false) -> ApplicationAudioStart {
+                                         enabled: Bool = false, mode: ApplicationAudioMode = .retainedRecording,
+                                         attemptNonce: UUID = UUID(),
+                                         outcome: (@MainActor (ApplicationAudioAccessOutcome) -> Void)? = nil) -> ApplicationAudioStart {
         guard enabled else { return .notStarted } // MUST remain first: even factory/OS checks follow this fence.
         guard active == nil,binding.matches(ingress.context) else { return .notStarted }
         let facts = ingress.facts
         guard facts.open,!facts.ended,!facts.bodyEntered,facts.slots == 2,facts.allocated == 2,
               facts.rawBytes == 1_920_088,facts.accepted == 0 else { return .notStarted }
-        let driver = ApplicationAudioDriver(binding:binding,ingress:ingress,makeConverter:makeConverter)
+        let driver = ApplicationAudioDriver(binding:binding,ingress:ingress,makeConverter:makeConverter,mode:mode,
+            key:.init(binding:binding,context:ingress.context,nonce:attemptNonce))
         active = driver
         // MainActor task cannot run before this synchronous method registers its actual handle.
         let task = Task { @MainActor [self,driver] in
-            await driver.run(makeBottom:makeBottom,retainedFailure:retainedFailure)
+            await driver.run(makeBottom:makeBottom,retainedFailure:retainedFailure,outcome:outcome)
             active = nil; actualTask = nil
         }
         actualTask = task
@@ -191,21 +223,30 @@ private final class ApplicationAudioPayload {
 final class ApplicationAudioGate: @unchecked Sendable {
     private let lock = NSLock()
     private var payload: ApplicationAudioPayload?
+    let mode: ApplicationAudioMode
     private var closed = false, armed = false, fenced = false, pcm = 0, listeners = 0, controls = 0, fencing = 0
     private var concern: MeetingSession.Reason?
     private var stopWaiter: CheckedContinuation<Void,Never>?, bodyWaiter: CheckedContinuation<Void,Never>?
-    init(ingress: MeetingAudioIngress, makeConverter: @escaping (AVAudioFormat) -> MeetingPCMConverting?) {
+    init(ingress: MeetingAudioIngress, makeConverter: @escaping (AVAudioFormat) -> MeetingPCMConverting?,
+         mode: ApplicationAudioMode = .retainedRecording) {
+        self.mode = mode
         payload = ApplicationAudioPayload(run:.init(ingress:ingress,makeConverter:makeConverter))
     }
     var isClosed: Bool { lock.withLock { closed } }
     func requireOpen() throws { if isClosed { throw MeetingSession.Failure.stale } }
     func prepare(_ format: ApplicationPCMFormat) throws {
         let p = lock.withLock { payload }; guard let p else { throw MeetingSession.Failure.stale }
-        try p.prepare(format) // before installing IO; no concurrent PCM possible
+        if mode == .accessAttempt {
+            guard p.format == nil else { throw MeetingSession.Failure.stale }
+            p.format = format // control metadata only; no planar format or sample storage
+        } else { try p.prepare(format) } // retained preparation is unchanged
     }
     func bindIdentity(_ identity: NSRunningApplication?) { lock.withLock { payload?.identity = identity } }
     func setListenerBody(_ body: (() -> Void)?) { lock.withLock { payload?.listenerBody = body } }
-    func arm() throws { try lock.withLock { guard !closed,payload?.format != nil,payload?.charge.bytes == 3_273_348 else { throw MeetingSession.Failure.stale }; armed = true } }
+    func arm() throws { try lock.withLock { guard mode == .retainedRecording,!closed,payload?.format != nil,payload?.charge.bytes == 3_273_348 else { throw MeetingSession.Failure.stale }; armed = true } }
+    var pcmFacts: (armed: Bool, bodies: Int, formatStorage: Bool, scratch: Bool, payload: Bool) {
+        lock.withLock { (armed,pcm,payload?.planarFormat != nil,payload?.scratch != nil,payload != nil) }
+    }
     func close(_ reason: MeetingSession.Reason? = nil) {
         let entry = lock.withLock { () -> (Bool,MeetingRecorderRun?) in
             closed = true
@@ -218,6 +259,7 @@ final class ApplicationAudioGate: @unchecked Sendable {
         if entry.0 { entry.1?.requestStop(reason); leave(.fence) }
     }
     func receive(_ inspect: () -> ApplicationBorrowedPCM) {
+        guard mode == .retainedRecording else { return } // immutable fence BEFORE payload/body/lazy sample inspection
         let entry = lock.withLock { () -> (ApplicationAudioPayload,Bool)? in
             guard !closed,armed,let payload,pcm < 2 else { return nil }
             let primary = pcm == 0; pcm += 1
@@ -313,6 +355,10 @@ struct ApplicationAudioRoute: Equatable { let id: AudioObjectID, uid: String }
 struct ResolvedApplicationAudio: Equatable {
     let binding: SelectedApplicationBinding, process: AudioObjectID, routes: [ApplicationAudioRoute]
     var tapPlan: ApplicationAudioTapPlan? { .select([process]) }
+    func exactlyMatches(_ other: Self) -> Bool {
+        self == other && binding.exactlyMatches(other.binding) &&
+        zip(routes,other.routes).allSatisfy { pair in pair.0.uid.utf8.elementsEqual(pair.1.uid.utf8) }
+    }
     var valid: Bool {
         binding.valid && tapPlan != nil && (1...2).contains(routes.count) &&
         Set(routes.map(\.id)).count == routes.count && Set(routes.map(\.uid)).count == routes.count &&
@@ -414,40 +460,57 @@ protocol ApplicationAudioBottom: AnyObject {
 final class ApplicationAudioDriver: @unchecked Sendable {
     let gate: ApplicationAudioGate, owned = ApplicationAudioResources(), queues = ApplicationAudioQueues()
     private let binding: SelectedApplicationBinding
+    private let mode: ApplicationAudioMode, key: ApplicationAudioAccessKey
+    private var phase = ApplicationAudioAccessOutcome.Phase.factory
+    private var progress = ApplicationAudioAccessOutcome.Progress.stoppedBeforeNativeStart
     private var heldClosure: CheckedContinuation<Void,Never>?
     init(binding: SelectedApplicationBinding, ingress: MeetingAudioIngress,
-         makeConverter: @escaping (AVAudioFormat) -> MeetingPCMConverting?) {
-        self.binding = binding; gate = .init(ingress:ingress,makeConverter:makeConverter)
+         makeConverter: @escaping (AVAudioFormat) -> MeetingPCMConverting?, mode: ApplicationAudioMode,
+         key: ApplicationAudioAccessKey) {
+        self.binding = binding; self.mode = mode; self.key = key
+        gate = .init(ingress:ingress,makeConverter:makeConverter,mode:mode)
     }
-    @MainActor func run(makeBottom: () -> ApplicationAudioBottom?, retainedFailure: () -> Void) async {
+    @MainActor func run(makeBottom: () -> ApplicationAudioBottom?, retainedFailure: () -> Void,
+                        outcome: (@MainActor (ApplicationAudioAccessOutcome) -> Void)?) async {
         var bottom: ApplicationAudioBottom?
         do {
             try gate.requireOpen()
             guard let made = makeBottom() else { throw MeetingSession.Failure.unavailable }
             bottom = made
-            try made.bindIdentity(binding,owned:owned,gate:gate,queues:queues)
+            if mode == .accessAttempt { try gate.requireOpen() }
+            phase = .identity; try made.bindIdentity(binding,owned:owned,gate:gate,queues:queues)
             try await queues.call(gate) { [self] in
-                try gate.requireOpen(); let plan = try made.resolve(binding)
-                guard plan.valid,plan.binding == binding else { throw MeetingSession.Failure.stale }
+                try gate.requireOpen(); phase = .resolve; let plan = try made.resolve(binding)
+                guard plan.valid,(mode == .accessAttempt ? plan.binding.exactlyMatches(binding) : plan.binding == binding) else { throw MeetingSession.Failure.stale }
                 owned.resolved = plan
-                try gate.requireOpen(); try made.createTap(plan,owned:owned)
-                try gate.requireOpen(); try made.createAggregate(plan,owned:owned)
+                try gate.requireOpen(); phase = .tap; try made.createTap(plan,owned:owned)
+                try gate.requireOpen(); phase = .aggregate; try made.createAggregate(plan,owned:owned)
                 guard let format = owned.format else { throw MeetingSession.Failure.bounds }
+                if mode == .accessAttempt { try gate.requireOpen() }
                 try gate.prepare(format)
-                try gate.requireOpen(); try made.installListeners(plan,owned:owned,gate:gate,queues:queues)
+                try gate.requireOpen(); phase = .listeners; try made.installListeners(plan,owned:owned,gate:gate,queues:queues)
             }
-            try gate.requireOpen(); try made.revalidateIdentity(binding,owned:owned)
+            try gate.requireOpen(); phase = .identity; try made.revalidateIdentity(binding,owned:owned)
             try await queues.call(gate) { [self] in
                 try gate.requireOpen()
-                guard let plan = owned.resolved,try made.resolve(binding) == plan else { throw MeetingSession.Failure.stale }
-                try made.revalidateInput(owned)
+                phase = .resolve
+                guard let plan = owned.resolved else { throw MeetingSession.Failure.stale }
+                let current = try made.resolve(binding)
+                guard (mode == .accessAttempt ? current.exactlyMatches(plan) : current == plan) else { throw MeetingSession.Failure.stale }
+                if mode == .accessAttempt { try gate.requireOpen() }
+                phase = .readback; try made.revalidateInput(owned)
                 try gate.requireOpen()
-                try gate.arm() // fresh post-listener format/topology, identity and both slots precede callback entry
-                try made.installIOProc(owned,gate:gate,queues:queues)
-                try gate.requireOpen(); try made.start(owned)
+                if mode == .retainedRecording { try gate.arm() } // access gates can never arm
+                phase = .io; try made.installIOProc(owned,gate:gate,queues:queues)
+                try gate.requireOpen(); phase = .start; try made.start(owned)
+                progress = .nativeStartReturned
+                if mode == .accessAttempt { gate.close() } // immediate fence on the SAME worker after actual return
             }
-            await gate.waitForStop()
-        } catch { gate.close(.unknownCoverage) }
+            if mode == .retainedRecording { await gate.waitForStop() }
+        } catch {
+            progress = gate.isClosed && phase != .start ? .stoppedBeforeNativeStart : .failed(phase)
+            gate.close(.unknownCoverage)
+        }
         gate.close()
         await gate.waitForStop() // the single in-flight fence has actually reached ingress before HAL stop
         if let bottom {
@@ -485,12 +548,18 @@ final class ApplicationAudioDriver: @unchecked Sendable {
         guard finished,!owned.uncertain else {
             // Cancellation/timeouts are not evidence of exit. Own all unresolved handles forever;
             // root must keep this actual task/hold unavailable, like MeetingRecorderRun.retainFailedClosure.
+            if mode == .accessAttempt {
+                let observed: ApplicationAudioAccessOutcome.Progress = progress == .nativeStartReturned ? .failed(.retirement) : progress
+                outcome?(.init(key:key,progress:observed,disposition:.heldOrUnknownCleanup))
+            }
             retainedFailure()
             await withCheckedContinuation { heldClosure = $0 }
             return
         }
         owned.identity = nil; owned.resolved = nil; owned.format = nil; owned.tapUID = nil; owned.inputStream = nil
-        // Does not join the owner, writer or store. Native service exit is NOT established.
+        if mode == .accessAttempt { outcome?(.init(key:key,progress:progress,disposition:.appOwnedRetired)) }
+        // Delivery is synchronous inside the original actual task. No owner/writer join here.
+        // Native service exit is NOT established.
     }
 }
 

@@ -19,7 +19,18 @@ private final class AppBodyHold: @unchecked Sendable {
     func body() {
         let take = lock.withLock { () -> Bool in if used { return false }; used = true; return true }
         guard take else { return }; entered.fulfill()
-        if semaphore.wait(timeout:.now()+5) == .timedOut { lock.withLock { expired = true } }
+        // Independent non-actor fail-release; cancellation and actor progress are irrelevant.
+        let watchdog = DispatchWorkItem { [self] in
+            let fail = lock.withLock { () -> Bool in
+                guard !opened else { return false }; expired = true; return true
+            }
+            if fail { XCTFail("Application body exceeded five seconds"); release() }
+        }
+        DispatchQueue.global().asyncAfter(deadline:.now()+5,execute:watchdog)
+        if semaphore.wait(timeout:.now()+5) == .timedOut {
+            lock.withLock { expired = true }; XCTFail("Application body timed out"); release()
+        }
+        watchdog.cancel()
         returned.fulfill()
     }
     func release() {
@@ -82,6 +93,9 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
     var format: ApplicationPCMFormat
     var formatAfterListeners: ApplicationPCMFormat?
     var onStarted: (() -> Void)?, onInstall: ((ApplicationAudioGate) -> Void)?, listenerHold: AppBodyHold?
+    var onStart: ((ApplicationAudioGate) -> Void)?, operationReturned: ((AppPhase) -> Void)?
+    private var orderValue: [AppPhase] = []
+    var order: [AppPhase] { lock.withLock { orderValue } }
     var observedPlan: ResolvedApplicationAudio?, observedInputOnly = false
     let inspected = AppCount(), included = AppCount(), observedRegistered = AppCount()
     init(format: ApplicationPCMFormat) { self.format = format }
@@ -90,7 +104,7 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
     var copied: ApplicationAudioGate? { lock.withLock { gateValue } }
     func callbackQueue(listener: Bool) -> DispatchQueue? { lock.withLock { listener ? listenerQueue : pcmQueue } }
     private func phase(_ phase: AppPhase) throws {
-        lock.withLock { calls[phase,default:0] += 1 }
+        lock.withLock { calls[phase,default:0] += 1; orderValue.append(phase) }
         held[phase]?.body()
         if fail == phase { throw MeetingSession.Failure.unavailable }
     }
@@ -140,9 +154,11 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
         try phase(.io)
     }
     func start(_ owned: ApplicationAudioResources) throws {
-        owned.io?.startAttempted = true; try phase(.start); onStarted?()
+        defer { operationReturned?(.start) }
+        owned.io?.startAttempted = true; if let gate = copied { onStart?(gate) }; try phase(.start); onStarted?()
     }
     func stop(_ owned: ApplicationAudioResources) throws {
+        defer { operationReturned?(.stop) }
         guard let io = owned.io,!io.stopAttempted else { throw MeetingSession.Failure.stale }
         io.stopAttempted = true; try phase(.stop)
     }
@@ -154,12 +170,14 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
         do { try phase(.removeListeners); owned.listeners.removeAll(); return true } catch { return false }
     }
     func destroyAggregate(_ owned: ApplicationAudioResources) throws {
+        defer { operationReturned?(.destroyAggregate) }
         guard let aggregate = owned.aggregate,!aggregate.attempted,owned.io == nil,owned.listeners.isEmpty else {
             throw MeetingSession.Failure.stale
         }
         aggregate.attempted = true; try phase(.destroyAggregate); owned.aggregate = nil
     }
     func destroyTap(_ owned: ApplicationAudioResources) throws {
+        defer { operationReturned?(.destroyTap) }
         guard let tap = owned.tap,!tap.attempted,owned.aggregate == nil else { throw MeetingSession.Failure.stale }
         tap.attempted = true; try phase(.destroyTap); owned.tap = nil
     }
@@ -169,7 +187,7 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
     let ingress: MeetingAudioIngress, binding: SelectedApplicationBinding, bottom: AppBottom, converter = AppConverter()
     let factories = AppCount(), converters = AppCount()
     let capture: MeetingApplicationAudioCapture
-    init(format: ApplicationPCMFormat? = nil, precharge: Bool = true, retained: @escaping () -> Void = {}) throws {
+    init(format: ApplicationPCMFormat? = nil, precharge: Bool = true, factoryUnavailable: Bool = false, retained: @escaping () -> Void = {}) throws {
         let context = MeetingAudioIngress.Context(session:UUID(),ownerGeneration:3,source:UUID(),sourceGeneration:7,segment:UUID(),epoch:UUID())
         ingress = .init(context:context)
         if precharge { try ingress.reserve(id:UUID(),slot:1); try ingress.reserve(id:UUID(),slot:2); try ingress.activate() }
@@ -178,7 +196,7 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
                         executablePath:"/Literal.app/Contents/MacOS/Literal",label:"Literal app")
         bottom = AppBottom(format:try format ?? .init(rate:16_000,channels:1,interleaved:false))
         let bottom = bottom, converter = converter, factories = factories, converters = converters
-        capture = .init(makeBottom:{ factories.add(); return bottom },makeConverter:{ _ in converters.add(); return converter },retainedFailure:retained)
+        capture = .init(makeBottom:{ factories.add(); return factoryUnavailable ? nil : bottom },makeConverter:{ _ in converters.add(); return converter },retainedFailure:retained)
     }
     func start(_ binding: SelectedApplicationBinding? = nil, enabled: Bool = true) throws -> ApplicationAudioRecording {
         switch capture.startSelectedApplication(binding:binding ?? self.binding,ingress:ingress,enabled:enabled) {
@@ -194,7 +212,8 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
 @MainActor private final class AppCompletion {
     let done = XCTestExpectation(description:"actual task returned")
     private(set) var finished = false
-    init(_ task: Task<Void,Never>) { Task { @MainActor [self] in await task.value; finished = true; done.fulfill() } }
+    let task: Task<Void,Never>
+    init(_ task: Task<Void,Never>) { self.task = task; Task { @MainActor [self] in await task.value; finished = true; done.fulfill() } }
 }
 
 final class MeetingApplicationAudioCaptureTests: XCTestCase {
@@ -553,5 +572,185 @@ final class MeetingApplicationAudioCaptureTests: XCTestCase {
             // Deliberately no task.value/completion observer: this is the known held state,
             // with no external unbounded join and no retry/timeout pretending it exited.
         }
+    }
+}
+
+@MainActor private final class AppAccessReceipt {
+    let received = XCTestExpectation(description:"one access disposition delivered")
+    private(set) var count = 0, value: ApplicationAudioAccessOutcome?
+    func accept(_ value: ApplicationAudioAccessOutcome) {
+        count += 1; if count == 1 { self.value = value; received.fulfill() }
+    }
+}
+@MainActor private enum AppAccessFailureResources {
+    private static var recordings: [ApplicationAudioRecording] = []
+    static func retain(_ recording: ApplicationAudioRecording) { precondition(recordings.count < 48); recordings.append(recording) }
+}
+extension MeetingApplicationAudioCaptureTests {
+    @MainActor private func accessStart(_ r: AppRig,nonce: UUID,receipt: AppAccessReceipt) throws -> ApplicationAudioRecording {
+        guard case .actual(let recording) = r.capture.startSelectedApplication(binding:r.binding,ingress:r.ingress,enabled:true,
+            mode:.accessAttempt,attemptNonce:nonce,outcome:{ value in
+                XCTAssertTrue(r.capture.hasActualTask); receipt.accept(value)
+            }) else { throw MeetingSession.Failure.unavailable }
+        return recording
+    }
+    @MainActor private func accessComplete(_ recording: ApplicationAudioRecording,_ completion: AppCompletion) async -> Bool {
+        let exact = recording.task
+        let result = await XCTWaiter.fulfillment(of:[completion.done],timeout:4)
+        guard result == .completed,completion.finished,completion.task == exact,recording.task == exact else {
+            XCTFail("Unobserved original access task; retaining without another join")
+            AppAccessFailureResources.retain(recording); return false
+        }
+        await exact.value; return true
+    }
+    private func accessHold(_ label: String) -> AppBodyHold {
+        .init(entered:XCTestExpectation(description:label+" entered"),returned:XCTestExpectation(description:label+" returned"))
+    }
+    @MainActor private func assertEmptyAccess(_ r: AppRig) {
+        XCTAssertEqual(r.ingress.facts.accepted,0); XCTAssertEqual(r.ingress.facts.copies,0)
+        XCTAssertEqual(r.ingress.facts.snapshotBytes,0); XCTAssertEqual(r.ingress.facts.allocated,2)
+        XCTAssertFalse(r.ingress.facts.bodyEntered); XCTAssertNil(r.ingress.readyPermit)
+        XCTAssertEqual(r.converters.value,0); XCTAssertEqual(r.converter.feeds.value,0); XCTAssertEqual(r.converter.finishes.value,0)
+    }
+    @MainActor func testAccessAttemptNeverArmsOrInspectsSynchronousPCM() async throws {
+        for throwsAfterStart in [false,true] {
+            let r = try AppRig(), receipt = AppAccessReceipt(), nonce = UUID(), injected = AppCount()
+            let registered = AppCount()
+            let inject: (ApplicationAudioGate) -> Void = { gate in
+                injected.add(); XCTAssertEqual(registered.value,1)
+                XCTAssertEqual(gate.mode,.accessAttempt)
+                do { try gate.arm(); XCTFail("Access attempt unexpectedly armed PCM") }
+                catch { } // Expected refusal; the callback itself remains nonthrowing.
+                XCTAssertFalse(gate.pcmFacts.armed); XCTAssertEqual(gate.pcmFacts.bodies,0)
+                XCTAssertFalse(gate.pcmFacts.formatStorage); XCTAssertFalse(gate.pcmFacts.scratch)
+                XCTAssertTrue(gate.pcmFacts.payload)
+                gate.receive { XCTFail("Access inspected borrowed PCM"); fatalError("inspect trap") }
+                XCTAssertEqual(gate.pcmFacts.bodies,0)
+            }
+            r.bottom.onInstall = inject; r.bottom.onStart = inject
+            if throwsAfterStart { r.bottom.fail = .start }
+            let recording = try accessStart(r,nonce:nonce,receipt:receipt); registered.add()
+            let completion = AppCompletion(recording.task)
+            guard await accessComplete(recording,completion) else { return }
+            XCTAssertEqual(injected.value,2); XCTAssertEqual(receipt.count,1)
+            XCTAssertEqual(receipt.value?.key,.init(binding:r.binding,context:r.ingress.context,nonce:nonce))
+            XCTAssertEqual(receipt.value?.permission,.unknown); XCTAssertEqual(receipt.value?.disposition,.appOwnedRetired)
+            XCTAssertEqual(receipt.value?.progress,throwsAfterStart ? .failed(.start) : .nativeStartReturned)
+            assertEmptyAccess(r); XCTAssertTrue(r.ingress.facts.settled)
+            let copied = try XCTUnwrap(r.bottom.copied)
+            XCTAssertFalse(copied.pcmFacts.payload)
+            copied.receive { XCTFail("Copied retired gate inspected"); fatalError("copy trap") }
+            copied.changed { XCTFail("Retired listener inspected"); return true }
+            recording.requestStop(); XCTAssertEqual(receipt.count,1)
+        }
+        let r = try AppRig(), before = r.ingress.facts
+        let composed = replacing(r.binding,label:"Café"), decomposed = replacing(r.binding,label:"Cafe\u{301}")
+        XCTAssertEqual(composed,decomposed) // legacy String/Equatable semantics remain unchanged
+        XCTAssertNotEqual(ApplicationAudioAccessKey(binding:composed,context:r.ingress.context,nonce:r.binding.selection),
+            .init(binding:decomposed,context:r.ingress.context,nonce:r.binding.selection))
+        if case .actual = r.capture.startSelectedApplication(binding:r.binding,ingress:r.ingress,mode:.accessAttempt,
+            outcome:{ _ in XCTFail("Disabled source published evidence") }) { XCTFail("Disabled access") }
+        XCTAssertEqual(r.factories.value,0); XCTAssertEqual(r.ingress.facts,before)
+    }
+    @MainActor func testAccessAttemptStartReturnSelfRetiresThroughEveryPartialPhase() async throws {
+        let phases: [(AppPhase?,ApplicationAudioAccessOutcome.Progress)] = [
+            (.identity,.failed(.identity)),(.resolve,.failed(.resolve)),(.tap,.failed(.tap)),(.aggregate,.failed(.aggregate)),
+            (.listener1,.failed(.listeners)),(.listener2,.failed(.listeners)),(.listener3,.failed(.listeners)),(.listener4,.failed(.listeners)),
+            (.revalidate,.failed(.identity)),(.inputReadback,.failed(.readback)),(.io,.failed(.io)),(.start,.failed(.start)),(nil,.nativeStartReturned)]
+        for (phase,progress) in phases {
+            let r = try AppRig(), receipt = AppAccessReceipt(); r.bottom.fail = phase
+            let recording = try accessStart(r,nonce:UUID(),receipt:receipt), completion = AppCompletion(recording.task)
+            guard await accessComplete(recording,completion) else { return }
+            XCTAssertEqual(receipt.count,1); XCTAssertEqual(receipt.value?.progress,progress)
+            XCTAssertEqual(receipt.value?.disposition,.appOwnedRetired); XCTAssertEqual(receipt.value?.permission,.unknown)
+            XCTAssertFalse(r.capture.hasActualTask); assertEmptyAccess(r)
+            for op in [AppPhase.stop,.removeIO,.removeListeners,.destroyAggregate,.destroyTap] { XCTAssertLessThanOrEqual(r.bottom.count(op),1) }
+            if r.bottom.count(.aggregate) > 0 { XCTAssertEqual(r.bottom.count(.destroyAggregate),1) }
+            if r.bottom.count(.tap) > 0 { XCTAssertEqual(r.bottom.count(.destroyTap),1) }
+            let order = r.bottom.order
+            if let aggregate = order.firstIndex(of:.destroyAggregate),let tap = order.firstIndex(of:.destroyTap) { XCTAssertLessThan(aggregate,tap) }
+            if let stop = order.firstIndex(of:.stop),let remove = order.firstIndex(of:.removeIO) { XCTAssertLessThan(stop,remove) }
+        }
+        for beforeFactory in [false,true] {
+            let r = try AppRig(factoryUnavailable:!beforeFactory), receipt = AppAccessReceipt()
+            let recording = try accessStart(r,nonce:UUID(),receipt:receipt), completion = AppCompletion(recording.task)
+            if beforeFactory { recording.requestStop() }
+            guard await accessComplete(recording,completion) else { return }
+            XCTAssertEqual(receipt.value?.progress,beforeFactory ? .stoppedBeforeNativeStart : .failed(.factory))
+            XCTAssertEqual(receipt.count,1); XCTAssertEqual(r.factories.value,beforeFactory ? 0 : 1); assertEmptyAccess(r)
+        }
+    }
+    @MainActor func testAccessAttemptStopCannotRetireHeldStartOrControl() async throws {
+        for phase in ["start","stop","listener","destroyAggregate","destroyTap"] {
+            let r = try AppRig(), receipt = AppAccessReceipt(), body = accessHold(phase)
+            let heldStart = phase == "listener" ? accessHold("listener's held Start") : nil
+            let listenerReturned = phase == "listener" ? XCTestExpectation(description:"actual listener invocation returned") : nil
+            let operationReturned = XCTestExpectation(description:"held native/control operation actually returned")
+            r.bottom.operationReturned = { returned in
+                if returned.rawValue == (phase == "listener" ? "start" : phase) { operationReturned.fulfill() }
+            }
+            defer { body.release(); heldStart?.release() }
+            if phase == "listener" {
+                r.bottom.listenerHold = body; r.bottom.held[.start] = heldStart
+                let bottom = r.bottom
+                r.bottom.onStart = { gate in bottom.callbackQueue(listener:true)?.async { gate.changed(); listenerReturned?.fulfill() } }
+            } else if let native = AppPhase(rawValue:phase) { r.bottom.held[native] = body }
+            let recording = try accessStart(r,nonce:UUID(),receipt:receipt), completion = AppCompletion(recording.task)
+            guard await XCTWaiter.fulfillment(of:[body.entered] + (heldStart.map { [$0.entered] } ?? []),timeout:4) == .completed else {
+                XCTFail("Hold entry unobserved"); AppAccessFailureResources.retain(recording); return
+            }
+            recording.requestStop(); recording.task.cancel(); recording.requestStop()
+            XCTAssertFalse(r.ingress.facts.open); XCTAssertEqual(receipt.count,0); XCTAssertFalse(completion.finished)
+            XCTAssertTrue(r.capture.hasActualTask)
+            if phase == "start" || phase == "listener" { XCTAssertEqual(r.bottom.count(.stop),0); XCTAssertEqual(r.bottom.count(.destroyAggregate),0) }
+            r.bottom.copied?.receive { fatalError("held access inspected") }
+            heldStart?.release(); body.release()
+            guard await XCTWaiter.fulfillment(of:[body.returned,operationReturned] + (heldStart.map { [$0.returned] } ?? []) + (listenerReturned.map { [$0] } ?? []),timeout:4) == .completed else {
+                XCTFail("Real hold return unobserved"); AppAccessFailureResources.retain(recording); return
+            }
+            guard await accessComplete(recording,completion) else { return }
+            XCTAssertFalse(body.timedOut); XCTAssertNotEqual(heldStart?.timedOut,true)
+            XCTAssertEqual(receipt.count,1); XCTAssertEqual(receipt.value?.disposition,.appOwnedRetired)
+            XCTAssertEqual(r.factories.value,1); XCTAssertEqual(r.bottom.count(.start),1); XCTAssertEqual(r.bottom.count(.stop),1)
+            assertEmptyAccess(r)
+        }
+    }
+    @MainActor func testAccessAttemptUnknownCleanupKeepsOriginalActualOwned() async throws {
+        for phase in [AppPhase.stop,.removeIO,.removeListeners,.destroyAggregate,.destroyTap] {
+            let retained = XCTestExpectation(description:"uncertain original task entered permanent hold")
+            let r = try AppRig(retained:{ retained.fulfill() }), receipt = AppAccessReceipt(); r.bottom.fail = phase
+            let recording = try accessStart(r,nonce:UUID(),receipt:receipt), exact = recording.task
+            guard await XCTWaiter.fulfillment(of:[receipt.received,retained],timeout:4) == .completed else {
+                XCTFail("No uncertain disposition"); AppAccessFailureResources.retain(recording); return
+            }
+            XCTAssertEqual(receipt.count,1); XCTAssertEqual(receipt.value?.permission,.unknown)
+            XCTAssertEqual(receipt.value?.disposition,.heldOrUnknownCleanup); XCTAssertEqual(receipt.value?.progress,.failed(.retirement))
+            XCTAssertTrue(r.capture.hasActualTask)
+            XCTAssertEqual(recording.task,exact); recording.task.cancel(); recording.requestStop(); recording.requestStop()
+            XCTAssertEqual(r.bottom.count(phase),1); XCTAssertEqual(r.factories.value,1)
+            if phase == .stop { XCTAssertEqual(r.bottom.count(.removeIO),0) }
+            if [.stop,.removeIO,.removeListeners].contains(phase) { XCTAssertEqual(r.bottom.count(.destroyAggregate),0) }
+            if phase != .destroyTap { XCTAssertEqual(r.bottom.count(.destroyTap),0) }
+            if case .actual = r.capture.startSelectedApplication(binding:r.binding,ingress:r.ingress,enabled:true,mode:.accessAttempt) { XCTFail("Unknown owner restarted") }
+            assertEmptyAccess(r); AppAccessFailureResources.retain(recording)
+            // Deliberately no completion observer or task.value for unknown cleanup.
+        }
+    }
+    @MainActor func testRetainedModeRemainsCompatibleWithLiteralSynchronousPCM() async throws {
+        for explicit in [false,true] {
+            let r = try AppRig(); r.bottom.fail = .start
+            r.bottom.onInstall = { gate in let pcm = AppPCM([[-1,0.5]]); gate.receive { pcm.borrowed } }
+            let recording: ApplicationAudioRecording
+            if explicit {
+                guard case .actual(let value) = r.capture.startSelectedApplication(binding:r.binding,ingress:r.ingress,enabled:true,mode:.retainedRecording,
+                    outcome:{ _ in XCTFail("Retention published access outcome") }) else { throw MeetingSession.Failure.unavailable }
+                recording = value
+            } else { recording = try r.start() }
+            let completion = AppCompletion(recording.task)
+            guard await accessComplete(recording,completion) else { return }
+            XCTAssertEqual(try r.take(),wav([0,128,0,64])); XCTAssertEqual(r.converter.feeds.value,1)
+            XCTAssertEqual(r.converter.finishes.value,1); XCTAssertEqual(r.converters.value,1)
+        }
+        // Existing planar/interleaved, partial-prefix and four-call-tail method bodies remain intact.
     }
 }

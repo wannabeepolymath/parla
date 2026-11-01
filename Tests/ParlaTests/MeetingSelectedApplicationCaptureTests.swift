@@ -236,3 +236,138 @@ final class MeetingSelectedApplicationCaptureTests: XCTestCase {
         }
     }
 }
+
+/// New access fixtures use one lock-protected waiter and an independent non-MainActor watchdog.
+/// open() is synchronous/idempotent for defer, even when the actor is held elsewhere.
+final class AccessTestHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened = false, used = false, expired = false, returnedValue = false
+    private var continuation: CheckedContinuation<Void,Never>?, watchdog: DispatchWorkItem?
+    let entered = XCTestExpectation(description:"access hold actually entered")
+    let returned = XCTestExpectation(description:"access hold actually returned")
+    func wait() async {
+        await withCheckedContinuation { c in
+            let item = DispatchWorkItem { [self] in
+                let fail = lock.withLock { () -> Bool in guard !opened else { return false }; expired = true; return true }
+                if fail { XCTFail("Access hold exceeded five seconds"); open() }
+            }
+            let immediate = lock.withLock { () -> Bool in
+                precondition(!used); used = true
+                if opened { return true }; continuation = c; watchdog = item; return false
+            }
+            entered.fulfill()
+            if immediate { c.resume() } else { DispatchQueue.global().asyncAfter(deadline:.now()+5,execute:item) }
+        }
+        lock.withLock { returnedValue = true }; returned.fulfill()
+    }
+    func open() {
+        let pending = lock.withLock { () -> (CheckedContinuation<Void,Never>?,DispatchWorkItem?) in
+            guard !opened else { return (nil,nil) }; opened = true
+            let value = (continuation,watchdog); continuation = nil; watchdog = nil; return value
+        }
+        pending.1?.cancel(); pending.0?.resume()
+    }
+    var timedOut: Bool { lock.withLock { expired } }
+    var didReturn: Bool { lock.withLock { returnedValue } }
+}
+@MainActor final class AccessTestClient {
+    private(set) var count = 0, value: ApplicationAudioAccessOutcome?
+    func receive(_ value: ApplicationAudioAccessOutcome) { count += 1; self.value = value }
+}
+@MainActor enum AccessTestFailureResources {
+    private static var values: [HubApplicationBackend] = []
+    static func retain(_ backend: HubApplicationBackend) {
+        guard !values.contains(where:{$0 === backend}) else { return }
+        precondition(values.count < 48); values.append(backend)
+    }
+}
+
+extension MeetingSelectedApplicationCaptureTests {
+    @MainActor private func observeAccess(_ backend: HubApplicationBackend,_ expectations: [XCTestExpectation]) async -> Bool {
+        let result = await XCTWaiter.fulfillment(of:expectations,timeout:4)
+        guard result == .completed,!backend.accessTimedOut else {
+            XCTFail("Access fixture observation failed; no teardown join"); AccessTestFailureResources.retain(backend); return false
+        }
+        return true
+    }
+    @MainActor private func joinAccess(_ backend: HubApplicationBackend,_ exact: Task<Void,Never>) async -> Bool {
+        guard await observeAccess(backend,[backend.completed]),backend.didComplete,backend.task == exact else {
+            AccessTestFailureResources.retain(backend); return false
+        }
+        await exact.value; return true
+    }
+    @MainActor func testAccessModeOutcomeAndOriginalTaskAreForwardedExactlyOnce() async throws {
+        for refusal in [false,true] {
+            let binding = selectedApplicationTestBinding(), backend = HubApplicationBackend(binding), client = AccessTestClient(), nonce = UUID()
+            defer { backend.release() }
+            backend.notStarted = refusal; backend.accessFalsePreActual = refusal
+            let adapter = MeetingSelectedApplicationCapture(binding:binding,core:backend.accessPort,enabled:true,mode:.accessAttempt,
+                attemptNonce:nonce,outcome:{ [weak client] in client?.receive($0) })
+            let ingress = try selectedApplicationTestIngress(binding,charged:true), selection = selectedApplicationTestSelection(binding)
+            let producer = adapter.start(selection,ingress:ingress)
+            if refusal {
+                refused(producer,source:binding.source); XCTAssertEqual(client.count,0); XCTAssertNil(backend.task)
+                adapter.requestStop(); XCTAssertEqual(backend.stops,0); continue
+            }
+            guard case .actual(let exact) = producer.exit else { XCTFail("No actual"); return }
+            XCTAssertEqual(exact,backend.task); exact.cancel()
+            guard await observeAccess(backend,[backend.entered,backend.accessNativeReturn.entered]) else { return }
+            XCTAssertEqual(client.count,0); adapter.requestStop(); XCTAssertEqual(backend.stops,1)
+            let key = try XCTUnwrap(backend.accessKey)
+            XCTAssertEqual(key,.init(binding:binding,context:ingress.context,nonce:nonce))
+            let foreign = ApplicationAudioAccessOutcome(key:.init(binding:binding,context:ingress.context,nonce:UUID()),
+                progress:.nativeStartReturned,disposition:.appOwnedRetired)
+            backend.replayAccess(foreign); XCTAssertEqual(client.count,0)
+            backend.accessNativeReturn.open()
+            guard await observeAccess(backend,[backend.accessNativeReturn.returned,backend.accessCleanup.entered]) else { return }
+            backend.accessCleanup.open()
+            guard await observeAccess(backend,[backend.accessCleanup.returned,backend.accessPublished,backend.accessTail.entered]) else { return }
+            XCTAssertEqual(client.count,1); XCTAssertEqual(client.value,backend.accessOutcome); XCTAssertEqual(client.value?.permission,.unknown)
+            XCTAssertFalse(backend.didComplete); XCTAssertEqual(exact,backend.task)
+            backend.replayAccess(try XCTUnwrap(backend.accessOutcome)); backend.replayAccess(foreign); XCTAssertEqual(client.count,1)
+            adapter.requestStop(); XCTAssertEqual(backend.stops,2)
+            backend.accessTail.open(); guard await observeAccess(backend,[backend.accessTail.returned]),await joinAccess(backend,exact) else { return }
+            refused(adapter.start(selection,ingress:ingress),source:binding.source); XCTAssertEqual(backend.starts,1)
+            XCTAssertEqual(ingress.facts.accepted,0); XCTAssertEqual(ingress.facts.copies,0)
+        }
+        let binding = selectedApplicationTestBinding(), backend = SelectedApplicationTestBackend(binding)
+        let legacy = MeetingSelectedApplicationCapture(binding:binding,core:backend.port,enabled:true,mode:.accessAttempt)
+        refused(legacy.start(selectedApplicationTestSelection(binding),ingress:try selectedApplicationTestIngress(binding,charged:true)),source:binding.source)
+        XCTAssertEqual(backend.starts,0) // old retained closure is NEVER silently invoked
+        let disabled = MeetingSelectedApplicationCapture(binding:binding,core:backend.port,mode:.accessAttempt)
+        refused(disabled.start(selectedApplicationTestSelection(binding),ingress:try selectedApplicationTestIngress(binding)),source:binding.source)
+        XCTAssertEqual(backend.starts,0)
+    }
+    @MainActor func testAccessClientReleaseAndCopiedGateKeepResourceOwnership() async throws {
+        for unknown in [false,true] {
+            let binding = selectedApplicationTestBinding(), backend = HubApplicationBackend(binding)
+            defer { backend.release() }; backend.unknownRetirement = unknown
+            var client: AccessTestClient? = AccessTestClient(); weak var weakClient = client
+            var adapter: MeetingSelectedApplicationCapture? = MeetingSelectedApplicationCapture(binding:binding,core:backend.accessPort,enabled:true,
+                mode:.accessAttempt,outcome:{ [weak client] in client?.receive($0) })
+            let port = try XCTUnwrap(adapter).port, ingress = try selectedApplicationTestIngress(binding,charged:true)
+            let producer = port.start(selectedApplicationTestSelection(binding),ingress)
+            guard case .actual(let exact) = producer.exit else { XCTFail("No actual"); return }
+            client = nil; adapter = nil; XCTAssertNil(weakClient)
+            guard await observeAccess(backend,[backend.entered,backend.accessNativeReturn.entered]) else { return }
+            await port.requestStop(); XCTAssertEqual(exact,backend.task); XCTAssertFalse(backend.didComplete)
+            backend.accessNativeReturn.open()
+            guard await observeAccess(backend,[backend.accessNativeReturn.returned,backend.accessCleanup.entered]) else { return }
+            backend.accessCleanup.open()
+            guard await observeAccess(backend,[backend.accessCleanup.returned,backend.accessPublished]) else { return }
+            XCTAssertEqual(backend.accessOutcome?.disposition,unknown ? .heldOrUnknownCleanup : .appOwnedRetired)
+            XCTAssertFalse(backend.didComplete); XCTAssertEqual(backend.task,exact)
+            if unknown {
+                XCTAssertNil(backend.completionObserver); AccessTestFailureResources.retain(backend)
+                // No completion observation or join for the deliberately owned uncertain task.
+            } else {
+                guard await observeAccess(backend,[backend.accessTail.entered]) else { return }
+                backend.accessTail.open()
+                guard await observeAccess(backend,[backend.accessTail.returned]),await joinAccess(backend,exact) else { return }
+                XCTAssertEqual(ingress.facts.accepted,0); XCTAssertTrue(ingress.facts.settled)
+            }
+            withExtendedLifetime(port) {} // retains original Stop independently of weak publication
+        }
+        // Copied native gates/inspect traps are covered in the Core selector; no duplicate native fake here.
+    }
+}
