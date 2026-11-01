@@ -326,3 +326,34 @@ extension MeetingMicrophoneCaptureTests {
         XCTAssertEqual(r.engine.starts.value,1);XCTAssertEqual(r.enqueues,0)
     }
 }
+
+extension MeetingMicrophoneCaptureTests {
+    @MainActor func testApplicationAndMicrophoneAuthoritiesNeverCross() async throws {
+        var applicationFactories = 0
+        let r = try MeetingHubRig(applicationCapability:.injectedContractOnly,application:{_ in
+            applicationFactories += 1;XCTFail("microphone invoked application factory");return .unavailable
+        })
+        r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {HubApplicationFailureResources.retainMicrophone(r);return}
+        XCTAssertNil(r.controller.prepareApplicationStart())
+        r.controller.confirmApplicationStart(challengeID:UUID(),affirmed:true);XCTAssertEqual(r.microphoneFactories,0)
+        r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}),await hubEntered([r.engine.started]) else {HubApplicationFailureResources.retainMicrophone(r);return}
+        let uid = r.engine.requestedUID
+        var saved = r.settings.current;saved.inputDeviceUID = "later";r.settings.current = saved;r.changedSettings()
+        r.controller.focusChanged();XCTAssertEqual(r.engine.requestedUID,uid);XCTAssertEqual(applicationFactories,0)
+        r.controller.stopAndSave();guard await hubComplete({await r.controller.drainActions()}) else {HubApplicationFailureResources.retainMicrophone(r);return}
+        XCTAssertEqual(r.controller.applicationState,.unavailable);XCTAssertEqual(r.engine.starts.value,1);XCTAssertEqual(applicationFactories,0)
+        r.controller.reserveShutdown();let drain = HubRestartDrain(r.controller)
+        guard await hubEntered([drain.entered,drain.exited]),drain.returned else {HubApplicationFailureResources.retainMicrophone(r);return}
+        await drain.task.value;XCTAssertEqual(drain.allowed,true)
+    }
+    @MainActor func testApplicationChoiceCannotUseMicrophoneStartOrPermissionEvidence() async throws {
+        let r = try HubApplicationRig();defer {r.release()};guard await r.open(self) else {return}
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+        r.controller.startAndSave();r.controller.focusChanged();r.controller.whisperPreparationChanged(UUID())
+        XCTAssertEqual(r.factories,0);XCTAssertEqual(r.settingsReads,0)
+        let challenge = try XCTUnwrap(r.controller.prepareApplicationStart())
+        r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:false)
+        r.controller.startAndSave();XCTAssertEqual(r.factories,0)
+        guard await r.detach(self) else {return}
+    }
+}

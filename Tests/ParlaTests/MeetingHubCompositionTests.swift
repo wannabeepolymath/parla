@@ -973,3 +973,237 @@ extension MeetingHubCompositionTests {
         r.controller.releaseRestart()
     }
 }
+
+extension MeetingHubCompositionTests {
+    @MainActor func testApplicationActualProducerBodyCleanupAndWriterOwnStop() async throws {
+        let r = try HubApplicationRig();defer {r.release()}
+        guard await r.start(self),let backend = r.backends.first else {return}
+        let writerEntered = expectation(description:"application durable writer entered")
+        let writer = HubCheckpointHold(entered:writerEntered,match:{$0 == "write" && $1?.hasSuffix(".source.pending") == true})
+        defer {writer.latch.open();r.bottom.observe = nil};r.heldGates.append(writer.latch);r.bottom.observe = writer.observe
+        r.controller.stopAndSave()
+        // Observe this trigger's own port/fence before any restart or drain can mask it.
+        guard await r.observe(self,[backend.stopRequested]) else {return}
+        let ingress = try XCTUnwrap(backend.ingress)
+        XCTAssertFalse(ingress.facts.open);XCTAssertTrue(ingress.facts.bodyEntered);XCTAssertEqual(try backend.latePCM(),0)
+        XCTAssertEqual(r.controller.applicationState,.retiring)
+        let stop = r.operation { [controller = r.controller] in await controller.drainActions();return true }
+        guard await r.observe(self,[stop.entered]) else {return};XCTAssertNil(stop.result)
+        XCTAssertFalse(backend.didComplete);XCTAssertFalse(r.controller.acceptSourceChoice(.microphone))
+        backend.bodyExit.open();guard await r.observe(self,[backend.cleanupEntered]) else {return}
+        XCTAssertFalse(ingress.facts.bodyEntered);XCTAssertFalse(ingress.facts.ended);XCTAssertNil(stop.result)
+        backend.cleanup.open();guard await r.joinedActual(self,backend),await r.observe(self,[writerEntered]) else {return}
+        XCTAssertNil(stop.result);XCTAssertFalse(r.controller.restartReady());XCTAssertEqual(r.controller.applicationState,.retiring)
+        writer.latch.open();guard await r.finish(self,stop) else {return}
+        XCTAssertEqual(r.controller.applicationState,.retiredPermissionUnknown);XCTAssertEqual(backend.stops,1);XCTAssertFalse(writer.latch.timedOut)
+        guard await r.detach(self) else {return}
+    }
+    @MainActor func testPageAndWindowRevocationRequireFreshApplicationConsent() async throws {
+        for window in [false,true] {
+            for validationHeld in [false,true] {
+                let r = try HubApplicationRig();defer {r.release()}
+                guard await r.open(self) else {return}
+                XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+                let challenge = try XCTUnwrap(r.controller.prepareApplicationStart())
+                if validationHeld {r.validation = HubOwnedLatch();r.validationEntered = expectation(description:"app validation actually entered")}
+                r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true)
+                if validationHeld {guard let entry = r.validationEntered,await r.observe(self,[entry]) else {return}}
+                else {guard await r.drain(self),let backend = r.backends.first,await r.observe(self,[backend.entered]) else {return}}
+                let backend = try XCTUnwrap(r.backends.first)
+                XCTAssertFalse(r.controller.acceptSourceChoice(.microphone))
+                if window {r.controller.windowClosed()} else {r.controller.leavePage()}
+                XCTAssertNil(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true)
+                if !validationHeld {
+                    guard await r.observe(self,[backend.stopRequested]) else {return}
+                    XCTAssertFalse(try XCTUnwrap(backend.ingress).facts.open);XCTAssertTrue(try XCTUnwrap(backend.ingress).facts.bodyEntered)
+                }
+                let drain = r.operation { [controller = r.controller] in await controller.drainActions();return true }
+                guard await r.observe(self,[drain.entered]) else {return};XCTAssertNil(drain.result)
+                if validationHeld {r.validation?.open()}
+                else {backend.bodyExit.open();backend.cleanup.open();guard await r.joinedActual(self,backend) else {return}}
+                guard await r.finish(self,drain) else {return}
+                XCTAssertEqual(backend.starts,validationHeld ? 0 : 1);XCTAssertEqual(r.factories,1)
+                guard await r.open(self) else {return}
+                r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true);XCTAssertEqual(r.factories,1)
+                if validationHeld {
+                    let fresh = try XCTUnwrap(r.controller.prepareApplicationStart());XCTAssertNotEqual(fresh.pageLifetime,challenge.pageLifetime)
+                    r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:false)
+                } else {XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertNotNil(r.controller.model.metadata)}
+                guard await r.detach(self) else {return}
+            }
+        }
+    }
+    @MainActor func testQuitRestartUpdaterJoinApplicationActualWorkWithoutRevival() async throws {
+        enum Trigger: CaseIterable {case quit,quitAccept,restart,restartAccept,updater,updaterAccept}
+        for trigger in Trigger.allCases {
+            let r = try HubApplicationRig();defer {r.release()};guard await r.start(self),let backend = r.backends.first else {return}
+            let writerEntered = expectation(description:"trigger-owned application writer entered")
+            let writer = HubCheckpointHold(entered:writerEntered,match:{$0 == "write" && $1?.hasSuffix(".source.pending") == true})
+            defer {writer.latch.open();r.bottom.observe = nil};r.heldGates.append(writer.latch);r.bottom.observe = writer.observe
+            var operation: HubApplicationOperation?, termination: TerminationCoordinator?, replies: [Bool] = []
+            var fixture: HubRestartFixture?, saved: SavedAudioImportOwner?, claims = 0, releases = 0
+            let reservation = ImportRestartReservation()
+            let quitReply = trigger == .quitAccept ? expectation(description:"actual termination reply after application retirement") : nil
+            switch trigger {
+            case .quit,.quitAccept:
+                let value = TerminationCoordinator(clipboard:{$0(true)},updater:{$0(trigger == .quitAccept)},meeting:{r.controller.beginShutdown($0)},
+                    cancelMeeting:{r.controller.cancelShutdown()},cancelClipboard:{},cancelUpdater:{},reply:{replies.append($0);quitReply?.fulfill()},failure:{},
+                    onIntent:{r.controller.reserveShutdown()})
+                termination = value;XCTAssertEqual(value.request(),trigger == .quitAccept ? .terminateLater : .terminateCancel)
+            case .restart,.restartAccept:
+                XCTAssertTrue(r.controller.reserveRestart())
+                operation = r.operation { [controller = r.controller] in await controller.drainRestart() }
+            case .updater,.updaterAccept:
+                let root = try HubRestartFixture();fixture = root;r.auxiliaryRoots.append(root.root)
+                let imports = SavedAudioImportOwner(root:root.root.appendingPathComponent("saved-imports"));saved = imports
+                let apple = AppleOwnerRig(),local = LocalCleanupAdmission(),experimental = ExperimentalHistoryRetryOwner()
+                let parakeet = ParakeetPreparation(inputs:.closed,storage:.init(root:root.root.appendingPathComponent("unused-parakeet")),
+                    trust:.init(host:{XCTFail("app restart queried host")},read:{_,_ in XCTFail("app restart read trust");throw MeetingSession.Failure.unavailable},
+                        signature:{_,_ in XCTFail("app restart queried signature")}),app:URL(fileURLWithPath:"/virtual/unused-app"),
+                    worker:.init(launch:{_ in XCTFail("app restart launched helper");throw MeetingSession.Failure.unavailable}))
+                operation = r.operation {
+                    await imports.drain()
+                    return await AppDelegate.withSavedImportRestart(imports,parakeet:parakeet,apple:apple.owner,local:local,experimental:experimental,
+                        chain:{nil},reservation:reservation,meeting:r.controller,releaseClaim:{releases += 1;XCTAssertTrue(r.controller.restartReady())},claim:{
+                            claims += 1;XCTAssertTrue(r.controller.restartReady());XCTAssertTrue(r.bottom.descriptors.isEmpty);return trigger == .updaterAccept
+                        })
+                }
+            }
+            // No generic Stop precedes the trigger-specific acquisition/fence observation.
+            guard await r.observe(self,[backend.stopRequested]) else {return}
+            let ingress = try XCTUnwrap(backend.ingress)
+            XCTAssertFalse(ingress.facts.open);XCTAssertTrue(ingress.facts.bodyEntered);XCTAssertFalse(backend.didComplete)
+            XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertFalse(r.controller.acceptSourceChoice(.microphone))
+            if let operation {guard await r.observe(self,[operation.entered]) else {return};XCTAssertNil(operation.result)}
+            if trigger == .restart {r.controller.releaseRestart();XCTAssertFalse(r.controller.restartReady());XCTAssertFalse(r.controller.reserveRestart())}
+            backend.bodyExit.open();guard await r.observe(self,[backend.cleanupEntered]) else {return}
+            XCTAssertFalse(ingress.facts.ended);XCTAssertEqual(r.controller.applicationState,.retiring)
+            backend.cleanup.open();guard await r.joinedActual(self,backend),await r.observe(self,[writerEntered]) else {return}
+            XCTAssertNil(operation?.result);XCTAssertFalse(r.controller.restartReady());writer.latch.open()
+            if let operation {guard await r.finish(self,operation) else {return};XCTAssertEqual(operation.result,trigger == .updaterAccept || trigger == .restartAccept)}
+            if trigger == .quitAccept {
+                let reply = try XCTUnwrap(quitReply)
+                guard await r.observe(self,[reply]) else {return}
+                XCTAssertEqual(replies,[true]);r.controller.releaseRestart()
+            }
+            if trigger == .restartAccept {XCTAssertTrue(r.controller.restartReady());r.controller.releaseRestart()}
+            if trigger == .updaterAccept {
+                XCTAssertTrue(reservation.isHeld);XCTAssertTrue(r.controller.restartReady());XCTAssertEqual(releases,0)
+                reservation.release();reservation.release();XCTAssertEqual(releases,1);XCTAssertFalse(r.controller.restartReady())
+            }
+            guard await r.state(self,{$0.state == .detached && !$0.busy}) else {return}
+            XCTAssertEqual(r.controller.applicationState,.retiredPermissionUnknown);XCTAssertEqual(backend.starts,1);XCTAssertEqual(replies,trigger == .quitAccept ? [true] : [])
+            if trigger == .updater || trigger == .updaterAccept {
+                XCTAssertEqual(claims,1);XCTAssertEqual(releases,trigger == .updaterAccept ? 1 : 0);XCTAssertFalse(reservation.isHeld)
+                if let saved,let fixture {try saved.store.close();try fixture.removeAfterClose();r.auxiliaryRoots.removeAll()}
+            }
+            withExtendedLifetime(termination) {}
+            r.controller.releaseRestart();guard await r.open(self) else {return}
+            XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertEqual(r.factories,1)
+            guard await r.detach(self) else {return}
+            XCTAssertFalse(writer.latch.timedOut)
+        }
+        let receipt = ImportRestartReservation();var order: [String] = []
+        receipt.retain(["parakeet","apple","local","experimental","saved","meeting","claim"].map {name in {order.append(name)}})
+        receipt.release();receipt.release();XCTAssertEqual(order,["claim","meeting","saved","experimental","local","apple","parakeet"])
+    }
+    @MainActor func testApplicationDeleteExpiryAndColdMetadataNeverRestartCapture() async throws {
+        for expiry in [false,true] {
+            let r = try HubApplicationRig();defer {r.release()};guard await r.start(self),let backend = r.backends.first else {return}
+            r.controller.stopAndSave();backend.bodyExit.open();backend.cleanup.open()
+            guard await r.joinedActual(self,backend),await r.drain(self),await r.detach(self),await r.open(self) else {return}
+            XCTAssertEqual(r.factories,1);XCTAssertNil(r.controller.prepareApplicationStart())
+            let unlinked = expectation(description:"application saved source unlink actually entered")
+            let held = HubCheckpointHold(entered:unlinked,match:{$0 == "unlink" && $1?.hasSuffix(".source.wav") == true})
+            defer {held.latch.open();r.bottom.observe = nil};r.heldGates.append(held.latch);r.bottom.observe = held.observe
+            if expiry {r.clock = try XCTUnwrap(r.controller.model.metadata).expires;r.controller.openPage()}
+            else {let deletion = try XCTUnwrap(r.controller.deleteConfirmation);r.controller.deleteConfirmed(session:deletion.session,intent:deletion.intent)}
+            guard await r.observe(self,[unlinked]) else {return}
+            XCTAssertTrue(r.bottom.events.contains {$0.0 == "intent-durable"})
+            XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertEqual(r.factories,1)
+            r.controller.reserveShutdown();let draining = r.operation { [controller = r.controller] in await controller.drainRestart() }
+            guard await r.observe(self,[draining.entered]) else {return};XCTAssertNil(draining.result)
+            held.latch.open();guard await r.finish(self,draining) else {return}
+            XCTAssertEqual(draining.result,true);XCTAssertEqual(r.factories,1);XCTAssertFalse(held.latch.timedOut);XCTAssertTrue(r.bottom.descriptors.isEmpty)
+        }
+    }
+    @MainActor func testApplicationUnknownOwnedCleanupRetainsExactPortWithoutJoining() async throws {
+        let r = try HubApplicationRig();defer {r.release()};r.unknownRetirement = true
+        guard await r.start(self),let backend = r.backends.first else {return}
+        r.controller.reserveShutdown();r.controller.releaseRestart()
+        guard await r.observe(self,[backend.stopRequested]) else {return}
+        backend.bodyExit.open();backend.cleanup.open()
+        // Intentionally no source-completion observer, task.value, drainActions or teardown drain.
+        guard await r.state(self,{$0.state == .unavailable}) else {return}
+        XCTAssertEqual(r.controller.applicationState,.heldOrUnavailable)
+        XCTAssertFalse(r.controller.restartReady());XCTAssertNil(r.controller.prepareApplicationStart())
+        XCTAssertFalse(r.controller.acceptSourceChoice(.microphone));XCTAssertEqual(r.factories,1);XCTAssertEqual(backend.starts,1)
+        XCTAssertFalse(try XCTUnwrap(backend.ingress).facts.producerFinished)
+        HubApplicationFailureResources.retain(r) // deliberate unknown disposition retains exact owner/port/tasks
+    }
+}
+
+extension MeetingHubCompositionTests {
+    @MainActor func testInjectedIngressLossAndDuplicateEvidenceOnlyRetireTheFrozenRun() async throws {
+        let r = try HubApplicationRig();defer {r.release()};guard await r.start(self),let backend = r.backends.first else {return}
+        let consent = try XCTUnwrap(r.attempts.first?.consent),ingress = try XCTUnwrap(backend.ingress)
+        // Scalar injected loss reaches the accepted ingress observer. Detection of native
+        // route/format/permission loss remains in the unchanged Core, not in this fake.
+        ingress.revoke()
+        guard await r.observe(self,[backend.stopRequested]) else {return}
+        XCTAssertFalse(ingress.facts.open);XCTAssertTrue(ingress.facts.bodyEntered);XCTAssertEqual(try backend.latePCM(),0)
+        r.controller.applicationSourceInvalidated(consent);r.controller.applicationSourceInvalidated(consent)
+        r.controller.whisperPreparationChanged(UUID());r.controller.focusChanged()
+        XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertEqual(r.factories,1);XCTAssertFalse(backend.didComplete)
+        backend.bodyExit.open();backend.cleanup.open()
+        guard await r.joinedActual(self,backend),await r.drain(self) else {return}
+        XCTAssertEqual(r.controller.applicationState,.retiredPermissionUnknown)
+        r.controller.applicationSourceInvalidated(consent);XCTAssertEqual(r.factories,1)
+        XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertEqual(backend.starts,1)
+        guard await r.detach(self) else {return}
+    }
+}
+
+extension MeetingHubCompositionTests {
+    @MainActor func testApplicationDeleteAndImmediateDeadlineRevokeBeforeActualSourceExit() async throws {
+        for expiry in [false,true] {
+            let r = try HubApplicationRig();defer {r.release()};guard await r.open(self) else {return}
+            XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+            let durable = expectation(description:"application delete intent is durable while source remains held")
+            let intent = HubCheckpointHold(entered:durable,match:{ operation,_ in operation == "intent-durable" })
+            defer {intent.latch.open();r.bottom.observe = nil};r.heldGates.append(intent.latch);r.bottom.observe = intent.observe
+            if expiry {
+                let expires = r.clock + MeetingSession.lifetime
+                var reads = 0
+                r.wallOverride = {
+                    reads += 1
+                    if reads == 1 {return expires} // arm the existing single deadline with zero remaining delay
+                    r.clock = expires;return expires // expiry evaluation observes the same frozen time
+                }
+            }
+            let factory = expectation(description:"exact application factory entered");r.factoryEntered = factory
+            let challenge = try XCTUnwrap(r.controller.prepareApplicationStart())
+            r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true)
+            guard await r.observe(self,[factory]),let backend = r.backends.first,await r.observe(self,[backend.entered]) else {return}
+            if !expiry {
+                guard await r.drain(self) else {return}
+                let delete = try XCTUnwrap(r.controller.deleteConfirmation)
+                r.controller.deleteConfirmed(session:delete.session,intent:delete.intent)
+            }
+            guard await r.observe(self,[backend.stopRequested,durable]) else {return}
+            let ingress = try XCTUnwrap(backend.ingress)
+            XCTAssertFalse(ingress.facts.open);XCTAssertTrue(ingress.facts.bodyEntered);XCTAssertEqual(try backend.latePCM(),0)
+            XCTAssertFalse(backend.didComplete);XCTAssertNil(r.controller.prepareApplicationStart());XCTAssertFalse(r.controller.acceptSourceChoice(.microphone))
+            let deleting = r.operation { [controller = r.controller] in await controller.drainActions();return true }
+            guard await r.observe(self,[deleting.entered]) else {return};XCTAssertNil(deleting.result)
+            intent.latch.open();backend.bodyExit.open();guard await r.observe(self,[backend.cleanupEntered]) else {return}
+            XCTAssertFalse(backend.didComplete);XCTAssertNil(deleting.result)
+            backend.cleanup.open();guard await r.joinedActual(self,backend),await r.finish(self,deleting) else {return}
+            XCTAssertNil(r.controller.model.metadata);XCTAssertEqual(r.factories,1);XCTAssertFalse(intent.latch.timedOut)
+            XCTAssertFalse(r.bottom.events.contains {$0.0 == "write" && $0.1?.hasSuffix(".source.pending") == true},"revoked unsubmitted tail cannot be published")
+            let fresh = try XCTUnwrap(r.controller.prepareApplicationStart());XCTAssertNotEqual(challenge.id,fresh.id)
+            r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:false)
+            guard await r.detach(self) else {return}
+        }
+    }
+}

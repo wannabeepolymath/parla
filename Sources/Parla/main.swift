@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         selectionEpoch:job.context.selectionEpoch,preparationEpoch:job.context.preparationEpoch)
                 })
             if let next { self.processTask = next }; return next
-        },diagnostics:.shared,security:{ OriginalCopyController.currentSecurity() == .safe },copy:HubModel.writeExplicitCopy,wall:wall))
+        },diagnostics:.shared,security:{ OriginalCopyController.currentSecurity() == .safe },copy:HubModel.writeExplicitCopy,wall:wall,applicationCapability:.unavailable,application:{ _ in .unavailable }))
     }
     /// Resource-free owner is created eagerly; all execution uses this app's existing owners.
     private func configureGuidedTemplates() {

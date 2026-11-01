@@ -20,7 +20,15 @@ final class HubOwnedLatch: @unchecked Sendable {
         watchdog = item; DispatchQueue.global().asyncAfter(deadline:.now()+5,execute:item)
     }
     func wait() async { await withCheckedContinuation { c in let immediate = lock.withLock { () -> Bool in enteredValue = true; if opened { return true }; waiters.append(c); return false }; if immediate { c.resume() } } }
-    func hold() { let wait = lock.withLock { () -> Bool in enteredValue = true; return !opened }; if wait { _ = semaphore.wait(timeout:.now()+5) } }
+    func hold() {
+        let wait = lock.withLock { () -> Bool in enteredValue = true; return !opened }
+        if wait, semaphore.wait(timeout:.now()+5) == .timedOut {
+            // The wait result is sticky even if open() beat the delayed watchdog.
+            lock.withLock { timedOutValue = true }
+            XCTFail("Owned latch synchronous wait exceeded five seconds")
+            open()
+        }
+    }
     func open() {
         let result = lock.withLock { () -> (Bool,[CheckedContinuation<Void,Never>]) in if opened { return (false,[]) }; opened = true; let all = waiters; waiters.removeAll(); return (true,all) }
         guard result.0 else { return }; watchdog?.cancel(); semaphore.signal(); result.1.forEach { $0.resume() }
@@ -51,7 +59,9 @@ final class HubSavedSettings: @unchecked Sendable {
     var securityAllowed = true, literalText: String? = "Literal raw text\nkept verbatim."
     var onCopy: (() -> Void)?, controllerWall: (() throws -> Int64)?
     let selectedEpoch = UUID()
-    init(capability: Bool = true,bottom: LifecycleMeetingBottom = LifecycleMeetingBottom()) throws {
+    init(capability: Bool = true,bottom: LifecycleMeetingBottom = LifecycleMeetingBottom(),
+         applicationCapability: MeetingHubController.ApplicationCapability = .unavailable,
+         application: @escaping (MeetingHubController.ApplicationAttempt) -> MeetingHubController.ApplicationFactoryResult = { _ in .unavailable }) throws {
         self.bottom = bottom
         let settings = settings
         store = SettingsStore(url:URL(fileURLWithPath:"/virtual/meeting-settings.json"),credentials:CredentialStore(backend:HubRefusingCredentials()),
@@ -96,7 +106,7 @@ final class HubSavedSettings: @unchecked Sendable {
                 return RecognitionHandle(owner:RecognitionResident(request:request,identity:identity,instance:UUID(),client:client),capture:UUID())
             })
             if let next { processTask = next }; return next
-        },diagnostics:DiagnosticStore(),security:{[unowned self] in securityAllowed},copy:{[unowned self] in onCopy?(); copies.append($0)},wall:{[unowned self] in try controllerWall?() ?? clock}))
+        },diagnostics:DiagnosticStore(),security:{[unowned self] in securityAllowed},copy:{[unowned self] in onCopy?(); copies.append($0)},wall:{[unowned self] in try controllerWall?() ?? clock},applicationCapability:applicationCapability,application:application))
     }
     func release() { pendingPermission?(false); pendingPermission = nil; queueGate?.open(); consumerGate?.open(); converter.drainGate?.open(); controller.stopAndSave() }
     func changedSettings() { NotificationCenter.default.post(name:SettingsStore.configurationDidChange,object:store) }
@@ -320,5 +330,361 @@ extension MeetingHubControllerTests {
         r.controller.deleteConfirmed(session:confirmation.session,intent:confirmation.intent)
         guard await hubComplete({await r.controller.drainActions()}) else {return}
         XCTAssertNil(r.controller.model.metadata);XCTAssertTrue(r.bottom.descriptors.isEmpty);XCTAssertFalse(held.latch.timedOut)
+    }
+}
+
+// C1 injected source contract. No live CorePort/default recorder/native permission fake.
+@MainActor final class HubApplicationBackend {
+    let binding: SelectedApplicationBinding
+    let stopped = HubOwnedLatch(), bodyExit = HubOwnedLatch(), cleanup = HubOwnedLatch()
+    let entered = XCTestExpectation(description:"application actual source body entered")
+    let stopRequested = XCTestExpectation(description:"exact application port stop entered")
+    let cleanupEntered = XCTestExpectation(description:"actual application cleanup entered")
+    let completed = XCTestExpectation(description:"actual application task returned after EOS")
+    var forwarded: Task<Void,Never>?
+    private(set) var task: Task<Void,Never>?, completionObserver: Task<Void,Never>?, ingress: MeetingAudioIngress?, body: MeetingAudioIngress.Body?
+    private(set) var checks = 0, contextChecks = 0, starts = 0, stops = 0, didComplete = false
+    private(set) var context: MeetingAudioIngress.Context?, initialFacts: MeetingAudioIngress.Facts?, error: Error?
+    var notStarted = false, unknownRetirement = false
+    init(_ binding: SelectedApplicationBinding) { self.binding = binding }
+    var port: MeetingSelectedApplicationCapture.CorePort {
+        .init(validate:{ [self] value in
+            checks += 1
+            return value.valid && value == binding && value.label.utf8.elementsEqual(binding.label.utf8) &&
+                value.bundleID.utf8.elementsEqual(binding.bundleID.utf8) && value.bundlePath.utf8.elementsEqual(binding.bundlePath.utf8) &&
+                value.executablePath.utf8.elementsEqual(binding.executablePath.utf8)
+        },validateContext:{ [self] value,context in
+            contextChecks += 1; self.context = context; return value.matches(context)
+        },start:{ [self] value,ingress in
+            starts += 1; self.ingress = ingress; initialFacts = ingress.facts
+            XCTAssertEqual(value,binding)
+            guard !notStarted else { return .notStarted }
+            do {
+                let first = try ingress.enter()
+                let samples: [Float] = [-1,0.5,0,1]
+                _ = try samples.withUnsafeBufferPointer { try ingress.receive(first,canonical:$0,input:.init(rate:16_000,channels:1,frames:4)) }
+                try ingress.leave(first); body = try ingress.enter()
+            } catch { self.error = error; return .notStarted }
+            // This exact task is the producer; no wrapper substitutes for its body/cleanup/EOS.
+            let actual = Task { @MainActor [self] in
+                entered.fulfill()
+                await stopped.wait(); await bodyExit.wait()
+                do { if let body { try ingress.leave(body); self.body = nil } } catch { self.error = error }
+                cleanupEntered.fulfill(); await cleanup.wait()
+                do { if !unknownRetirement { _ = try ingress.end(ingress.fence(),tail:UnsafeBufferPointer<Float>(start:nil,count:0)) } }
+                catch { self.error = error }
+            }
+            task = actual
+            if !unknownRetirement {
+                // Receipt-only observation AFTER the unchanged actual task returns.
+                completionObserver = Task { [self] in await actual.value;didComplete = true;completed.fulfill() }
+            }
+            return .actual(.init(task:actual,requestStop:{ [self] in
+                stops += 1; ingress.fence(); stopped.open()
+                if stops == 1 { stopRequested.fulfill() }
+            }))
+        })
+    }
+    func release() { ingress?.fence(); stopped.open(); bodyExit.open(); cleanup.open() }
+    var timedOut: Bool { stopped.timedOut || bodyExit.timedOut || cleanup.timedOut }
+    func latePCM() throws -> Int {
+        let ingress = try XCTUnwrap(ingress), body = try XCTUnwrap(body)
+        return try [Float(1)].withUnsafeBufferPointer { try ingress.receive(body,canonical:$0,input:.init(rate:16_000,channels:1,frames:1)) }
+    }
+}
+
+@MainActor final class HubApplicationOperation {
+    let entered = XCTestExpectation(description:"application controller operation entered")
+    let completed = XCTestExpectation(description:"application controller operation returned")
+    private(set) var task: Task<Void,Never>?, observer: Task<Void,Never>?, result: Bool?
+    init(_ action: @escaping @MainActor () async -> Bool) {
+        let actual = Task { [self] in entered.fulfill();result = await action() }
+        task = actual
+        observer = Task { [self] in await actual.value;completed.fulfill() }
+    }
+}
+@MainActor enum HubApplicationFailureResources {
+    // Fixed suite creates fewer than 48 application fixtures. Failure retention never starts another drain.
+    private(set) static var fixtures: [HubApplicationRig] = []
+    private(set) static var microphoneFixtures: [MeetingHubRig] = []
+    static func retainMicrophone(_ rig: MeetingHubRig) {
+        guard !microphoneFixtures.contains(where:{$0 === rig}) else {return}
+        precondition(microphoneFixtures.count < 4);microphoneFixtures.append(rig)
+    }
+    static func retain(_ rig: HubApplicationRig) {
+        guard !fixtures.contains(where:{$0 === rig}) else { return }
+        precondition(fixtures.count < 48); fixtures.append(rig)
+    }
+}
+@MainActor final class HubApplicationRig {
+    let controller = MeetingHubController(), bottom: LifecycleMeetingBottom, settings = HubSavedSettings(), store: SettingsStore
+    private(set) var factories = 0, stores = 0, settingsReads = 0, clockReads = 0
+    private(set) var attempts: [MeetingHubController.ApplicationAttempt] = [], backends: [HubApplicationBackend] = []
+    private(set) var adapters: [MeetingSelectedApplicationCapture] = [], operations: [HubApplicationOperation] = []
+    var factoryEntered: XCTestExpectation?, heldGates: [HubOwnedLatch] = []
+    var validation: HubOwnedLatch?, validationEntered: XCTestExpectation?, factoryUnavailable = false, notStarted = false
+    var unknownRetirement = false, allowSettingsEvent = false, auxiliaryRoots: [URL] = []
+    enum BindingMutation {case none,source,generation,epoch,label}
+    var bindingMutation = BindingMutation.none, clock: Int64 = 1_000_000_000_000, wallOverride: (() throws -> Int64)?
+    init(capability: Bool = true,applicationCapability: MeetingHubController.ApplicationCapability = .injectedContractOnly,
+         bottom: LifecycleMeetingBottom = LifecycleMeetingBottom()) throws {
+        self.bottom = bottom; bottom.retainSourceBytes = true
+        let saved = settings
+        store = SettingsStore(url:URL(fileURLWithPath:"/virtual/application-contract-settings.json"),credentials:CredentialStore(backend:HubRefusingCredentials()),
+            scratchpadIO:.init(read:{_ in XCTFail("scratchpad read");return nil},write:{_,_ in XCTFail("scratchpad write")}),
+            documentIO:.init(read:{try JSONEncoder().encode(saved.current)}),atomicWrite:{_,_ in XCTFail("settings write")})
+        controller.bind(.init(captureCapability:capability,makeStore:{ [unowned self] in
+            stores += 1; return MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{ [unowned self] in clock })
+        },microphone:{ _ in XCTFail("application branch reached microphone factory"); return .init(validate:{_ in false},start:{s,_ in .init(source:s.instance,exit:.notStarted)},requestStop:{}) },
+        resolveInput:{_ in XCTFail("application branch resolved microphone");throw MeetingSession.Failure.unavailable},
+        authorization:{XCTFail("application branch queried microphone permission");return .denied},
+        requestAccess:{_ in XCTFail("application branch requested microphone access")},openPrivacy:{XCTFail("application branch opened microphone privacy")},
+        settings:{ [unowned self] in settingsReads += 1; if !allowSettingsEvent { XCTFail("application branch read microphone settings") };return settings.current },
+        settingsObject:store,selectionEpoch:{XCTFail("capture queried recognition selection");return UUID()},
+        enqueue:{_ in XCTFail("capture enqueued recognition");return nil},diagnostics:DiagnosticStore(),security:{false},copy:{_ in XCTFail("capture copied text")},
+        wall:{ [unowned self] in clockReads += 1;return try wallOverride?() ?? clock },applicationCapability:applicationCapability,application:{ [unowned self] attempt in
+            factories += 1; attempts.append(attempt)
+            if factoryUnavailable { return .unavailable }
+            let b = attempt.binding
+            let binding = SelectedApplicationBinding(selection:b.selection,source:bindingMutation == .source ? UUID() : b.source,
+                sourceGeneration:bindingMutation == .generation ? b.sourceGeneration+1 : b.sourceGeneration,
+                captureEpoch:bindingMutation == .epoch ? UUID() : b.captureEpoch,pid:b.pid,launchNanoseconds:b.launchNanoseconds,
+                bundleID:b.bundleID,bundlePath:b.bundlePath,executablePath:b.executablePath,label:bindingMutation == .label ? "Cafe\u{301}" : b.label)
+            let backend = HubApplicationBackend(binding); backend.notStarted = notStarted; backend.unknownRetirement = unknownRetirement; backends.append(backend);factoryEntered?.fulfill()
+            let adapter = MeetingSelectedApplicationCapture(binding:binding,core:backend.port,enabled:true); adapters.append(adapter)
+            let port = adapter.port
+            return .injected(.init(validate:{ [unowned self] selection in
+                if let validation { validationEntered?.fulfill(); await validation.wait() }
+                return await port.validate(selection)
+            },start:{ selection,ingress in
+                let producer = port.start(selection,ingress)
+                if case .actual(let actual) = producer.exit {
+                    backend.forwarded = actual
+                    XCTAssertEqual(actual,backend.task,"accepted adapter must return the exact actual task")
+                }
+                return producer
+            },requestStop:port.requestStop))
+        }))
+    }
+    func release() {
+        if !gatesHealthy || controller.model.busy || backends.contains(where:{$0.task != nil && !$0.didComplete}) || operations.contains(where:{$0.result == nil}) {
+            HubApplicationFailureResources.retain(self)
+        }
+        validation?.open();heldGates.forEach {$0.open()};backends.forEach { $0.release() }
+    }
+    func operation(_ action: @escaping @MainActor () async -> Bool) -> HubApplicationOperation {
+        precondition(operations.count < 16); let value = HubApplicationOperation(action); operations.append(value); return value
+    }
+    private var gatesHealthy: Bool {validation?.timedOut != true && !heldGates.contains(where:{$0.timedOut}) && !backends.contains(where:{$0.timedOut})}
+    func observe(_ test: XCTestCase,_ expectations: [XCTestExpectation]) async -> Bool {
+        let result = await XCTWaiter.fulfillment(of:expectations,timeout:4)
+        guard result == .completed,gatesHealthy else { XCTFail("No bounded application observation or watchdog fired; retained without a teardown join");HubApplicationFailureResources.retain(self);return false }
+        return true
+    }
+    func finish(_ test: XCTestCase,_ operation: HubApplicationOperation) async -> Bool {
+        let exact = operation.task
+        guard await observe(test,[operation.completed]),operation.result != nil,let exact,operation.task == exact else {
+            XCTFail("No matching observed operation return; refusing final join");HubApplicationFailureResources.retain(self);return false
+        }
+        await exact.value; return true // exact identity AND observed return precede this join
+    }
+    func drain(_ test: XCTestCase) async -> Bool {
+        await finish(test,operation { [controller] in await controller.drainActions();return true })
+    }
+    func open(_ test: XCTestCase) async -> Bool { controller.openPage();return await drain(test) }
+    func start(_ test: XCTestCase,snapshot: MeetingHubController.ApplicationSnapshot = hubApplicationSnapshot()) async -> Bool {
+        guard await open(test) else { return false }
+        guard controller.acceptSourceChoice(.selectedApplication(snapshot)),let challenge = controller.prepareApplicationStart() else {XCTFail("No pure challenge after open");return false}
+        controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true)
+        guard await drain(test) else {return false}
+        guard let backend = backends.last else {XCTFail("No injected backend on affirmative Start");HubApplicationFailureResources.retain(self);return false}
+        return await observe(test,[backend.entered])
+    }
+    func joinedActual(_ test: XCTestCase,_ backend: HubApplicationBackend) async -> Bool {
+        guard await observe(test,[backend.completed]),backend.didComplete,let actual = backend.task,backend.forwarded == actual else {
+            XCTFail("No matching observed actual source return; refusing final join");HubApplicationFailureResources.retain(self);return false
+        }
+        await actual.value
+        guard !backend.timedOut,backend.error == nil else {XCTFail("Source cleanup was not successful");HubApplicationFailureResources.retain(self);return false}
+        return true
+    }
+    func state(_ test: XCTestCase,_ predicate: @escaping (HubMeetingModel) -> Bool) async -> Bool {
+        let emitted = XCTestExpectation(description:"application controller emitted exact lifecycle state")
+        var seen = false
+        let sub = controller.$model.sink { value in if !seen && predicate(value) { seen = true; emitted.fulfill() } }
+        defer { sub.cancel() };return await observe(test,[emitted])
+    }
+    func detach(_ test: XCTestCase) async -> Bool {
+        controller.reserveShutdown()
+        let operation = operation { [controller] in await controller.drainRestart() }
+        guard await finish(test,operation) else { return false }
+        XCTAssertEqual(operation.result,true); controller.releaseRestart(); return operation.result == true
+    }
+}
+func hubApplicationSnapshot(selection: UUID = UUID(),revision: UUID = UUID(),pid: Int32 = 123,launch: Int64 = 7,
+    bundle: String = "example.application",bundlePath: String = "/Applications/Example.app",
+    executable: String = "/Applications/Example.app/Contents/MacOS/Example",label: String = "Literal application") -> MeetingHubController.ApplicationSnapshot {
+    .init(selectionID:selection,revision:revision,pid:pid,launchNanoseconds:launch,bundleID:bundle,bundlePath:bundlePath,executablePath:executable,label:label)
+}
+
+extension MeetingHubControllerTests {
+    @MainActor func testFrozenSourceConstructionRenderAndDefaultOffQueryNothing() async throws {
+        for gates in [(false,MeetingHubController.ApplicationCapability.injectedContractOnly),(true,.unavailable)] {
+            let r = try HubApplicationRig(capability:gates.0,applicationCapability:gates.1);defer {r.release()}
+            let snapshot = hubApplicationSnapshot()
+            XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(snapshot)))
+            XCTAssertNil(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:UUID(),affirmed:true)
+            _ = r.controller.model;_ = r.controller.sourceChoice;_ = r.controller.applicationState
+            r.controller.startAndSave()
+            XCTAssertEqual(r.stores,0);XCTAssertEqual(r.bottom.calls,0);XCTAssertEqual(r.clockReads,0)
+            guard await r.open(self) else { return }
+            let calls = r.bottom.calls,clocks = r.clockReads
+            XCTAssertNil(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:UUID(),affirmed:true)
+            XCTAssertEqual(r.bottom.calls,calls);XCTAssertEqual(r.clockReads,clocks);XCTAssertEqual(r.factories,0);XCTAssertEqual(r.settingsReads,0)
+            XCTAssertEqual(r.controller.applicationState,.unavailable)
+            guard await r.detach(self) else { return }
+        }
+    }
+    @MainActor func testApplicationConsentIsExactSingleUseAndSourceSpecific() async throws {
+        let r = try HubApplicationRig();defer {r.release()};guard await r.open(self) else {return}
+        let a = hubApplicationSnapshot(),b = hubApplicationSnapshot(pid:124)
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(a)))
+        let calls = r.bottom.calls,clocks = r.clockReads
+        let first = try XCTUnwrap(r.controller.prepareApplicationStart()),replacement = try XCTUnwrap(r.controller.prepareApplicationStart())
+        XCTAssertEqual(r.bottom.calls,calls);XCTAssertEqual(r.clockReads,clocks);XCTAssertEqual(r.settingsReads,0)
+        XCTAssertNotEqual(first.id,replacement.id)
+        r.controller.confirmApplicationStart(challengeID:first.id,affirmed:true)
+        r.controller.confirmApplicationStart(challengeID:replacement.id,affirmed:true);XCTAssertEqual(r.factories,0)
+        let denied = try XCTUnwrap(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:denied.id,affirmed:false)
+        r.controller.confirmApplicationStart(challengeID:denied.id,affirmed:true);XCTAssertEqual(r.factories,0)
+        let old = try XCTUnwrap(r.controller.prepareApplicationStart())
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(b)));XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(a)))
+        let current = try XCTUnwrap(r.controller.prepareApplicationStart());XCTAssertNotEqual(old.sourceRevision,current.sourceRevision)
+        r.controller.confirmApplicationStart(challengeID:old.id,affirmed:true);XCTAssertEqual(r.factories,0)
+        let page = try XCTUnwrap(r.controller.prepareApplicationStart());r.controller.leavePage()
+        guard await r.drain(self),await r.open(self) else {return}
+        r.controller.confirmApplicationStart(challengeID:page.id,affirmed:true);XCTAssertEqual(r.factories,0)
+        let fresh = try XCTUnwrap(r.controller.prepareApplicationStart());XCTAssertNotEqual(page.pageLifetime,fresh.pageLifetime)
+        r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:true);r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:true)
+        guard await r.drain(self),let backend = r.backends.first,await r.observe(self,[backend.entered]) else {return}
+        XCTAssertEqual(r.factories,1);XCTAssertEqual(backend.starts,1);XCTAssertEqual(r.attempts.first?.consent.challenge,fresh)
+        r.controller.stopAndSave();backend.bodyExit.open();backend.cleanup.open()
+        guard await r.joinedActual(self,backend),await r.drain(self),await r.detach(self),await r.open(self) else {return}
+        XCTAssertNil(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:true)
+        XCTAssertEqual(r.factories,1);XCTAssertNotNil(r.controller.model.metadata)
+        guard await r.detach(self) else {return}
+    }
+    @MainActor func testSourceSnapshotBoundsAndMissingIncarnationRefuseBeforeFactory() async throws {
+        let r = try HubApplicationRig();defer {r.release()}
+        let invalid = [hubApplicationSnapshot(pid:0),hubApplicationSnapshot(pid:-1),hubApplicationSnapshot(launch:0),hubApplicationSnapshot(launch:-1),
+            hubApplicationSnapshot(bundle:""),hubApplicationSnapshot(bundle:String(repeating:"x",count:257)),hubApplicationSnapshot(bundle:"a\u{0}b"),
+            hubApplicationSnapshot(bundlePath:"relative"),hubApplicationSnapshot(bundlePath:"/a\nb"),hubApplicationSnapshot(bundlePath:"/"+String(repeating:"x",count:4096)),
+            hubApplicationSnapshot(executable:""),hubApplicationSnapshot(executable:"relative"),hubApplicationSnapshot(executable:"/a\tb"),
+            hubApplicationSnapshot(executable:"/"+String(repeating:"x",count:4096)),hubApplicationSnapshot(label:""),hubApplicationSnapshot(label:"a\r"),
+            hubApplicationSnapshot(label:String(repeating:"é",count:65))]
+        for value in invalid {XCTAssertFalse(r.controller.acceptSourceChoice(.selectedApplication(value)));XCTAssertNil(r.controller.prepareApplicationStart())}
+        let selection = UUID(),revision = UUID()
+        let composed = hubApplicationSnapshot(selection:selection,revision:revision,label:"Café")
+        let decomposed = hubApplicationSnapshot(selection:selection,revision:revision,label:"Cafe\u{301}")
+        XCTAssertNotEqual(composed,decomposed)
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot(bundle:String(repeating:"x",count:256),
+            bundlePath:"/"+String(repeating:"x",count:4095),executable:"/"+String(repeating:"x",count:4095),label:String(repeating:"é",count:64)))))
+        XCTAssertEqual(r.factories,0);XCTAssertEqual(r.stores,0);XCTAssertEqual(r.clockReads,0);XCTAssertEqual(r.bottom.calls,0)
+    }
+    @MainActor func testApplicationAdapterReceivesExactSourceEpochAndOneRoutePolicy() async throws {
+        let r = try HubApplicationRig();defer {r.release()};let snapshot = hubApplicationSnapshot(label:"Café")
+        guard await r.start(self,snapshot:snapshot),let backend = r.backends.first else {return}
+        let attempt = try XCTUnwrap(r.attempts.first),binding = attempt.binding,context = try XCTUnwrap(backend.context)
+        XCTAssertEqual(binding.selection,snapshot.selectionID);XCTAssertEqual(binding.pid,snapshot.pid);XCTAssertEqual(binding.launchNanoseconds,snapshot.launchNanoseconds)
+        XCTAssertTrue(binding.bundleID.utf8.elementsEqual(snapshot.bundleID.utf8));XCTAssertTrue(binding.bundlePath.utf8.elementsEqual(snapshot.bundlePath.utf8))
+        XCTAssertTrue(binding.executablePath.utf8.elementsEqual(snapshot.executablePath.utf8));XCTAssertTrue(binding.label.utf8.elementsEqual(snapshot.label.utf8))
+        XCTAssertEqual(binding.source,attempt.consent.source);XCTAssertEqual(binding.captureEpoch,attempt.consent.captureEpoch)
+        XCTAssertEqual(context.session,attempt.consent.session);XCTAssertEqual(context.source,binding.source);XCTAssertEqual(context.sourceGeneration,1)
+        XCTAssertEqual(context.segment,attempt.segment);XCTAssertEqual(context.epoch,binding.captureEpoch);XCTAssertGreaterThan(context.ownerGeneration,0)
+        XCTAssertEqual(backend.initialFacts?.slots,2);XCTAssertEqual(backend.initialFacts?.allocated,2);XCTAssertEqual(backend.initialFacts?.accepted,0)
+        XCTAssertEqual(backend.initialFacts?.rawBytes,1_920_088);XCTAssertEqual(backend.starts,1);XCTAssertEqual(backend.contextChecks,1)
+        XCTAssertEqual(r.controller.applicationState,.injectedRecording);XCTAssertEqual(r.controller.model.metadata?.selections.count,1)
+        XCTAssertEqual(r.controller.model.metadata?.selections.first?.kind,.selectedApplication)
+        r.controller.stopAndSave();backend.bodyExit.open();backend.cleanup.open()
+        guard await r.joinedActual(self,backend),await r.drain(self) else {return}
+        let ledger = try MeetingSession.Ledger.decode(r.bottom.metadata),chunk = try XCTUnwrap(ledger.chunks.first)
+        XCTAssertEqual(chunk.track,0);XCTAssertEqual(chunk.sourceGeneration,1);XCTAssertEqual(chunk.frames,4)
+        XCTAssertEqual(chunk.timing,.init(pts:0,denominator:1,sample:0,rate:16_000,epoch:binding.captureEpoch,mapping:.unknown))
+        let files = r.bottom.rootNode?.children.values.filter {$0.name.hasSuffix(".source.wav")} ?? []
+        XCTAssertEqual(files.count,1);let file = try XCTUnwrap(files.first),bytes = file.bytes(0,file.length)
+        let header: [UInt8] = [82,73,70,70,44,0,0,0,87,65,86,69,102,109,116,32,16,0,0,0,1,0,1,0,128,62,0,0,0,125,0,0,2,0,16,0,100,97,116,97,8,0,0,0]
+        XCTAssertEqual(bytes.count,52);XCTAssertEqual(Array(bytes.prefix(44)),header)
+        XCTAssertEqual(Array(bytes.dropFirst(44)),[0,128,0,64,0,0,255,127]);XCTAssertEqual(r.settingsReads,0)
+        XCTAssertEqual(r.controller.applicationState,.retiredPermissionUnknown)
+        guard await r.detach(self) else {return}
+        // The injected boundary has no route discovery: one port is not native route qualification.
+    }
+    @MainActor func testApplicationFactoryRefusalAndForeignSourceNeverAdmitSuccessor() async throws {
+        for mode in [0,1,2,3,4,5] {
+            let r = try HubApplicationRig();defer {r.release()};r.factoryUnavailable = mode == 0;r.notStarted = mode == 2
+            r.bindingMutation = mode == 1 ? .source : mode == 3 ? .generation : mode == 4 ? .label : mode == 5 ? .epoch : .none
+            guard await r.open(self) else {return};XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot(label:"Café"))))
+            let challenge = try XCTUnwrap(r.controller.prepareApplicationStart())
+            r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true)
+            guard await r.drain(self) else {return}
+            XCTAssertEqual(r.factories,1);XCTAssertEqual(r.settingsReads,0)
+            if mode != 2 && mode != 5 {XCTAssertNil(r.controller.model.metadata);XCTAssertEqual(r.backends.first?.starts ?? 0,0)}
+            else {XCTAssertNotNil(r.controller.model.metadata);XCTAssertNil(r.controller.prepareApplicationStart())}
+            if mode == 5 {
+                let backend = try XCTUnwrap(r.backends.first)
+                XCTAssertEqual(backend.starts,0);XCTAssertEqual(backend.contextChecks,1)
+                XCTAssertNotEqual(backend.context?.epoch,backend.binding.captureEpoch)
+            }
+            XCTAssertEqual(r.controller.applicationState,mode == 0 ? .unavailable : .refusedBeforeStart)
+            r.controller.confirmApplicationStart(challengeID:challenge.id,affirmed:true);XCTAssertEqual(r.factories,1)
+            guard await r.detach(self) else {return}
+        }
+    }
+    @MainActor func testSourceChangeRefusalAndObservedLossNeverRetarget() async throws {
+        let r = try HubApplicationRig();defer {r.release()};let snapshot = hubApplicationSnapshot()
+        guard await r.start(self,snapshot:snapshot),let backend = r.backends.first else {return}
+        let old = try XCTUnwrap(r.attempts.first?.consent)
+        for next in [hubApplicationSnapshot(pid:snapshot.pid,launch:snapshot.launchNanoseconds+1),hubApplicationSnapshot(executable:"/other"),hubApplicationSnapshot(),snapshot] {
+            XCTAssertFalse(r.controller.acceptSourceChoice(.selectedApplication(next)))
+        }
+        r.controller.applicationSourceInvalidated(old)
+        guard await r.observe(self,[backend.stopRequested]) else {return}
+        XCTAssertFalse(try XCTUnwrap(backend.ingress).facts.open);XCTAssertEqual(try backend.latePCM(),0);XCTAssertEqual(r.factories,1)
+        XCTAssertNil(r.controller.prepareApplicationStart());backend.bodyExit.open();backend.cleanup.open()
+        guard await r.joinedActual(self,backend),await r.drain(self) else {return}
+        let deletion = try XCTUnwrap(r.controller.deleteConfirmation);r.controller.deleteConfirmed(session:deletion.session,intent:deletion.intent)
+        guard await r.drain(self) else {return}
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+        let fresh = try XCTUnwrap(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:true)
+        guard await r.drain(self),let next = r.backends.last,await r.observe(self,[next.entered]) else {return}
+        let new = try XCTUnwrap(r.attempts.last?.consent)
+        XCTAssertNotEqual(old.source,new.source);XCTAssertNotEqual(old.captureEpoch,new.captureEpoch);XCTAssertNotEqual(old.session,new.session)
+        XCTAssertNotEqual(old.challenge.sourceRevision,new.challenge.sourceRevision)
+        r.controller.applicationSourceInvalidated(old);XCTAssertEqual(next.stops,0);XCTAssertTrue(try XCTUnwrap(next.ingress).facts.open)
+        XCTAssertEqual(r.factories,2);r.controller.stopAndSave();next.bodyExit.open();next.cleanup.open()
+        guard await r.joinedActual(self,next),await r.drain(self),await r.detach(self) else {return}
+    }
+}
+
+extension MeetingHubControllerTests {
+    @MainActor func testApplicationOwnerEpochAndOutputReviewAreIndependent() async throws {
+        let r = try HubApplicationRig();defer {r.release()};guard await r.open(self) else {return}
+        XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(hubApplicationSnapshot())))
+        let old = try XCTUnwrap(r.controller.prepareApplicationStart())
+        guard await r.detach(self),await r.open(self) else {return}
+        r.controller.confirmApplicationStart(challengeID:old.id,affirmed:true);XCTAssertEqual(r.factories,0)
+        let fresh = try XCTUnwrap(r.controller.prepareApplicationStart())
+        XCTAssertNotEqual(old.ownerEpoch,fresh.ownerEpoch);XCTAssertNotEqual(old.pageLifetime,fresh.pageLifetime)
+        // The explicit output-settings action can query settings; preparing/confirming capture cannot.
+        r.allowSettingsEvent = true;r.controller.savedConfigurationChanged();r.allowSettingsEvent = false
+        XCTAssertEqual(r.settingsReads,1)
+        r.controller.confirmApplicationStart(challengeID:fresh.id,affirmed:true)
+        guard await r.drain(self),let backend = r.backends.first,await r.observe(self,[backend.entered]) else {return}
+        XCTAssertEqual(r.attempts.first?.consent.challenge,fresh);XCTAssertEqual(r.controller.applicationState,.injectedRecording)
+        var settings = r.settings.current;settings.inputDeviceUID = "unrelated-output-review";r.settings.current = settings
+        r.allowSettingsEvent = true;r.controller.savedConfigurationChanged();r.allowSettingsEvent = false
+        XCTAssertEqual(backend.stops,0);XCTAssertTrue(try XCTUnwrap(backend.ingress).facts.open);XCTAssertEqual(r.factories,1)
+        r.controller.stopAndSave();backend.bodyExit.open();backend.cleanup.open()
+        guard await r.joinedActual(self,backend),await r.drain(self),await r.detach(self) else {return}
     }
 }
