@@ -118,4 +118,37 @@ final class ImportedPCMMOVConnectionTests: XCTestCase {
             XCTAssertEqual(calls,cut)
         }
     }
+    func testProfileMOVDispatchCompleteLiteralSamplesWithoutNativeConstruction() throws {
+        var values = 0, converters = 0
+        let lazy: () -> ImportedAudio.Native = {
+            values += 1
+            var native = ImportedAudio.Native()
+            native.make = { _, _ in converters += 1; XCTFail("MOV must never construct a converter"); return nil }
+            return native
+        }
+        let bytes = ProfileMOVBytes.make(), prefixed = Data([0xee, 0xff]) + bytes
+        let result = try ImportedAudio.decodeSource(prefixed.dropFirst(2), format: .mov, makeNative: lazy)
+        XCTAssertEqual(result.samples, ProfileMOVBytes.expected)
+        let facts = result.transientSourceInfo
+        XCTAssertEqual(facts.profile, .qtPCM16kV1); XCTAssertEqual(facts.origin, .directMOVPCM16k)
+        XCTAssertEqual(facts.encoding, "signed16LE"); XCTAssertEqual(facts.sourceRate, 16_000)
+        XCTAssertEqual(facts.sourceChannels, 1); XCTAssertEqual(facts.sourceFrames, 6_400)
+        XCTAssertEqual(facts.outputFrames, 6_400); XCTAssertEqual(facts.outputRate, 16_000)
+        XCTAssertEqual(facts.clippedSamples, 0)
+        XCTAssertEqual(values, 0); XCTAssertEqual(converters, 0)
+        for refused in [ProfileMOVBytes.make(valid: false), Data(bytes.dropLast())] {
+            XCTAssertThrowsError(try ImportedAudio.decodeSource(refused, format: .mov, makeNative: lazy))
+        }
+        var checkpoints = 0
+        _ = try ImportedAudio.decodeSource(bytes, format: .mov, canceled: { checkpoints += 1; return false }, makeNative: lazy)
+        for stop in 1...checkpoints {
+            var calls = 0
+            XCTAssertThrowsError(try ImportedAudio.decodeSource(bytes, format: .mov,
+                                                               canceled: { calls += 1; return calls == stop }, makeNative: lazy)) {
+                XCTAssertEqual($0 as? ImportedPCMMOV.Failure, .canceled)
+            }
+        }
+        XCTAssertEqual(values, 0); XCTAssertEqual(converters, 0)
+    }
+
 }

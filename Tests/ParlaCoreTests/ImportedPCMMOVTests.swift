@@ -65,6 +65,8 @@ private struct PCMOracle {
     var videoTicks: Int?
     var identityEdits = false
     var moovFirst = false
+    var wide = false
+    var topEdit: ((inout [PCMAtom]) -> Void)?
     var brandCount = 1
     var visualTail = Data([0, 0, 0, 9, 0x63, 0x68, 0x72, 0x6d, 0x7f])
     var videoByte: UInt8 = 0xa5
@@ -143,13 +145,64 @@ private struct PCMOracle {
             return result
         }
         let before = moovFirst ? movie(at: 0).bytes.count : 0
-        let base = brand.bytes.count + before + 8
+        let base = brand.bytes.count + before + (wide ? 8 : 0) + 8
         let moov = movie(at: base), mdat = PCMAtom("mdat", payload)
-        let atoms = moovFirst ? [brand, moov, mdat] : [brand, mdat, moov]
+        var atoms = moovFirst ? [brand, moov] : [brand]
+        if wide { atoms.append(PCMAtom("wide")) }
+        atoms.append(mdat)
+        if !moovFirst { atoms.append(moov) }
+        topEdit?(&atoms)
         var bytes = Data()
         for atom in atoms { bytes.append(atom.bytes) }
         return PCMFixture(bytes: bytes, audioOffsets: audioOffsets.map { base + $0 }, videoOffsets: videoOffsets.map { base + $0 },
                           payloadBytes: payload.count, boxCount: atoms.reduce(0) { $0 + $1.count })
+    }
+}
+
+// SoundDescriptionV2 authored from the complete Apple declaration, not a captured movie.
+private let pcmLPCMEntry = pcmTable + ["stsd", "lpcm"]
+private let pcmAlias = ["mdia", "minf", "dinf", "dref", "alis"]
+private func pcmQuickHandler(_ component: String, _ subtype: String, name: Data = Data(), maker: String = "appl") -> PCMAtom {
+    precondition(name.count <= 255)
+    return PCMAtom("hdlr", pcmBE(0) + Data(component.utf8) + Data(subtype.utf8) + Data(maker.utf8)
+                   + pcmWords(0, 0) + Data([UInt8(name.count)]) + name)
+}
+private func pcmProfileTrack(_ track: inout PCMAtom, audio: Bool, videoFrames: Int = 1) {
+    track.change(["tkhd"]) { $0.put(0, 0xF) }
+    track.change(["mdia", "hdlr"]) { $0 = pcmQuickHandler("mhlr", audio ? "soun" : "vide") }
+    track.change(["mdia", "minf"]) { $0.children.insert(pcmQuickHandler("dhlr", "alis"), at: 1) }
+    track.change(["mdia", "minf", "dinf", "dref", "url "]) { $0.type = "alis" }
+    if audio {
+        track.change(pcmAudioEntry) {
+            $0.type = "lpcm"
+            // Entry size/type are supplied by PCMAtom; the following body is exactly 64 bytes.
+            $0.prefix = pcmZeros(6) + pcmBE(1, 2) + pcmBE(2, 2) + pcmZeros(6)
+                + pcmBE(3, 2) + pcmBE(16, 2) + pcmBE(0xfffe, 2) + pcmBE(0, 2)
+                + pcmWords(65536, 72, 0x40cf4000, 0, 1, 0x7f000000, 16, 12, 2, 1)
+        }
+    } else {
+        track.change(["mdia", "minf", "vmhd"]) { $0.prefix = pcmBE(1) + pcmBE(0x40, 2) + pcmBE(0x8000, 2) + pcmBE(0x8000, 2) + pcmBE(0x8000, 2) }
+        track.children.append(PCMAtom("tapt", Data(), ["clef", "prof", "enof"].map {
+            PCMAtom($0, pcmWords(0, 16 << 16, 16 << 16))
+        }))
+        track.change(pcmTable) { $0.children.append(PCMAtom("sdtp", pcmBE(0) + Data(repeating: 0x20, count: videoFrames))) }
+    }
+}
+private func pcmProfile(videoFrames: Int = 1,
+                        audioEdit: ((inout PCMAtom) -> Void)? = nil,
+                        videoEdit: ((inout PCMAtom) -> Void)? = nil) -> PCMOracle {
+    var oracle = PCMOracle(); oracle.wide = true; oracle.videoFrames = videoFrames
+    oracle.audioEdit = { pcmProfileTrack(&$0, audio: true); audioEdit?(&$0) }
+    oracle.videoEdit = { pcmProfileTrack(&$0, audio: false, videoFrames: videoFrames); videoEdit?(&$0) }
+    return oracle
+}
+// Shared inert source for the connected dispatch tripwire; no file, exporter or temp dependency.
+enum ProfileMOVBytes {
+    static var expected: [Float] { [-1, -1.0 / 32768, 0, 1.0 / 32768, 32767.0 / 32768] + Array(repeating: 0, count: 6_395) }
+    static func make(valid: Bool = true) -> Data {
+        pcmProfile(audioEdit: { track in
+            if !valid { track.change(pcmLPCMEntry) { $0.put(52, 0xE) } }
+        }).make().bytes
     }
 }
 
@@ -410,7 +463,7 @@ final class ImportedPCMMOVTests: XCTestCase {
         let url = ["mdia", "minf", "dinf", "dref", "url "]
         let edits: [(inout PCMAtom) -> Void] = [
             { track in track.change(url) { $0.prefix = pcmBE(0) + Data("file:///outside\0".utf8) } },
-            { track in track.change(url) { $0.type = "alis" } },
+            { track in track.change(url) { $0.type = "alis"; $0.prefix.append(0) } },
             { track in track.change(url) { $0.prefix.append(Data([0])) } },
             { track in track.change(["mdia", "minf", "dinf", "dref"]) { $0.put(4, 2) } },
             { $0.children.append(PCMAtom("tref")) },
@@ -584,4 +637,281 @@ final class ImportedPCMMOVTests: XCTestCase {
         }
         XCTAssertEqual(try inspection.decode().samples.count, 640_000)
     }
+    func testProfileCompleteLiteralOrderBothMoviePositionsAndLegacyEquivalence() throws {
+        for first in [false, true] {
+            var oracle = pcmProfile(videoFrames: 2)
+            oracle.moovFirst = first; oracle.identityEdits = true
+            oracle.audioChunks = [2, 6_398]; oracle.videoChunks = [1, 1]
+            let fixture = oracle.make(), decoded = try admits(fixture.bytes)
+            XCTAssertEqual(decoded.samples, ProfileMOVBytes.expected)
+            XCTAssertEqual(decoded.facts.profile, "qtPCM16kV1")
+            XCTAssertEqual(decoded.inspection.audioChunkCount, 2)
+            XCTAssertEqual(decoded.facts.videoFrames, 2)
+            XCTAssertEqual(decoded.facts.outputFrames, decoded.facts.sourceFrames)
+            XCTAssertEqual(decoded.facts.clipped, 0)
+            var legacy = PCMOracle(); legacy.moovFirst = first; legacy.identityEdits = true
+            legacy.audioChunks = [2, 6_398]; legacy.videoFrames = 2; legacy.videoChunks = [1, 1]
+            let old = try admits(legacy.make().bytes)
+            XCTAssertEqual(decoded.samples, old.samples); XCTAssertEqual(decoded.facts, old.facts)
+        }
+        // Finite additions remain optional and do not select a different extraction route.
+        var noWide = pcmProfile(); noWide.wide = false; _ = try admits(noWide.make().bytes)
+        _ = try admits(pcmProfile(videoEdit: { track in
+            track.children.removeAll { $0.type == "tapt" }
+            track.change(pcmTable) { $0.children.removeAll { $0.type == "sdtp" } }
+        }).make().bytes)
+    }
+    func testProfileWideIsEmptyUniqueAdjacentAndTopLevelOnly() throws {
+        _ = try admits(pcmProfile().make().bytes)
+        let edits: [(inout [PCMAtom]) -> Void] = [
+            { atoms in let i = atoms.firstIndex { $0.type == "wide" }!; atoms[i].prefix = Data([0]) },
+            { atoms in let i = atoms.firstIndex { $0.type == "wide" }!; atoms.insert(PCMAtom("wide"), at: i) },
+            { atoms in let i = atoms.firstIndex { $0.type == "wide" }!; atoms.insert(PCMAtom("free"), at: i + 1) },
+            { atoms in let i = atoms.firstIndex { $0.type == "wide" }!; let wide = atoms.remove(at: i); atoms.append(wide) },
+            { $0.append(PCMAtom("mdat", Data([0]))) },
+            { $0.append(PCMAtom("zzzz")) }
+        ]
+        for edit in edits { var oracle = pcmProfile(); oracle.topEdit = edit; refuses(oracle.make().bytes) }
+        refuses(pcmProfile(audioEdit: { $0.children.append(PCMAtom("wide")) }).make().bytes, .unsupported)
+        let bytes = pcmProfile().make().bytes
+        for size in [0, 1, 7, 9] {
+            var changed = bytes; changed.replaceSubrange(20..<24, with: pcmBE(size)); refuses(changed)
+        }
+        for word in [0, 1, 2, 7, 11, 0x10, 0x0100000F, 0x01000003] {
+            for audio in [true, false] {
+                let edit: (inout PCMAtom) -> Void = { track in track.change(["tkhd"]) { $0.put(0, word) } }
+                refuses(pcmProfile(audioEdit: audio ? edit : nil, videoEdit: audio ? nil : edit).make().bytes, .unsupported)
+            }
+        }
+        for word in [3, 0xF] {
+            _ = try admits(pcmProfile(audioEdit: { track in track.change(["tkhd"]) { $0.put(0, word) } },
+                                     videoEdit: { track in track.change(["tkhd"]) { $0.put(0, word) } }).make().bytes)
+        }
+        for delta in [-1, 1] {
+            refuses(pcmProfile(audioEdit: { track in track.change(["tkhd"]) {
+                if delta < 0 { $0.prefix.removeLast() } else { $0.prefix.append(0) }
+            } }).make().bytes, .malformed)
+        }
+    }
+    func testProfileHandlersClosedTuplesCountedNamesAndOrdering() throws {
+        for maker in ["appl", "\0\0\0\0"] { for count in [0, 1, 255] {
+            let name = Data(repeating: 0xfe, count: count)
+            _ = try admits(pcmProfile(audioEdit: { track in
+                track.change(["mdia", "hdlr"]) { $0 = pcmQuickHandler("mhlr", "soun", name: name, maker: maker) }
+                track.change(["mdia", "minf", "hdlr"]) { $0 = pcmQuickHandler("dhlr", "alis", name: name, maker: maker) }
+            }, videoEdit: { track in
+                track.change(["mdia", "hdlr"]) { $0 = pcmQuickHandler("mhlr", "vide", name: name, maker: maker) }
+                track.change(["mdia", "minf", "hdlr"]) { $0 = pcmQuickHandler("dhlr", "alis", name: name, maker: maker) }
+            }).make().bytes)
+        } }
+        for path in [["mdia", "hdlr"], ["mdia", "minf", "hdlr"]] {
+            let edits: [(inout PCMAtom) -> Void] = [
+                { $0.put(0, 1) }, { $0.put(0, 0x01000000) },
+                { $0.put(4, 0x7a7a7a7a) }, { $0.put(8, 0x75726c20) },
+                { $0.put(12, 0x7a7a7a7a) }, { $0.put(16, 1) }, { $0.put(20, 1) },
+                { $0.prefix[24] = 1 }, { $0.prefix.append(0) }, { $0.prefix.removeLast() },
+                { $0.prefix[24] = 255; $0.prefix.append(Data(repeating: 0, count: 254)) },
+                { $0.prefix[24] = 255; $0.prefix.append(Data(repeating: 0, count: 256)) }
+            ]
+            for edit in edits { for audio in [true, false] {
+                let change: (inout PCMAtom) -> Void = { track in track.change(path, edit) }
+                refuses(pcmProfile(audioEdit: audio ? change : nil, videoEdit: audio ? nil : change).make().bytes)
+            } }
+        }
+        for kind in ["vide", "meta", "alis"] {
+            // A vide media handler on the audio-shaped track must fail the track's independent shape.
+            refuses(pcmProfile(audioEdit: { track in track.change(["mdia", "hdlr"]) {
+                $0 = pcmQuickHandler("mhlr", kind)
+            } }).make().bytes)
+        }
+        let structural: [(inout PCMAtom) -> Void] = [
+            { track in track.change(["mdia", "minf"]) { minf in
+                let i = minf.children.firstIndex { $0.type == "hdlr" }!
+                let handler = minf.children.remove(at: i); minf.children.append(handler)
+            } },
+            { track in track.change(["mdia", "minf"]) { $0.children.append(pcmQuickHandler("dhlr", "alis")) } },
+            { track in track.change(["mdia"]) { $0.children.append(pcmQuickHandler("mhlr", "soun")) } },
+            { track in track.change(["mdia", "minf", "hdlr"]) { $0 = pcmQuickHandler("mhlr", "alis") } }
+        ]
+        for edit in structural { refuses(pcmProfile(audioEdit: edit).make().bytes) }
+    }
+    func testProfileAliasSelfReferenceOnlyAndDescriptionIndexOne() throws {
+        _ = try admits(pcmProfile().make().bytes)
+        let edits: [(inout PCMAtom) -> Void] = [
+            { $0.put(0, 0) }, { $0.put(0, 2) }, { $0.put(0, 3) }, { $0.put(0, 0x01000001) },
+            { $0.prefix.removeLast() }, { $0.prefix.append(0) },
+            { $0.prefix.append(Data("file:///outside\0".utf8)) }, { $0.type = "rsrc" }
+        ]
+        for edit in edits { for audio in [true, false] {
+            let change: (inout PCMAtom) -> Void = { track in track.change(pcmAlias, edit) }
+            refuses(pcmProfile(audioEdit: audio ? change : nil, videoEdit: audio ? nil : change).make().bytes)
+        } }
+        for index in [0, 2, 65535] {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmLPCMEntry) { $0.put(6, index, width: 2) } }).make().bytes, .unsupported)
+            refuses(pcmProfile(videoEdit: { track in track.change(pcmVisualEntry) { $0.put(6, index, width: 2) } }).make().bytes, .unsupported)
+        }
+        for count in [0, 2] {
+            refuses(pcmProfile(audioEdit: { track in track.change(["mdia", "minf", "dinf", "dref"]) { $0.put(4, count) } }).make().bytes, .unsupported)
+        }
+        refuses(pcmProfile(audioEdit: { track in track.change(["mdia", "minf", "dinf", "dref"]) {
+            $0.children.append($0.children[0])
+        } }).make().bytes, .unsupported)
+        for word in [0, 2] {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmTable + ["stsc"]) { $0.put(16, word) } }).make().bytes, .malformed)
+        }
+    }
+    func testProfileLPCMEveryFieldLengthAndReservedFlagRefuses() throws {
+        _ = try admits(pcmProfile().make().bytes)
+        let changes = [(0, 1, 1), (4, 1, 2), (6, 0, 2), (8, 0, 2), (8, 1, 2), (8, 3, 2),
+                       (10, 1, 2), (12, 1, 4), (16, 1, 2), (18, 8, 2), (20, 0, 2), (22, 1, 2),
+                       (24, 0, 4), (28, 64, 4), (28, 73, 4), (32, 0x40cf4001, 4),
+                       (32, 0x7ff80000, 4), (32, 0x7ff00000, 4), (32, 0xc0cf4000, 4),
+                       (32, 0, 4), (36, 1, 4), (40, 0, 4), (40, 2, 4), (44, 0, 4),
+                       (48, 8, 4), (48, 32, 4), (56, 0, 4), (56, 4, 4), (60, 0, 4), (60, 2, 4)]
+        for (offset, value, width) in changes {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmLPCMEntry) { $0.put(offset, value, width: width) } }).make().bytes)
+        }
+        // Sweep all 32 flag bits independently, including removal of signed/packed.
+        for bit in 0..<32 {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmLPCMEntry) { $0.put(52, 0xC ^ (1 << bit)) } }).make().bytes, .format)
+        }
+        for length in [0, 7, 27, 28, 63, 65, 72] {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmLPCMEntry) {
+                $0.prefix = length <= 64 ? Data($0.prefix.prefix(length)) : $0.prefix + pcmZeros(length - 64)
+            } }).make().bytes)
+        }
+        for tail in [PCMAtom("chan").bytes, PCMAtom("wave").bytes, PCMAtom("enda", pcmBE(1)).bytes] {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmLPCMEntry) { $0.prefix.append(tail) } }).make().bytes, .format)
+        }
+        for type in ["sowt", "twos", "fl32", "mp4a", "zzzz"] {
+            refuses(pcmProfile(audioEdit: { track in track.change(pcmLPCMEntry) { $0.type = type } }).make().bytes, .format)
+        }
+    }
+    func testProfileApertureTripletStrictDimensionsVersionsAndChildren() throws {
+        _ = try admits(pcmProfile().make().bytes)
+        for child in ["clef", "prof", "enof"] {
+            for (offset, value) in [(0, 1), (0, 0x01000000), (4, 0), (4, 16 << 16 | 1),
+                                    (4, 17 << 16), (8, 0), (8, 16 << 16 | 1), (8, 17 << 16)] {
+                refuses(pcmProfile(videoEdit: { track in track.change(["tapt", child]) { $0.put(offset, value) } }).make().bytes)
+            }
+            for delta in [-1, 1] {
+                refuses(pcmProfile(videoEdit: { track in track.change(["tapt", child]) {
+                    if delta < 0 { $0.prefix.removeLast() } else { $0.prefix.append(0) }
+                } }).make().bytes, .malformed)
+            }
+            for duplicate in [false, true] {
+                refuses(pcmProfile(videoEdit: { track in track.change(["tapt"]) { tapt in
+                    if duplicate { tapt.children.append(tapt.children.first { $0.type == child }!) }
+                    else { tapt.children.removeAll { $0.type == child } }
+                } }).make().bytes, .malformed)
+            }
+        }
+        refuses(pcmProfile(videoEdit: { track in track.change(["tapt"]) { $0.children.append(PCMAtom("zzzz")) } }).make().bytes, .unsupported)
+        refuses(pcmProfile(videoEdit: { track in track.children.append(track.children.first { $0.type == "tapt" }!) }).make().bytes, .malformed)
+        refuses(pcmProfile(audioEdit: { $0.children.append(PCMAtom("tapt")) }).make().bytes, .unsupported)
+        for offset in [76, 80] {
+            refuses(pcmProfile(videoEdit: { track in track.change(["tkhd"]) { $0.put(offset, 17 << 16) } }).make().bytes, .format)
+        }
+        for offset in [24, 26] {
+            refuses(pcmProfile(videoEdit: { track in track.change(pcmVisualEntry) { $0.put(offset, 17, width: 2) } }).make().bytes, .format)
+        }
+        _ = try admits(pcmProfile(videoEdit: { track in track.change(["tapt"]) { $0.children.reverse() } }).make().bytes)
+    }
+    func testProfileDependencyAllByteValuesVersionsLengthsAndAudioRefusal() throws {
+        for value in 0...255 {
+            let bytes = pcmProfile(videoEdit: { track in track.change(pcmTable + ["sdtp"]) { $0.prefix[4] = UInt8(value) } }).make().bytes
+            // Independent base-4 field interpretation; upper two bits are this profile's closed policy.
+            let valid = value < 64 && (value / 16) % 4 != 3 && (value / 4) % 4 != 3 && value % 4 != 3
+            if valid { _ = try admits(bytes) } else { refuses(bytes, .unsupported) }
+        }
+        for word in [1, 0x01000000] {
+            refuses(pcmProfile(videoEdit: { track in track.change(pcmTable + ["sdtp"]) { $0.put(0, word) } }).make().bytes, .unsupported)
+        }
+        for length in [0, 3, 4, 6] {
+            refuses(pcmProfile(videoEdit: { track in track.change(pcmTable + ["sdtp"]) { $0.prefix = pcmZeros(length) } }).make().bytes, .malformed)
+        }
+        refuses(pcmProfile(videoEdit: { track in track.change(pcmTable) { $0.children.append(PCMAtom("sdtp", pcmWords(0) + Data([0]))) } }).make().bytes, .malformed)
+        refuses(pcmProfile(audioEdit: { track in track.change(pcmTable) { $0.children.append(PCMAtom("sdtp", pcmWords(0))) } }).make().bytes, .unsupported)
+    }
+    func testProfileVideoHeaderExactCompatibilityTupleOnly() throws {
+        for values in [[0, 0, 0, 0], [0x40, 0x8000, 0x8000, 0x8000]] {
+            _ = try admits(pcmProfile(videoEdit: { track in track.change(["mdia", "minf", "vmhd"]) {
+                $0.prefix = pcmBE(1) + values.reduce(into: Data()) { $0.append(pcmBE($1, 2)) }
+            } }).make().bytes)
+        }
+        for (offset, value, width) in [(0, 0, 4), (0, 0x01000001, 4), (4, 1, 2), (4, 0, 2),
+                                       (6, 0, 2), (8, 0, 2), (10, 0, 2)] {
+            refuses(pcmProfile(videoEdit: { track in track.change(["mdia", "minf", "vmhd"]) { $0.put(offset, value, width: width) } }).make().bytes, .unsupported)
+        }
+        for delta in [-1, 1] {
+            refuses(pcmProfile(videoEdit: { track in track.change(["mdia", "minf", "vmhd"]) {
+                if delta < 0 { $0.prefix.removeLast() } else { $0.prefix.append(0) }
+            } }).make().bytes, .malformed)
+        }
+    }
+    func testProfileEveryMetadataFullWordBitRemainsClosed() throws {
+        for (audio, path, word) in [(true, ["mdia", "hdlr"], 0),
+                                    (false, ["mdia", "minf", "hdlr"], 0),
+                                    (true, pcmAlias, 1), (false, ["tapt", "clef"], 0),
+                                    (false, ["tapt", "prof"], 0), (false, ["tapt", "enof"], 0),
+                                    (false, pcmTable + ["sdtp"], 0),
+                                    (false, ["mdia", "minf", "vmhd"], 1), (true, ["tkhd"], 0xF)] {
+            for bit in 0..<32 {
+                let edit: (inout PCMAtom) -> Void = { track in track.change(path) { $0.put(0, word ^ (1 << bit)) } }
+                refuses(pcmProfile(audioEdit: audio ? edit : nil, videoEdit: audio ? nil : edit).make().bytes)
+            }
+        }
+    }
+    func testProfileExistingTimingExtentsUnknownAndDuplicatesRemainClosed() throws {
+        let fixture = pcmProfile().make(); _ = try admits(fixture.bytes)
+        for (path, offset, value) in [(pcmTable + ["stts"], 12, 2), (pcmTable + ["stts"], 8, 6399),
+                                      (pcmTable + ["stsz"], 4, 4), (["mdia", "mdhd"], 12, 48000),
+                                      (["mdia", "mdhd"], 16, 6401), (pcmTable + ["stco"], 8, 0),
+                                      (pcmTable + ["stco"], 8, fixture.audioOffsets[0] - 1),
+                                      (pcmTable + ["stco"], 8, fixture.bytes.count),
+                                      (pcmTable + ["stco"], 8, 0xffff_ffff)] {
+            refuses(pcmProfile(audioEdit: { track in track.change(path) { $0.put(offset, value) } }).make().bytes)
+        }
+        refuses(pcmProfile(videoEdit: { track in track.change(pcmTable + ["stco"]) { $0.put(8, fixture.audioOffsets[0]) } }).make().bytes, .extent)
+        for type in ["ctts", "co64", "zzzz"] {
+            refuses(pcmProfile(videoEdit: { track in track.change(pcmTable) { $0.children.append(PCMAtom(type)) } }).make().bytes, .unsupported)
+        }
+        for path in [pcmTable + ["stsd"], ["mdia", "minf", "dinf"]] {
+            refuses(pcmProfile(audioEdit: { track in track.change(path) { $0.children.append($0.children[0]) } }).make().bytes)
+        }
+        refuses(pcmProfile(audioEdit: { track in track.change(pcmTable) { $0.children.append($0.children[0]) } }).make().bytes, .malformed)
+    }
+    func testProfileApertureDependencyRowAndExactWorkBoundaries() throws {
+        // Legacy89 +wide2 +minf handlers4 +tapt(2+6+3) +sdtp(2+1) =109,
+        // with empty counted names. Each qt brand adds exactly one work credit.
+        var work = pcmProfile(); work.brandCount = 131_072 - 109
+        _ = try admits(work.make().bytes)
+        work.brandCount += 1; refuses(work.make().bytes, .workLimit)
+        // 10 legacy rows +3 aperture rows +one row per dependency byte.
+        _ = try admits(pcmProfile(videoFrames: 32_755).make().bytes)
+        refuses(pcmProfile(videoFrames: 32_756).make().bytes, .rowLimit)
+        // Name bytes are bounded but still charged to the same total work budget.
+        let name = Data(repeating: 0xff, count: 255)
+        var named = pcmProfile(audioEdit: { track in track.change(["mdia", "hdlr"]) {
+            $0 = pcmQuickHandler("mhlr", "soun", name: name)
+        } })
+        named.brandCount = 131_072 - 109 - 255
+        _ = try admits(named.make().bytes)
+        named.brandCount += 1; refuses(named.make().bytes, .workLimit)
+    }
+    func testProfileCancellationEveryNewMetadataCheckpointAndLiteralExtraction() throws {
+        var oracle = pcmProfile(videoFrames: 2); oracle.audioChunks = [2, 6_398]; oracle.videoChunks = [1, 1]
+        let bytes = oracle.make().bytes
+        var checkpoints = 0
+        XCTAssertEqual(try ImportedPCMMOV.decode(bytes, canceled: { checkpoints += 1; return false }).samples,
+                       ProfileMOVBytes.expected)
+        for stop in 1...checkpoints {
+            var calls = 0
+            XCTAssertThrowsError(try ImportedPCMMOV.decode(bytes, canceled: { calls += 1; return calls == stop })) {
+                XCTAssertEqual($0 as? ImportedPCMMOV.Failure, .canceled)
+            }
+            XCTAssertEqual(calls, stop)
+        }
+    }
+
 }

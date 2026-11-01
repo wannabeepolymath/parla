@@ -228,13 +228,17 @@ public enum ImportedPCMMOV {
 
         func inspect(source: Data) throws -> Inspection {
             let top = try boxes(0..<b.count, depth: 1)
-            var brand: Box?, movie: Box?, payload: Box?
-            for box in top {
+            var brand: Box?, movie: Box?, payload: Box?, wide: Box?
+            for (index, box) in top.enumerated() {
                 try charge()
                 switch box.type {
                 case "ftyp": guard brand == nil else { throw Failure.malformed }; brand = box
                 case "moov": guard movie == nil else { throw Failure.malformed }; movie = box
                 case "mdat": guard payload == nil, !box.body.isEmpty else { throw Failure.malformed }; payload = box
+                case "wide":
+                    guard wide == nil, box.body.isEmpty, index + 1 < top.count,
+                          top[index + 1].type == "mdat" else { throw Failure.unsupported }
+                    wide = box
                 case "free", "skip": break
                 default: throw Failure.unsupported
                 }
@@ -291,8 +295,11 @@ public enum ImportedPCMMOV {
             return (scale, duration)
         }
         func track(_ box: Box, movieScale: Int64, movieDuration: Int64) throws -> Track {
-            let c = try children(box, depth: 3, required: ["tkhd", "mdia"], optional: ["edts"])
-            let t = try full(try only(c, "tkhd"), length: 84, flags: 3)
+            let c = try children(box, depth: 3, required: ["tkhd", "mdia"], optional: ["edts", "tapt"])
+            let tkhd = try only(c, "tkhd"), t = tkhd.body.lowerBound
+            try need(t, 84, in: tkhd.body)
+            guard tkhd.body.count == 84 else { throw Failure.malformed }
+            guard u32(t) == 3 || u32(t) == 0xF else { throw Failure.unsupported }
             let id = u32(t + 12)
             guard id > 0, u32(t + 16) == 0, Int64(u32(t + 20)) == movieDuration,
                   zero((t + 24)..<(t + 36)), u16(t + 38) == 0, identityMatrix(t + 40) else { throw Failure.tracks }
@@ -302,34 +309,49 @@ public enum ImportedPCMMOV {
             guard scale > 0, duration > 0, u16(d + 22) == 0 else { throw Failure.timing }
             let handler = try only(m, "hdlr"), h = try full(handler)
             try need(h, 24, in: handler.body)
-            guard u32(h + 4) == 0, zero((h + 12)..<(h + 24)) else { throw Failure.unsupported }
+            if u32(h + 4) == 0 {
+                // Preserve the existing zero-component handler branch, including its opaque name.
+                guard zero((h + 12)..<(h + 24)) else { throw Failure.unsupported }
+            } else { try quickTimeHandler(handler, component: "mhlr", subtype: tag(h + 8)) }
             let kind = tag(h + 8)
             guard kind == "soun" || kind == "vide" else { throw Failure.tracks }
             let audio = kind == "soun"
+            guard !audio || c["tapt"] == nil else { throw Failure.unsupported }
             guard audio ? (u16(t + 36) == 0x100 && u32(t + 76) == 0 && u32(t + 80) == 0)
                         : (u16(t + 36) == 0 && u32(t + 76) > 0 && u32(t + 80) > 0) else { throw Failure.format }
             guard !audio || scale == 16_000 else { throw Failure.timing }
             guard try exactScale(duration, from: scale, to: movieScale) == movieDuration else { throw Failure.timing }
             if let edit = c["edts"] { try identityEdit(edit, movieDuration: movieDuration) }
             let minf = try children(try only(m, "minf"), depth: 5,
-                                    required: [audio ? "smhd" : "vmhd", "dinf", "stbl"])
+                                    required: [audio ? "smhd" : "vmhd", "dinf", "stbl"], optional: ["hdlr"])
+            if let handler = minf["hdlr"] {
+                guard handler.body.lowerBound < (try only(minf, "dinf")).body.lowerBound else { throw Failure.unsupported }
+                try quickTimeHandler(handler, component: "dhlr", subtype: "alis")
+            }
             if audio {
                 let p = try full(try only(minf, "smhd"), length: 8)
                 guard u32(p + 4) == 0 else { throw Failure.unsupported }
             } else {
                 let p = try full(try only(minf, "vmhd"), length: 12, flags: 1)
-                guard zero((p + 4)..<(p + 12)) else { throw Failure.unsupported }
+                guard zero((p + 4)..<(p + 12)) ||
+                      (u16(p + 4) == 0x40 && u16(p + 6) == 0x8000 &&
+                       u16(p + 8) == 0x8000 && u16(p + 10) == 0x8000) else { throw Failure.unsupported }
             }
             try references(try only(minf, "dinf"))
             let stbl = try children(try only(minf, "stbl"), depth: 6,
-                                    required: ["stsd", "stts", "stsz", "stsc", "stco"], optional: audio ? [] : ["stss"])
-            try description(try only(stbl, "stsd"), audio: audio)
+                                    required: ["stsd", "stts", "stsz", "stsc", "stco"], optional: audio ? [] : ["stss", "sdtp"])
+            let dimensions = try description(try only(stbl, "stsd"), audio: audio)
+            if let aperture = c["tapt"], let dimensions {
+                try apertures(aperture, width: dimensions.0, height: dimensions.1,
+                              trackWidth: u32(t + 76), trackHeight: u32(t + 80))
+            }
             let sizeBox = try only(stbl, "stsz"), s = try full(sizeBox)
             try need(s, 12, in: sizeBox.body)
             let fixed = Int64(u32(s + 4))
             let count = try boundedInt(Int64(u32(s + 8)), maximum: audio ? ImportedPCMMOV.maximumFrames : 32_768,
                                        failure: audio ? .duration : .videoFrameLimit)
             guard count > 0 else { throw Failure.duration }
+            if let dependency = stbl["sdtp"] { try dependencies(dependency, count: count) }
             if audio {
                 guard count >= ImportedPCMMOV.minimumFrames else { throw Failure.duration }
                 guard fixed == 2 else { throw Failure.format }
@@ -355,6 +377,36 @@ public enum ImportedPCMMOV {
             }
             return Track(id: id, audio: audio, count: count, scale: scale, duration: duration, chunks: chunks)
         }
+        /// Closed compatibility tuples; appl is intentional, not a QTFF reserved-zero conformance claim.
+        func quickTimeHandler(_ box: Box, component: String, subtype: String) throws {
+            let p = try full(box)
+            try need(p, 25, in: box.body)
+            guard tag(p + 4) == component, tag(p + 8) == subtype,
+                  (u32(p + 12) == 0 || tag(p + 12) == "appl"), zero((p + 16)..<(p + 24)),
+                  Int(b[p + 24]) == box.body.count - 25 else { throw Failure.unsupported }
+            // A one-byte count bounds the uninterpreted name at 255 bytes; no handler is invoked.
+            try charge(box.body.count - 25)
+        }
+        func apertures(_ box: Box, width: Int, height: Int, trackWidth: UInt32, trackHeight: UInt32) throws {
+            let w = UInt32(width) << 16, h = UInt32(height) << 16
+            guard w == trackWidth, h == trackHeight else { throw Failure.format }
+            let c = try children(box, depth: 4, required: ["clef", "prof", "enof"])
+            for name in ["clef", "prof", "enof"] {
+                let p = try full(try only(c, name), length: 12)
+                try rows(1)
+                guard u32(p + 4) == w, u32(p + 8) == h else { throw Failure.format }
+            }
+        }
+        func dependencies(_ box: Box, count: Int) throws {
+            let p = try full(box)
+            guard box.body.count - 4 == count else { throw Failure.malformed }
+            for i in 0..<count {
+                try rows(1) // Each dependency byte consumes a row/work credit and checks cancellation.
+                let value = b[p + 4 + i]
+                guard value & 0xC0 == 0, value & 0x30 != 0x30,
+                      value & 0x0C != 0x0C, value & 0x03 != 0x03 else { throw Failure.unsupported }
+            }
+        }
         func identityEdit(_ box: Box, movieDuration: Int64) throws {
             let c = try children(box, depth: 4, required: ["elst"])
             let p = try full(try only(c, "elst"), length: 20)
@@ -369,10 +421,10 @@ public enum ImportedPCMMOV {
             guard u32(p + 4) == 1 else { throw Failure.unsupported }
             try rows(1)
             let entries = try boxes((p + 8)..<dref.body.upperBound, depth: 7)
-            guard entries.count == 1, entries[0].type == "url " else { throw Failure.unsupported }
+            guard entries.count == 1, entries[0].type == "url " || entries[0].type == "alis" else { throw Failure.unsupported }
             _ = try full(entries[0], length: 4, flags: 1)
         }
-        func description(_ box: Box, audio: Bool) throws {
+        func description(_ box: Box, audio: Bool) throws -> (Int, Int)? {
             let p = try full(box)
             try need(p, 8, in: box.body)
             guard u32(p + 4) == 1 else { throw Failure.unsupported }
@@ -383,14 +435,33 @@ public enum ImportedPCMMOV {
             try need(e, audio ? 28 : 78, in: entry.body)
             guard zero(e..<(e + 6)), u16(e + 6) == 1 else { throw Failure.unsupported }
             if audio {
-                guard entry.type == "sowt", entry.body.count == 28, zero((e + 8)..<(e + 16)),
-                      u16(e + 16) == 1, u16(e + 18) == 16, u32(e + 20) == 0,
-                      u32(e + 24) == 0x3e800000 else { throw Failure.format }
+                if entry.type == "lpcm" { try lpcm(entry) }
+                else {
+                    guard entry.type == "sowt", entry.body.count == 28, zero((e + 8)..<(e + 16)),
+                          u16(e + 16) == 1, u16(e + 18) == 16, u32(e + 20) == 0,
+                          u32(e + 24) == 0x3e800000 else { throw Failure.format }
+                }
+                return nil
             } else {
                 guard entry.type == "avc1", u16(e + 24) > 0, u16(e + 26) > 0 else { throw Failure.format }
                 // Remaining fixed visual fields and bounded tail are opaque ONLY to this pure reader.
                 // They are neither parsed as child boxes nor certified as a playable video bitstream.
+                return (u16(e + 24), u16(e + 26))
             }
+        }
+        func lpcm(_ entry: Box) throws {
+            let e = entry.body.lowerBound
+            guard entry.body.count == 64 else { throw Failure.format }
+            // Apple SoundDescriptionV2, Movies.h:296-324 (SDK10.9/10.11, pack(2)).
+            // Mirror commit 041600eda65c6a668f66cb7d56b7d1da3e8bcc93; documentary provenance,
+            // not an authenticated SDK. sizeof includes the 8-byte entry header: 72, not 64.
+            guard u16(e + 8) == 2, zero((e + 10)..<(e + 16)),
+                  u16(e + 16) == 3, u16(e + 18) == 16, u16(e + 20) == 0xFFFE,
+                  u16(e + 22) == 0, u32(e + 24) == 65_536, u32(e + 28) == 72,
+                  u32(e + 32) == 0x40CF4000, u32(e + 36) == 0, // BE IEEE754 Float64(16000)
+                  u32(e + 40) == 1, u32(e + 44) == 0x7F000000, u32(e + 48) == 16,
+                  u32(e + 52) == 0xC, u32(e + 56) == 2, u32(e + 60) == 1 else { throw Failure.format }
+            // Exactly signed + packed, no big-endian/float/other flags; extraction stays literal LE.
         }
         func timing(_ box: Box, count: Int, duration: Int64, audio: Bool) throws {
             let entries = try table(box, width: 8)

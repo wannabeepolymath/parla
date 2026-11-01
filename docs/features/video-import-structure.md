@@ -212,9 +212,13 @@ real file-import integration remain open. B40 and canonical status 23/43 are unc
 `ImportedPCMMOV` is a separate pure reader for the deliberately narrow
 `qtPCM16kV1` profile. It does not relax the AAC grammar or authorize a native
 reader. The profile requires a nonfragmented, self-contained QuickTime MOV with
-exactly one audio and one video track. Audio is version-zero `sowt`, mono signed
-16-bit little-endian PCM at 16 kHz, with fixed two-byte samples, one-tick timing,
-and no edit or a single identity edit. Audio chunks must advance in physical
+exactly one audio and one video track. Audio uses either version-zero `sowt`
+or the fixed 72-byte version-two `lpcm` description, mono signed packed 16-bit
+little-endian PCM at 16 kHz, with fixed two-byte samples, one-tick timing,
+and no edit or a single identity edit. The finite additional QuickTime metadata
+forms and exact refusal rules are described in [supported input](audio-file-import.md).
+The PCM semantics, bounds and schema-2 authority remain unchanged; this is not
+general MOV, AAC or native-decoder admission. Audio chunks must advance in physical
 file order. Both track durations must map exactly to the movie duration.
 
 The reader makes a deep, zero-origin source copy and binds validated audio chunk
@@ -242,8 +246,13 @@ The reviewed component passed **18 PCM MOV tests**, alongside **4 existing WAV
 and 31 AAC structural tests**, in one serial package invocation with zero
 failures. The tests use authored in-memory containers, including literal sample
 oracles, compact tables, nonzero Data origins, external backing mutation,
-limits, rational clocks, aliases and cancellation checkpoints. Actual exporter
-compatibility remains unobserved.
+limits, rational clocks, aliases and cancellation checkpoints. Those historical
+fixture checks did not establish exporter compatibility. The later bounded
+`lpcm`/QuickTime metadata extension passed independent source review and 34
+focused methods. One unchanged AVFoundation-authored MOV was then observed through
+the pure reader and MOV dispatcher: both returned the exact expected 16,000 samples,
+with no native-converter factory evaluation. This is one authored-file observation,
+not a promise about other exporter versions, playable video, ASR or picker/UI behavior.
 
 The reader is now connected to explicit file selection, ordinary raw transcription,
 private-copy admission and owned-source Retry through the closed `qtPCM16kV1`
