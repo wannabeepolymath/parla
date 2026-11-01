@@ -143,6 +143,43 @@ final class MeetingMicrophoneCaptureTests: XCTestCase {
         XCTAssertEqual(live.engine.queries.value,0); XCTAssertEqual(live.factories.value,0)
         XCTAssertFalse(live.adapter.validate(.init(instance:UUID(),kind:.selectedApplication,label:"",generation:7)))
     }
+    @MainActor func testMicrophoneWrapperRefusesApplicationBeforeInjectedSingleSourceCanStart() async throws {
+        let bottom = LifecycleMeetingBottom()
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+        var validates = 0, starts = 0, producerReturned = false
+        var sourceError: Error?
+        let returned = XCTestExpectation(description:"injected application producer actually returned")
+        // The old spelling remains usable, but the explicit initializer does not bind a native adapter.
+        let port = MeetingSessionOwner.MicrophoneStreamPort(validate:{ _ in validates += 1; return true },start:{ selection,ingress in
+            starts += 1
+            do { _ = try ingress.end(ingress.fence(),tail:UnsafeBufferPointer<Float>(start:nil,count:0)) }
+            catch { sourceError = error; ingress.revoke() }
+            return .init(source:selection.instance,exit:.actual(Task { producerReturned = true; returned.fulfill() }))
+        },requestStop:{})
+        let owner = MeetingSessionOwner(store:store,singleSource:port,recognition:.init(run:{ _,_ in
+            XCTFail("No recognition is requested"); return Task { .failure(MeetingSession.Failure.unavailable) }
+        },requestCancel:{}),wallClock:{1_000_000_000_000},holdEpoch:1)
+        let selection = MeetingSession.Selection(instance:UUID(),kind:.selectedApplication,label:"",generation:7)
+        let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:UUID(),mapping:.unknown)
+        let segment = MeetingSession.Segment(id:UUID(),track:0,generation:7,timing:timing,canonicalStart:0)
+        let ownerID = UUID(), session = UUID()
+        guard let refused = await completed(AdapterOperation {
+            try await owner.startMicrophone(owner:ownerID,session:session,selection:selection,segment:segment)
+        }) else { return }
+        XCTAssertThrowsError(try refused.get()) { XCTAssertEqual($0 as? MeetingSession.Failure,.bounds) }
+        XCTAssertEqual(validates,0); XCTAssertEqual(starts,0); XCTAssertEqual(bottom.calls,0)
+        XCTAssertEqual(owner.state,.idle)
+        guard let started = await completed(AdapterOperation {
+            try await owner.startSingleSource(owner:ownerID,session:session,selection:selection,segment:segment)
+        }) else { return }; try started.get()
+        await fulfillment(of:[returned],timeout:2)
+        XCTAssertTrue(producerReturned); XCTAssertNil(sourceError); XCTAssertEqual(validates,1); XCTAssertEqual(starts,1)
+        XCTAssertEqual(owner.metadata?.selections,[selection]); XCTAssertFalse(owner.shutdownReady)
+        guard let stopped = await completed(AdapterOperation { try await owner.stop() }) else { return }; try stopped.get()
+        XCTAssertTrue(store.actualHoldsDrained); XCTAssertEqual(owner.projection.state,.stopped)
+        owner.reserveQuit(); XCTAssertTrue(owner.shutdownReady); try await owner.committedDetach()
+        XCTAssertTrue(bottom.descriptors.isEmpty)
+    }
     @MainActor func testStoreFailureBeforeStartNeverAcquiresRecorderOrQueriesNativeBottom() async throws {
         let r = AdapterRig(failingStoreClock:true); defer { r.adapter.requestStop() }
         XCTAssertTrue(r.adapter.validate(r.selection)); XCTAssertTrue(r.admission.isAvailable)
