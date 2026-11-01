@@ -61,6 +61,7 @@ public enum ApplicationAudioStart { case notStarted, actual(ApplicationAudioReco
          makeConverter: @escaping (AVAudioFormat) -> MeetingPCMConverting?, retainedFailure: @escaping () -> Void = {}) {
         self.makeBottom = makeBottom; self.makeConverter = makeConverter; self.retainedFailure = retainedFailure
     }
+    public func validate(_ binding: SelectedApplicationBinding) -> Bool { binding.valid }
     public func validate(_ binding: SelectedApplicationBinding, context: MeetingAudioIngress.Context) -> Bool {
         binding.matches(context)
     }

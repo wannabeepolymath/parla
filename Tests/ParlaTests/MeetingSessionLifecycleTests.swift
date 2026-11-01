@@ -1300,3 +1300,93 @@ extension MeetingSessionLifecycleTests {
         XCTAssertEqual(work.opens,0);XCTAssertEqual(work.closes,0)
     }
 }
+
+
+/// S3 app-port wiring only; the existing lifecycle bodies and fixtures above are unchanged.
+final class MeetingSelectedApplicationOwnerLifecycleTests: XCTestCase {
+    @MainActor func testDefaultOffApplicationAdapterOwnerDoesNotAdmitOrStart() async throws {
+        let bottom = LifecycleMeetingBottom(), binding = selectedApplicationTestBinding()
+        let backend = SelectedApplicationTestBackend(binding)
+        let adapter = MeetingSelectedApplicationCapture(binding:binding,core:backend.port)
+        let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+        let owner = MeetingSessionOwner(store:store,singleSource:adapter.port,recognition:.init(run:{ _,_ in
+            XCTFail("Recognition was not requested"); return Task { .failure(MeetingSession.Failure.unavailable) }
+        },requestCancel:{}),wallClock:{1_000_000_000_000},holdEpoch:1)
+        let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:binding.captureEpoch,mapping:.unknown)
+        let start = SelectedApplicationTestOperation {
+            try await owner.startSingleSource(owner:UUID(),session:UUID(),selection:selectedApplicationTestSelection(binding),
+                segment:.init(id:UUID(),track:0,generation:binding.sourceGeneration,timing:timing,canonicalStart:0))
+        }
+        guard let result = await selectedApplicationTestCompleted(self,start) else { return }
+        XCTAssertThrowsError(try result.get()); XCTAssertEqual(owner.state,.idle)
+        XCTAssertEqual(bottom.calls,0); XCTAssertTrue(bottom.descriptors.isEmpty)
+        XCTAssertEqual(backend.pureChecks,0); XCTAssertEqual(backend.contextChecks,0); XCTAssertEqual(backend.starts,0)
+    }
+    @MainActor func testApplicationAdapterOwnerJoinsBodyCleanupAndWriterAcrossStopAndQuitCancel() async throws {
+        for quitCancel in [false,true] {
+            let bottom = LifecycleMeetingBottom(), binding = selectedApplicationTestBinding()
+            bottom.retainSourceBytes = true
+            let backend = SelectedApplicationTestBackend(binding); backend.initialPCM = [-1,0.5,0,1]
+            let adapter = MeetingSelectedApplicationCapture(binding:binding,core:backend.port,enabled:true)
+            let store = MeetingSessionStore(root:bottom.rootURL,profile:.init(),bottom:bottom,wallClock:{1_000_000_000_000})
+            var recognitions = 0
+            let owner = MeetingSessionOwner(store:store,singleSource:adapter.port,recognition:.init(run:{ _,_ in
+                recognitions += 1; return Task { .failure(MeetingSession.Failure.unavailable) }
+            },requestCancel:{}),wallClock:{1_000_000_000_000},holdEpoch:1)
+            let selection = selectedApplicationTestSelection(binding)
+            let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:binding.captureEpoch,mapping:.unknown)
+            let writerEntered = XCTestExpectation(description:"selected application writer owns actual store body")
+            let held = LifecycleHeldOperation(writerEntered)
+            defer { held.open(); backend.releaseAll(); bottom.observe = nil }
+            let starting = SelectedApplicationTestOperation {
+                try await owner.startSingleSource(owner:UUID(),session:UUID(),selection:selection,
+                    segment:.init(id:UUID(),track:0,generation:binding.sourceGeneration,timing:timing,canonicalStart:0))
+            }
+            guard let started = await selectedApplicationTestCompleted(self,starting) else { return }; try started.get()
+            let ingress = try XCTUnwrap(backend.ingress)
+            XCTAssertEqual(backend.starts,1); XCTAssertEqual(backend.receivedBinding,binding)
+            XCTAssertEqual(backend.checkedContext,ingress.context); XCTAssertEqual(owner.metadata?.selections,[selection])
+            XCTAssertTrue(ingress.facts.open); XCTAssertEqual(ingress.facts.allocated,2); XCTAssertEqual(ingress.facts.accepted,4)
+            XCTAssertFalse(store.actualHoldsDrained)
+            bottom.observe = { operation,name in
+                if operation == "write",name?.hasSuffix(".source.pending") == true { held.holdOnce() }
+            }
+            if quitCancel { owner.reserveQuit(); owner.cancelQuit() }
+            let stopping = SelectedApplicationTestOperation { try await owner.stop() }
+            await fulfillment(of:[backend.stopRequested],timeout:3)
+            XCTAssertFalse(ingress.facts.open); XCTAssertTrue(ingress.facts.bodyEntered)
+            XCTAssertFalse(backend.didComplete); XCTAssertNil(stopping.result); XCTAssertFalse(owner.shutdownReady)
+            XCTAssertThrowsError(try ingress.enter()); XCTAssertEqual(try backend.latePCM([1]),0)
+            let successor = adapter.start(selection,ingress:ingress)
+            XCTAssertEqual(successor.source,selection.instance)
+            if case .actual = successor.exit { XCTFail("An adapter identity cannot acquire a successor") }
+            backend.releaseBody(); await fulfillment(of:[backend.cleanupEntered],timeout:3)
+            XCTAssertFalse(ingress.facts.bodyEntered); XCTAssertFalse(ingress.facts.ended)
+            XCTAssertFalse(backend.didComplete); XCTAssertNil(stopping.result); XCTAssertFalse(store.actualHoldsDrained)
+            backend.releaseCleanup(); await fulfillment(of:[backend.completed,writerEntered],timeout:3)
+            guard backend.didComplete else { XCTFail("No actual completion; not joining"); return }
+            if let actual = backend.task { await actual.value }
+            // Source completion cannot stand in for an entered writer's actual return.
+            XCTAssertNil(stopping.result); XCTAssertFalse(owner.shutdownReady); held.open()
+            guard let stopped = await selectedApplicationTestCompleted(self,stopping) else { return }; try stopped.get()
+            bottom.observe = nil
+            XCTAssertNil(backend.error); XCTAssertFalse(backend.timedOut); XCTAssertFalse(held.didTimeOut)
+            XCTAssertEqual(backend.stopRequests,1); XCTAssertEqual(backend.starts,1); XCTAssertEqual(recognitions,0)
+            XCTAssertTrue(store.actualHoldsDrained); XCTAssertEqual(owner.projection.state,.stopped)
+            XCTAssertEqual(owner.projection.acknowledgedChunks,1); XCTAssertEqual(ingress.facts.allocated,2)
+            let ledger = try MeetingSession.Ledger.decode(bottom.metadata)
+            XCTAssertEqual(ledger.tracks.count,1); XCTAssertEqual(ledger.tracks.first?.selection,selection)
+            let chunk = try XCTUnwrap(ledger.chunks.first)
+            XCTAssertEqual(chunk.track,0); XCTAssertEqual(chunk.sourceGeneration,binding.sourceGeneration)
+            XCTAssertEqual(chunk.timing,timing); XCTAssertEqual(chunk.frames,4)
+            let files = bottom.rootNode?.children.values.filter { $0.name.hasSuffix(".wav") } ?? []
+            XCTAssertEqual(files.count,1)
+            let file = try XCTUnwrap(files.first)
+            XCTAssertEqual(Data(file.bytes(0,file.length).dropFirst(44)),Data([0,128,0,64,0,0,255,127]))
+            owner.reserveQuit(); XCTAssertTrue(owner.shutdownReady)
+            let detach = SelectedApplicationTestOperation { try await owner.committedDetach() }
+            guard let detached = await selectedApplicationTestCompleted(self,detach) else { return }; try detached.get()
+            XCTAssertTrue(bottom.descriptors.isEmpty)
+        }
+    }
+}
