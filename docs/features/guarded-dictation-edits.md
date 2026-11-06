@@ -1,8 +1,9 @@
 # Brief Original copy — partial B24
 
 B24 is **PARTIAL**. This source slice provides an optional Copy Original fallback.
-Guarded Undo Last Dictation and Restore Raw are **unavailable pending native
-qualification**. There is no field receipt, qualified native mutation adapter,
+Guarded Undo Last Dictation and Restore Raw are **blocked on a safe mutation
+contract**, with real-app qualification tracked separately under B08. There is
+no field receipt, qualified native mutation adapter,
 Undo button, Cmd-Z interception, automatic replacement or blind backspace.
 
 ## Opt-in and retention
@@ -99,3 +100,64 @@ Source tests with fake poster, security, clipboard, clock and scheduler establis
 application authority and provenance only. They do not qualify native paste
 acceptance, AX mutation, clipboard timing or Hub/menu focus behavior. No native
 qualification or B19 build/sign/extraction permission is implied by this slice.
+
+## 0.7.0 safety stop (B24, 2026-11-07)
+
+The default-on implementation was stopped under the task's explicit safety-stop
+condition. This is unfinished source work, not a B08 qualification-only gate.
+No Undo/Restore Raw action, shortcut, full-field retention or new default was
+added. The existing optional Copy Original behavior and menu remain unchanged.
+
+The requested contract includes *no edits since insertion*, not merely equality
+at the instant of a read. The existing production primitives cannot prove that
+contract or condition a mutation on it:
+
+- `Inserter.postPaste` posts Command-V events. Its successful return means
+  dispatch, not acceptance by a particular field. `ClipboardDelivery.paste`
+  records `posted` after the callback; a pasteboard data request is not field
+  insertion evidence.
+- `Inserter.fieldState(of:)` reads `AXValue` and `AXSelectedTextRange` separately.
+  `Inserter.Destination` retains field/app identity, but no target revision or
+  edit history. Identical values after an edit-and-revert or focus round trip
+  cannot establish that no intervening change happened.
+- `Inserter.replaceTypedTail` checks a previously read value, then sends an
+  unconditional `AXUIElementSetAttributeValue`, then reads back. Its “atomic
+  write” comment describes one value assignment, not an atomic conditional
+  read/check/write. Selection restoration is another write. Its own comments
+  acknowledge that a target can apply an issued AX set later.
+- `CorrectionWatcher` receives AX notifications through a run loop and delays
+  attachment after paste. It is a learning observer, not a synchronous target
+  revision barrier or an insertion receipt; it cannot authorize these actions.
+- The installed SDK's `AXUIElementSetAttributeValue(element, attribute, value)`
+  accepts no expected old value/revision. `AXUIElementCopyMultipleAttributeValues`
+  supplies a read API, not a conditional write. Neither provides the missing
+  target-side compare-and-replace operation.
+
+A concrete unsafe ordering is: Parla verifies the receipt's full value and
+selection; the receiving app processes an edit (or changes focus/security);
+Parla's unconditional AX assignment applies a value computed from the old
+snapshot. The assignment can discard that edit. A subsequent exact readback can
+match Parla's requested value while the user's edit has already been lost.
+Adding another read, an observer, a shorter deadline or a main-thread lock in
+Parla does not serialize the receiving process. A fake field with an atomic
+compare-and-replace method would test a stronger capability than this production
+AX path implements.
+
+Unblocking the strict contract requires a supported target capability that
+checks field identity, security, focus/edit revision and expected value/selection
+at the point of mutation, with confirmed insertion provenance. No such external
+adapter is present in this checkout. A best-effort snapshot/check/set product
+would require an explicit change to the safety contract; it must not be shipped
+as the requested proven guard. B08 remains responsible for real-app qualification
+of an eventual adapter; it does not supply this missing source capability.
+
+
+Verification for this stop: `swift test --scratch-path
+/tmp/parla-b24-safety-CDanac/build --filter OriginalCopyTests` passed all 28
+existing tests, including existing menu enablement checks. `swift build
+--scratch-path /tmp/parla-b24-safety-CDanac/build` passed; `git diff --check`
+passed. These validate the unchanged fallback and compilation only. No new
+receipt/guard tests or temporary-revert proof were produced because no guarded
+action was implemented. No third-party app, computer use or microphone was used.
+Logs are retained in `/tmp/parla-b24-safety-CDanac/`; its isolated build directory
+was removed after both commands exited. No dependencies were installed.
