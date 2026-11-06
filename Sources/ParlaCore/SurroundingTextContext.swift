@@ -225,6 +225,23 @@ public struct SurroundingTextResponse: Sendable {
 /// Ephemeral request material, never Codable, printable, persisted or put on Session.
 public struct SurroundingTextPrefix: Sendable {
     let text: String
+
+    // Four consecutive words catch sentence copying while allowing common short
+    // phrases; a span actually dictated is always supported, regardless of length.
+    private static let unsupportedEchoWordThreshold = 4
+
+    public func containsUnsupportedEcho(in output: String, dictated transcript: String) -> Bool {
+        func spans(_ text: String) -> Set<[String]> {
+            let words = text.precomposedStringWithCanonicalMapping
+                .folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+                .split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            let width = Self.unsupportedEchoWordThreshold
+            guard words.count >= width else { return [] }
+            return Set((0...words.count - width).map { Array(words[$0..<$0 + width]) })
+        }
+        let unsupported = spans(text).subtracting(spans(transcript))
+        return !unsupported.isEmpty && !unsupported.isDisjoint(with: spans(output))
+    }
 }
 
 /// Finite operation-owned output disposition and monotonic main-observation latch.

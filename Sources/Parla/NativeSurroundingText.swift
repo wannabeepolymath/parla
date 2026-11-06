@@ -78,6 +78,14 @@ struct NativeSurroundingAX: SurroundingAXAPI {
     }
 }
 
+private let refusedRemoteClientBundleIDs: Set<String> = [
+    "com.apple.screensharing", "com.apple.remotedesktop",
+    "com.microsoft.rdc.macos", "com.microsoft.rdc.osx.beta",
+    "com.teamviewer.teamviewer", "com.philandro.anydesk",
+    "com.p5sys.jump.mac.viewer", "tv.parsec.www",
+    "com.realvnc.vncviewer", "com.splashtop.business.client"
+]
+
 /// One operation, one serial worker. Every native entry has a positive timeout
 /// on THAT reference (AX timeouts are not inherited), bounded by the absolute
 /// job deadline. A late native return is rejected and still joined, never detached.
@@ -90,7 +98,8 @@ private final class SurroundingAXReader<API: SurroundingAXAPI> {
     static func allowedApp(_ bundle: String) -> Bool {
         let lower = bundle.lowercased().filter { $0.isLetter || $0.isNumber }
         let forbidden = ["1password", "onepassword", "agilebits", "bitwarden", "lastpass", "dashlane", "keepass", "enpass", "strongbox", "keychain", "password", "protonpass", "nordpass", "msecure", "keeweb", "buttercup", "lockwise", "passbolt", "padloc", "roboform", "safeincloud", "keeper", "secrets", "terminal", "iterm", "ghostty", "wezterm", "alacritty", "kitty", "hyper", "warp", "remote", "teamviewer", "anydesk"]
-        return !bundle.isEmpty && !forbidden.contains(where: lower.contains)
+        return !bundle.isEmpty && !refusedRemoteClientBundleIDs.contains(bundle.lowercased())
+            && !forbidden.contains(where: lower.contains)
             && !TextRules.isBrowser(bundleID: bundle)
             && ![AppCategory.terminal, .code].contains(TextRules.category(bundleID: bundle))
     }

@@ -217,7 +217,7 @@ enum SurroundingTextCapture {
         guard let scope = port.open(session.operation.id, grant.policy.target) else { return nil }
         let run = session.surroundingTextRun
         // Begins before the first supported metadata job, not after its proof.
-        let policy = HistoryRetryExecutionPolicy(planned: 1, budget: 15, now: now,
+        let policy = HistoryRetryExecutionPolicy(planned: 2, budget: 15, now: now,
             sleep: sleep ?? { seconds in try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000)) })
         func pureAdmission(before phaseDeadline: TimeInterval? = nil) throws -> TimeInterval {
             try policy.check(); try run.check(); try scope.checkCancellation()
@@ -291,7 +291,16 @@ enum SurroundingTextCapture {
                     let client = try session.operation.diagnostics.map { diagnostic in
                         try diagnostic.makeProvider(settings: session.effectiveSettings, factory: construct)
                     } ?? construct()
-                    let result = try await client.clean(transcript: transcript, context: requestContext)
+                    var result = try await client.clean(transcript: transcript, context: requestContext)
+                    if prefix.containsUnsupportedEcho(in: result, dictated: transcript) {
+                        // One context-free retry on the same client/settings and
+                        // shared deadline; keep all context ownership protections.
+                        _ = try admit(); try await proof(field); _ = try admit()
+                        result = try await client.clean(transcript: transcript, context: context)
+                        guard !prefix.containsUnsupportedEcho(in: result, dictated: transcript) else {
+                            throw SurroundingTextFailure.refused
+                        }
+                    }
                     _ = try admit(); try await proof(field); _ = try admit()
                     return result
                 }

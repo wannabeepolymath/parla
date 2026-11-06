@@ -328,19 +328,20 @@ final class SurroundingTextContextIntegrationTests: XCTestCase {
     @MainActor func testA26A28A30ConnectedBothSerializersRawHistoryOriginalAndLearner() async throws {
         for provider in ["anthropic", "openai-compatible"] {
             for history in [false, true] {
-                let d = try B26AppDocument(provider: provider, history: history), r = try B26AppRig(d), field = B26AppField("中文😀 PREFIX_QUOTED_SENTINEL"), http = B26AppHTTP()
+                let d = try B26AppDocument(provider: provider, history: history), r = try B26AppRig(d), field = B26AppField("中文😀 PRIVATE CONTEXT SENTINEL MUST STAY PRIVATE"), http = B26AppHTTP()
+                http.onResume = { [unowned http] in http.text = http.resumed == 1 ? "PRIVATE CONTEXT SENTINEL MUST STAY PRIVATE" : "Dictated speech." }
                 let before = Metrics.shared.snapshot(), s = try r.start()
                 XCTAssertNotNil(s.surroundingTextGrant); XCTAssertNil(s.settings.physicalSurroundingTextGrant)
                 await r.work(s, field: field, http: http).value
-                XCTAssertEqual(field.issues, 1); XCTAssertEqual(http.resumed, 1); XCTAssertEqual(r.categories, 0)
-                XCTAssertEqual(r.posted, ["PREFIX_QUOTED_SENTINEL"]); XCTAssertTrue(s.operation.hasExited)
+                XCTAssertEqual(field.issues, 1); XCTAssertEqual(http.resumed, 2); XCTAssertEqual(r.categories, 0)
+                XCTAssertEqual(r.posted, ["Dictated speech."]); XCTAssertTrue(s.operation.hasExited)
                 XCTAssertFalse(r.pendingLearner); XCTAssertFalse(r.activeLearner); XCTAssertGreaterThanOrEqual(r.disarms, 2); XCTAssertTrue(r.learned.isEmpty)
                 XCTAssertNil(r.runtime.results.read()); XCTAssertEqual(Metrics.shared.snapshot(), before)
                 XCTAssertEqual(d.history.entries.count, history ? 1 : 0)
                 if history { XCTAssertEqual(d.history.entries[0].raw, r.raw); XCTAssertNil(d.history.entries[0].cleaned); XCTAssertEqual(d.history.entries[0].metrics, PipelineMetrics()) }
-                XCTAssertFalse(String(decoding: d.historyBytes, as: UTF8.self).contains("PREFIX_QUOTED_SENTINEL"))
+                XCTAssertFalse(String(decoding: d.historyBytes, as: UTF8.self).contains("PRIVATE CONTEXT SENTINEL"))
                 let export = TranscriptExport(entries: d.history.entries.map { .init(text: $0.best, date: $0.date) }).encoded(content: .result, format: .text)
-                XCTAssertFalse(String(decoding: export, as: UTF8.self).contains("PREFIX_QUOTED_SENTINEL"))
+                XCTAssertFalse(String(decoding: export, as: UTF8.self).contains("PRIVATE CONTEXT SENTINEL"))
                 let token = try XCTUnwrap(r.original.refresh().token); XCTAssertTrue(r.original.copyOriginal(token: token)); XCTAssertEqual(r.originals, [r.raw])
                 XCTAssertTrue(r.storageEntries.contains(.stash)); XCTAssertTrue(r.storageEntries.contains(.resolve))
                 // Future category-only learning remains available through the same executor.

@@ -58,6 +58,10 @@ positive PID, and a matching focused window. It refuses secure/password subroles
 known password managers, terminals, browsers, remote clients and code editors
 (including their integrated terminals). Unknown/noneditable roles refuse. This
 is capability-based support, not a certification of every app that exposes AX.
+The named `refusedRemoteClientBundleIDs` constant explicitly refuses Apple
+Screen Sharing/Remote Desktop, Microsoft Remote Desktop (stable/beta),
+TeamViewer, AnyDesk, Jump Desktop, Parsec, RealVNC and Splashtop Business before
+AX field access, in addition to the existing substring and category checks.
 
 Fresh observations compare actual AX application, window and field references
 with `CFEqual`, plus PID, bundle, caret, selection and document length. They run
@@ -98,7 +102,10 @@ call. If an OS call ignores its timeout, the owning lane stays pending until exi
 Before read participation, unsupported metadata may follow ordinary cleanup once.
 After participation, failures return raw speech with local literal rules, without
 another category request or backup. The sole participated ordinary fallback is a
-proved exact empty document-start prefix.
+proved exact empty document-start prefix. An unsupported context echo instead
+allows one context-free cleanup retry on the same provider/client and settings,
+inside the original 15-second deadline and cancellation/authority scope. This
+retry never switches to ordinary category cleanup or a backup provider.
 
 ## Data lifetime and output
 
@@ -110,6 +117,17 @@ replacement, History/retry/export, last-result retrieval or correction learning.
 History, when independently enabled, stores raw dictation and empty owned cleanup
 metrics. Explicit Original/Copy retains only the user's dictated speech under its
 separate permission. Context admission and influenced insertion disarm learning.
+
+Before context-assisted output reaches Pipeline, the ephemeral prefix rejects
+any shared four-word window absent from the raw dictation. The named
+`unsupportedEchoWordThreshold = 4` balances sentence-copy detection with common
+short phrases. Matching uses canonical Unicode normalization, case folding, and
+letter/number words separated by punctuation or whitespace. Shorter overlaps and
+windows also present in raw dictation remain eligible. A rejected response never
+reaches insertion or persistence; only a successful context-free retry may
+continue. That retry is checked against the same prefix too. A repeated echo,
+provider error or invalid retry result preserves the existing raw-text fallback.
+This deterministic overlap guard does not detect paraphrases or shorter leaks.
 
 Matching observations are not an atomic cross-process snapshot. Unobserved
 away/back transitions and same-length edits can evade observation; the field can
@@ -183,3 +201,51 @@ Additional targeted pre-fix runs recorded the unsaved local opt-out reopening an
 invalid cloud-block suppression assertions failing before their corrections.
 The implementation lane did not spawn an independent review agent. Native
 app/OS coverage and genuine category-only quality comparison remain open.
+
+### 2026-11-07 B26 context-echo and remote-client follow-up
+
+P1 now rejects unsupported context overlap before Pipeline receives output, then
+uses one context-free retry on the same client. P2 adds the explicit remote-client
+bundle-ID refusal list. The three reviewer probes from
+`/tmp/parla-b26-review-probes.swift` were inverted and extended in
+`SurroundingTextContextRegressionTests`; the existing connected sentinel test now
+requires safe retry insertion. Coverage includes both cloud serializers, local
+Apple Intelligence, context-only/appended echoes, Unicode case/punctuation,
+short and raw-supported overlaps, failed/invalid/repeated-echo retries, raw
+History isolation, and all ten remote-client IDs through the production reader.
+
+Focused commands (all fixture parents and files are precreated, private and owned
+by this task; recording children remain empty and manifest-recorded):
+
+```sh
+B26_V2_ROOT=/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-b26-v2-6s7x_om7
+export PARLA_TEST_FIXTURE_MANIFEST="$B26_V2_ROOT/manifest.jsonl"
+export PARLA_B26_FIXTURE_ROOT="$B26_V2_ROOT/b26"
+export PARLA_B21_FIXTURE_ROOT="$B26_V2_ROOT/b21"
+export PARLA_B21_EVIDENCE="$B26_V2_ROOT/b21-evidence.jsonl"
+swift test --jobs 4 --scratch-path "$B26_V2_ROOT/build" --filter 'SurroundingText.*Tests|NativeSurroundingTextTests|PipelineTests|CleanupTests|CleanupFactoryTests|CleanupFailoverTests|AppleIntelligenceCleanupTests|LocalCleanupSettingsTests|LocalCleanupIntegrationTests|CleanupFailoverIntegrationTests|HubCleanupFailoverTests'
+swift build --jobs 4 --scratch-path "$B26_V2_ROOT/build"
+git diff --check
+```
+
+Positive: **224 executed, 2 optional B21 elapsed checks skipped, zero failures**.
+`swift build` and `git diff --check` also pass.
+Separate behavioral reverts restore the original production file for each
+finding: P1 fails all three affected methods with **32 assertions**; P2 fails its
+production-reader method with **21 assertions**, including Screen Sharing.
+Both commands exit 1 through assertions, not compiler failures. Fixed source
+bytes are restored in `finally` and SHA-256 checked. All four new/changed test
+methods fail without their respective fix; positive overlap controls are grouped
+with rejection controls. The focused selector is rerun after restoration.
+
+An initial loose `SurroundingText|NativeSurroundingText|Pipeline|Cleanup` selector
+also selected an unrelated ActivityShadow method requiring the absent historical
+`/tmp/parla-implementation-2026-10-28` fixture parent: 266 executed, 2 skipped,
+1 missing-fixture failure. Its requested feature suites passed; the named-suite
+selector above avoids that unrelated fixture dependency.
+
+Retained task resources are under `/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-b26-v2-6s7x_om7`: build scratch, empty
+fixture children/manifest, B21 evidence, baseline/revert/final logs and
+`revert-receipt.json` with commands, failing methods and restoration hashes.
+No server, browser, database, live provider, third-party app read or download was
+used. Existing compiler warnings and the earlier qualification limits remain.
