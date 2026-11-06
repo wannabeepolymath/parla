@@ -223,10 +223,18 @@ public func makeOrdinaryCleanupClient(settings: Settings, origin: CleanupFailove
 public func makeSurroundingTextCleanupClient(settings: Settings, access: CleanupAccess,
     grant: SurroundingTextGrant, operationID: UUID, store: SettingsStore,
     run: SurroundingTextRun, policy: HistoryRetryExecutionPolicy,
-    driver: @escaping HistoryRetryHTTP.Driver, shouldContinue: @escaping () -> Bool) throws -> CleanupProviding {
+    driver: @escaping HistoryRetryHTTP.Driver, localRuntime: LocalCleanupRuntime = LocalCleanupRuntime(),
+    shouldContinue: @escaping () -> Bool) throws -> CleanupProviding {
     func check() throws {
         try policy.check(); try run.check()
-        guard shouldContinue(), try CleanupChainIdentity.primary(settings) == grant.policy.primary else { throw SurroundingTextFailure.refused }
+        guard shouldContinue(), try SurroundingTextAuthority.primary(settings) == grant.policy.primary else { throw SurroundingTextFailure.refused }
+    }
+    if settings.usesAppleIntelligence {
+        return try store.withSurroundingTextGrant(grant, operationID: operationID) {
+            try check()
+            return try makeCleanupClient(settings: settings, env: [:], credentials: store.credentials, access: access, localRuntime: localRuntime,
+                executionPolicy: policy, usage: { _, _, _ in }, redactUsage: false)
+        }
     }
     // Refuse an oversized borrowed credential before constructing header copies.
     // HistoryRetryHTTP still checks the exact aggregate serialized header budget.

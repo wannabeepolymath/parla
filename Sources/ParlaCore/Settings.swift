@@ -3,6 +3,8 @@ import Foundation
 public struct CleanupSettings: Codable, Equatable, Sendable {
     public var provider: String = "anthropic"   // also "apple-intelligence" (explicit opt-in)
     public var localSourceLocale: String? = nil
+    /// Only Apple Intelligence may use nearby text without cloud consent.
+    public var localSurroundingTextEnabled = true
     public var baseURL: String? = nil            // required for openai-compatible
     // These three apply to openai-compatible only; anthropic uses the top-level
     // cleanupModel/anthropicApiKey fields.
@@ -13,12 +15,13 @@ public struct CleanupSettings: Codable, Equatable, Sendable {
 
     // Tolerant decode: a partial cleanup block must not throw and reset all Settings.
     private enum CodingKeys: String, CodingKey {
-        case provider, baseURL, model, apiKeyEnvVar, apiKey, localSourceLocale
+        case provider, baseURL, model, apiKeyEnvVar, apiKey, localSourceLocale, localSurroundingTextEnabled
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(localSourceLocale, forKey: .localSourceLocale)
+        try c.encode(localSurroundingTextEnabled, forKey: .localSurroundingTextEnabled)
         try c.encodeIfPresent(provider, forKey: .provider)
         try c.encodeIfPresent(baseURL, forKey: .baseURL)
         try c.encodeIfPresent(model, forKey: .model)
@@ -29,6 +32,8 @@ public struct CleanupSettings: Codable, Equatable, Sendable {
         self.init()
         let c = try decoder.container(keyedBy: CodingKeys.self)
         localSourceLocale = try c.decodeIfPresent(String.self, forKey: .localSourceLocale)
+        localSurroundingTextEnabled = c.contains(.localSurroundingTextEnabled)
+            ? (try? c.decode(Bool.self, forKey: .localSurroundingTextEnabled)) ?? false : true
         provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? provider
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? baseURL
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? model
@@ -283,6 +288,7 @@ public final class SettingsStore {
     private let lock = NSRecursiveLock()
     private var contextEpoch: UInt64 = 1
     private var contextPaused = false
+    private var localContextDraftDisabled = false
     private var contextObserved: Data?
     private var contextCancellations: [UUID: () -> Void] = [:]
     private var failoverEpoch: UInt64 = 1
@@ -915,13 +921,25 @@ public final class SettingsStore {
         if signature == nil || (contextObserved != nil && contextObserved != signature) { revokeSurroundingTextLocked() }
         contextObserved = signature
         if let bytes {
+            // The cloud authority is preserved but cannot authorize a local
+            // request. Its invalidity must not repeatedly revoke local grants.
+            if let settings = try? JSONDecoder().decode(Settings.self, from: bytes), settings.usesAppleIntelligence { return }
             do { _ = try SurroundingTextAuthority.policy(bytes) }
             catch { revokeSurroundingTextLocked() }
         } else { revokeSurroundingTextLocked() }
     }
     public func revokeSurroundingTextContext() { lock.withLock { revokeSurroundingTextLocked() } }
     public var surroundingTextIsPaused: Bool { lock.withLock { contextPaused } }
+    public func currentSurroundingTextPolicy() -> SurroundingTextPolicy? {
+        lock.withLock {
+            guard let bytes = try? contextDocumentLocked() else { return nil }
+            return try? SurroundingTextAuthority.policy(bytes)
+        }
+    }
     public func observeSurroundingTextDraft(from old: Settings, to new: Settings) {
+        if old.cleanup.localSurroundingTextEnabled != new.cleanup.localSurroundingTextEnabled {
+            lock.withLock { localContextDraftDisabled = !new.cleanup.localSurroundingTextEnabled }
+        }
         if SurroundingTextAuthority.draftSignature(old) != SurroundingTextAuthority.draftSignature(new) { revokeSurroundingTextContext() }
     }
     private func contextDocumentLocked(narrow: Bool = true) throws -> Data {
@@ -943,10 +961,17 @@ public final class SettingsStore {
                                                     live: Bool = false) -> SurroundingTextGrant? {
         lock.withLock {
             guard !live, settings.outputMode == .cleanup, settings.cleanupEnabled,
-                  let bytes = try? contextDocumentLocked(), !contextPaused,
-                  let policy = try? SurroundingTextAuthority.policy(bytes), policy.reviewed,
+                  let bytes = try? contextDocumentLocked(),
                   let current = try? JSONDecoder().decode(Settings.self, from: bytes),
                   SurroundingTextAuthority.draftSignature(current) == SurroundingTextAuthority.draftSignature(settings) else { return nil }
+            if !localContextDraftDisabled, let target = destination.bundleID, destination.host == nil,
+               let policy = try? SurroundingTextAuthority.localPolicy(bytes, target: target) {
+                // Configuration changes revoke old epochs. A new physical start
+                // may use the current saved local preference without cloud review.
+                contextPaused = false
+                return SurroundingTextGrant(epoch: contextEpoch, policy: policy)
+            }
+            guard !contextPaused, let policy = try? SurroundingTextAuthority.policy(bytes), policy.reviewed else { return nil }
             let winner = ProfileResolver.resolve(settings, at: destination)
             guard destination.bundleID == policy.target, destination.host == nil,
                   winner.profile?.id == policy.profileID,
@@ -958,8 +983,12 @@ public final class SettingsStore {
                                             _ action: () throws -> T) throws -> T {
         try lock.withLock {
             let bytes = try contextDocumentLocked()
-            guard !contextPaused, grant.epoch == contextEpoch, grant.operationID == operationID,
-                  let policy = try SurroundingTextAuthority.policy(bytes), policy.reviewed, policy == grant.policy else { throw SurroundingTextFailure.refused }
+            guard !contextPaused, grant.epoch == contextEpoch, grant.operationID == operationID else { throw SurroundingTextFailure.refused }
+            if grant.policy.primary.provider == "apple-intelligence" {
+                guard !localContextDraftDisabled, try SurroundingTextAuthority.localPolicy(bytes, target: grant.policy.target) == grant.policy else { throw SurroundingTextFailure.refused }
+            } else {
+                guard let policy = try SurroundingTextAuthority.policy(bytes), policy.reviewed, policy == grant.policy else { throw SurroundingTextFailure.refused }
+            }
             return try action()
         }
     }

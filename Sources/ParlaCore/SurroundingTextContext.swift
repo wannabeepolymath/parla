@@ -71,7 +71,8 @@ public enum SurroundingTextAuthority {
         // exact model. Observe its key-free descriptor without inventing defaults.
         value["primarySettings"] = ["provider": settings.cleanup.provider,
             "endpoint": settings.cleanup.baseURL ?? "", "model": settings.cleanup.model ?? "",
-            "anthropicModel": settings.cleanupModel, "environment": settings.cleanup.apiKeyEnvVar ?? ""]
+            "anthropicModel": settings.cleanupModel, "environment": settings.cleanup.apiKeyEnvVar ?? "",
+            "localLocale": settings.cleanup.localSourceLocale ?? "", "localContext": settings.cleanup.localSurroundingTextEnabled]
         value["cleanupEnabled"] = settings.cleanupEnabled
         value["outputMode"] = settings.outputMode.rawValue
         value["backupPresent"] = root["cleanupFailover"] != nil
@@ -91,6 +92,26 @@ public enum SurroundingTextAuthority {
         guard profile.enabled, profile.targetKind == .app, profile.normalizedTarget == profile.target,
               !TextRules.isBrowser(bundleID: profile.target), profile.validationError == nil else { throw SurroundingTextFailure.refused }
         return profile
+    }
+    public static func primary(_ settings: Settings) throws -> CleanupChainIdentity {
+        if settings.usesAppleIntelligence {
+            return CleanupChainIdentity(provider: "apple-intelligence", endpoint: "on-device", model: "Apple Intelligence · on-device", source: "on-device", access: "on-device")
+        }
+        return try CleanupChainIdentity.primary(settings)
+    }
+    static let globalProfileID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+    static func localPolicy(_ bytes: Data, target: String) throws -> SurroundingTextPolicy {
+        let root = try object(bytes), settings = try JSONDecoder().decode(Settings.self, from: bytes)
+        let resolved = ProfileResolver.resolve(settings, at: .init(bundleID: target))
+        guard settings.usesAppleIntelligence, settings.cleanup.localSurroundingTextEnabled,
+              resolved.settings.cleanupEnabled, resolved.settings.outputMode == .cleanup,
+              settings.cleanupFailover == nil, !target.isEmpty, !TextRules.isBrowser(bundleID: target) else { throw SurroundingTextFailure.refused }
+        var profile = resolved.profile ?? DictationProfile()
+        profile.id = resolved.profile?.id ?? globalProfileID; profile.target = target
+        return SurroundingTextPolicy(profile: profile, signature: try signature(root, settings: settings), primary: try primary(resolved.settings))
+    }
+    public static func matches(_ policy: SurroundingTextPolicy, profileID: UUID?) -> Bool {
+        policy.profileID == (profileID ?? globalProfileID)
     }
     static func candidate(_ bytes: Data, profileID: UUID) throws -> SurroundingTextPolicy {
         let root = try object(bytes), settings = try JSONDecoder().decode(Settings.self, from: bytes)
@@ -169,21 +190,25 @@ public struct SurroundingTextResponse: Sendable {
     public let field: SurroundingTextField
     public let range: NSRange
     public let units: [UInt16]
-    /// A qualified port proves a hard boundary at the beginning of its exact window.
+    /// A qualified port proves a boundary after any explicitly discarded leading fragment.
     public let startBoundaryProved: Bool
-    public init(field: SurroundingTextField, range: NSRange, units: [UInt16], startBoundaryProved: Bool) {
-        self.field = field; self.range = range; self.units = units; self.startBoundaryProved = startBoundaryProved
+    /// Native readers may discard an unproved leading fragment through a proved break.
+    public let discardLeadingUnits: Int
+    public init(field: SurroundingTextField, range: NSRange, units: [UInt16], startBoundaryProved: Bool, discardLeadingUnits: Int = 0) {
+        self.field = field; self.range = range; self.units = units; self.startBoundaryProved = startBoundaryProved; self.discardLeadingUnits = discardLeadingUnits
     }
     public func prefix(expected: SurroundingTextField) throws -> SurroundingTextPrefix? {
         guard expected.eligible, field == expected, range == expected.request, range.length <= 512,
               units.count == range.length, range.location <= Int.max - range.length,
-              range.location + range.length == expected.caret, startBoundaryProved else { throw SurroundingTextFailure.refused }
+              range.location + range.length == expected.caret, startBoundaryProved,
+              discardLeadingUnits >= 0, discardLeadingUnits <= units.count else { throw SurroundingTextFailure.refused }
         if units.isEmpty {
             guard expected.caret == 0, range.location == 0 else { throw SurroundingTextFailure.refused }
             return nil // ONLY exact successful zero-unit document-start response.
         }
-        let text = String(decoding: units, as: UTF16.self)
-        guard Array(text.utf16) == units else { throw SurroundingTextFailure.refused }
+        let bounded = Array(units.dropFirst(discardLeadingUnits))
+        let text = String(decoding: bounded, as: UTF16.self)
+        guard Array(text.utf16) == bounded else { throw SurroundingTextFailure.refused }
         // Starting from a proved boundary, Swift's grapheme walk cannot manufacture
         // a boundary by slicing or normalization. An overlarge final cluster refuses.
         var start = text.endIndex, size = 0, bytes = 0

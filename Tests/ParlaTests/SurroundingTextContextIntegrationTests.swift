@@ -216,7 +216,7 @@ final class B26AppHTTP: @unchecked Sendable {
     }
     func work(_ s: DictationSession.Session, field: B26AppField, http: B26AppHTTP,
               previous: Task<Void, Never>? = nil, port: SurroundingTextPort? = nil,
-              recognition: RecognitionClient? = nil) -> Task<Void, Never> {
+              recognition: RecognitionClient? = nil, localRuntime: LocalCleanupRuntime = LocalCleanupRuntime()) -> Task<Void, Never> {
         PendingOperationQueue.enqueue(previous: previous, operation: s.operation, completes: true, work: {
             defer { s.surroundingTextRun.finish() }
             let final = OrdinaryDictationFinalization(recordings: self.recordings, settings: self.d.store, entered: { self.storageEntries.append($0) })
@@ -244,7 +244,7 @@ final class B26AppHTTP: @unchecked Sendable {
                             }, stop: {})
                         },
                         backupDriver: self.backup ?? { _, _ in XCTFail("No backups"); return B26AppHandle(start: {}, stop: {}) },
-                        now: { self.time }, sleep: self.sleep, run: self.failoverRun, usage: { _, _, _ in XCTFail("No local usage") }, primitiveUsage: { _, _, _ in self.primitiveUsageCalls += 1 },
+                        now: { self.time }, sleep: self.sleep, localRuntime: localRuntime, run: self.failoverRun, usage: { _, _, _ in XCTFail("No local usage") }, primitiveUsage: { _, _, _ in self.primitiveUsageCalls += 1 },
                         contextPort: port ?? field.port, contextDriver: http.driver, disarmLearning: { self.disarm() }, contextLog: { self.logs.append($0) })
                 }, completed: { pair, text, failure in
                     await MainActor.run {
@@ -352,7 +352,6 @@ final class SurroundingTextContextIntegrationTests: XCTestCase {
     }
     @MainActor func testA01A16A18UnsupportedIsPreIssuanceCategoryOnce() async throws {
         let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP()
-        XCTAssertTrue(SurroundingTextPort.nativeQualifications.isEmpty)
         await r.work(s, field: f, http: h, port: .unsupported).value
         XCTAssertEqual(f.issues, 0); XCTAssertEqual(h.resumed, 0); XCTAssertEqual(r.categories, 1); XCTAssertFalse(s.surroundingTextRun.participated)
         XCTAssertEqual(r.posted, ["Category result."])
@@ -905,7 +904,7 @@ extension SurroundingTextContextIntegrationTests {
         guard await task.joinObserved(identity) else { return }
         XCTAssertEqual(opened, 1); XCTAssertEqual(slept, 0); XCTAssertEqual(f.proofs, 0); XCTAssertEqual(f.issues, 0)
         XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 1); XCTAssertEqual(r.primitiveUsageCalls, 1)
-        XCTAssertFalse(s.surroundingTextRun.participated); XCTAssertTrue(SurroundingTextPort.nativeQualifications.isEmpty)
+        XCTAssertFalse(s.surroundingTextRun.participated)
     }
 
     @MainActor func testStageA02HeldMetadataAndCleanupOwnLaneThroughGrantAndParentCancellation() async throws {

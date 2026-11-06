@@ -296,7 +296,10 @@ final class HubModel: ObservableObject {
     @Published private(set) var surroundingReview: SurroundingTextReview?
     @Published private(set) var surroundingPolicy: SurroundingTextPolicy?
     @Published var surroundingMessage: String?
-    var surroundingState: String { "NO FIELDS SUPPORTED IN THIS BUILD" }
+    var surroundingState: String {
+        guard let policy = surroundingPolicy, policy.revision != nil else { return "Cloud context is off" }
+        return store.surroundingTextIsPaused ? "Cloud context is paused — review again" : "Cloud context enabled for " + policy.target
+    }
     func surroundingDraftChanged() {
         store.revokeSurroundingTextContext(); surroundingReview = nil; surroundingMessage = nil
     }
@@ -308,7 +311,7 @@ final class HubModel: ObservableObject {
               settings.outputMode == .cleanup, settings.cleanupEnabled, !settings.usesAppleIntelligence,
               settings.cleanupFailover == nil else {
             surroundingReview = nil
-            surroundingMessage = "Save ordinary cleanup settings first, resolve errors, and remove backups before reviewing this source experiment."
+            surroundingMessage = "Use Normal cleanup with a cloud provider, save your changes, resolve errors, and remove backups before reviewing nearby text."
             return false
         }
         return true
@@ -323,7 +326,7 @@ final class HubModel: ObservableObject {
         do {
             surroundingPolicy = try store.confirmSurroundingText(review)
             surroundingReview = nil
-            surroundingMessage = "Reviewed for future captures only. Native fields remain unsupported."
+            surroundingMessage = "Cloud context enabled for future dictations in this app profile."
         } catch { surroundingReview = nil; surroundingMessage = "Saved settings changed or could not be written. Review again." }
     }
     func disableSurrounding(profileID: UUID) {
@@ -335,12 +338,13 @@ final class HubModel: ObservableObject {
         } catch { surroundingMessage = "Paused now; disable could not be saved. Repair settings and disable again." }
     }
     func surroundingDisclosure(_ policy: SurroundingTextPolicy) -> String {
-        "SOURCE EXPERIMENT — NO FIELDS SUPPORTED IN THIS BUILD. App: \(policy.target); profile: \(policy.profileID.uuidString). "
-        + "Primary: \(policy.primary.provider), \(policy.primary.endpoint), exact requested model \(policy.primary.model), \(policy.primary.access). "
-        + "Credential precedence: \(policy.primary.source). Same ordinary key/environment policy; environment may override at request time. Endpoint Keychain entries are shared across models, including ordinary primary. "
-        + "One preceding range ≤512 UTF-16 units; retain ≤256 units/1024 UTF-8 bytes. Logical read 1s, overall 15s; waits for actual exit. No backups. "
-        + "Context-assisted output only for current pending insertion; raw-only History if independently enabled, no last-result retrieval or correction learning. Profile/order/word/rule/style edits revoke review. "
-        + "A different reported model, including alias-to-dated identity, rejects output after sending and possible billing. No native allocation, OS-wide atomicity, remote-stop or quality guarantee."
+        "This sends existing text you did not dictate to your cleanup provider. App: \(policy.target). "
+        + "Provider: \(policy.primary.provider); endpoint: \(policy.primary.endpoint); exact requested model: \(policy.primary.model). "
+        + "Up to 256 UTF-16 units (1024 UTF-8 bytes) before the caret are sent with each eligible dictation. Text after the caret is never sent. "
+        + "Nearby text and context-assisted results stay out of History, diagnostics, last-result retrieval and correction learning. History keeps only your raw dictation when enabled. "
+        + "No backups. Changing the profile, provider, model, vocabulary or style pauses this permission until you review again. "
+        + "Credential precedence: \(policy.primary.source). Your ordinary Keychain and environment settings apply. Endpoint Keychain entries are shared across models. "
+        + "A different reported model, including alias-to-dated identity, rejects output after sending and possible billing."
     }
 
     @Published private(set) var failoverReview: CleanupFailoverReview?
@@ -664,6 +668,7 @@ final class HubModel: ObservableObject {
         settings = store.load()
         if !settings.energyActivityShadowEnabled { onActivityShadowRevoked() }
         settingsBase = settings
+        surroundingPolicy = store.currentSurroundingTextPolicy(); surroundingReview = nil
         failoverBackups = settings.cleanupFailover?.backups ?? []; failoverReview = nil
         if store.lastError == nil { onPreparationSaved(settings) }
         else { onPreparationSaveFailed() }
