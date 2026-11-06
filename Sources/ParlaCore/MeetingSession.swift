@@ -9,7 +9,13 @@ public enum MeetingSession {
     public static let sourceBytes = 960_044, resultBytes = 65_536, resultAggregate = 1_048_576
     public static let ordinaryBytes = 458_752, terminalBytes = 491_520, deletionBytes = 524_288
     public static let reservation: Int64 = 232_581_440, quota: Int64 = 268_435_456
-    public static let lifetime: Int64 = 604_800_000_000_000
+    /// Proposed B43 policy, pending final product sign-off. All durations are nanoseconds.
+    public enum RecordingPolicy {
+        public static let successfulAudioRetention: Int64 = 86_400_000_000_000
+        public static let failedAudioRetention: Int64 = 604_800_000_000_000
+        public static let transcriptRetention: Int64 = 2_592_000_000_000_000
+    }
+    public static let lifetime = RecordingPolicy.failedAudioRetention // Legacy v1 sessions.
     // Bounded pure timing pass: normalize <=480 events (32), sort (32), frontiers (64).
     // Storage precharges each invocation inside the unchanged 2048 fixed-credit cap.
     static let timingValidationCredits = 128
@@ -194,7 +200,7 @@ indirect enum MeetingJSON: Equatable {
             case 123:
                 index += 1; var a: [(String,MeetingJSON)] = []; var seen = Set<String>()
                 while true {
-                    guard a.count < 18 else { throw MeetingSession.Failure.bounds }
+                    guard a.count < 19 else { throw MeetingSession.Failure.bounds }
                     let key = try string(); guard seen.insert(key).inserted else { throw MeetingSession.Failure.schema }
                     try take(58); a.append((key,try value(depth: depth + 1)))
                     guard index < data.count else { throw MeetingSession.Failure.schema }
@@ -324,14 +330,15 @@ extension MeetingSession {
     struct Chunk: Equatable {
         let id: UUID, generation: UInt64, track: Int, sourceGeneration: UInt64, segment: Int, sequence: UInt64, start: UInt64, frames: UInt64, bytes: Int, hash: String, timing: Timing
         var member: Member, stage: Stage, accepted: Result?, attempt: Attempt?
-        var json: J { .array([.u(id),.n(generation),.n(track),.n(sourceGeneration),.n(segment),.n(sequence),.n(start),.n(frames),.n(bytes),.string(hash),member.meetingJSON,.n(stage.rawValue),timing.json,accepted?.json ?? .array([]),attempt?.json ?? .array([])]) }
+        var audioRemoved = false
+        var json: J { .array([.u(id),.n(generation),.n(track),.n(sourceGeneration),.n(segment),.n(sequence),.n(start),.n(frames),.n(bytes),.string(hash),member.meetingJSON,.n(stage.rawValue),timing.json,accepted?.json ?? .array([]),attempt?.json ?? .array([])] + (audioRemoved ? [.boolean(true)] : [])) }
         init(id: UUID, generation: UInt64, track: Int, sourceGeneration: UInt64, segment: Int, sequence: UInt64, start: UInt64, frames: UInt64, bytes: Int, hash: String, timing: Timing, member: Member, stage: Stage, accepted: Result?, attempt: Attempt?) {
             self.id = id; self.generation = generation; self.track = track; self.sourceGeneration = sourceGeneration; self.segment = segment; self.sequence = sequence; self.start = start; self.frames = frames; self.bytes = bytes; self.hash = hash; self.timing = timing; self.member = member; self.stage = stage; self.accepted = accepted; self.attempt = attempt
         }
         init(_ j: J) throws {
-            let a = try j.list(15); id = try a[0].id(); generation = try a[1].uint(); track = try a[2].index(1); sourceGeneration = try a[3].uint(); segment = try a[4].index(239); sequence = try a[5].uint(); start = try a[6].uint(maximumTrackFrames); frames = try a[7].uint(maximumFrames); bytes = try a[8].index(sourceBytes); hash = try a[9].s(64); member = try .init(meeting:a[10],cap:Int64(sourceBytes))
+            let a = try j.list(maximum:16); try require(a.count == 15 || a.count == 16); id = try a[0].id(); generation = try a[1].uint(); track = try a[2].index(1); sourceGeneration = try a[3].uint(); segment = try a[4].index(239); sequence = try a[5].uint(); start = try a[6].uint(maximumTrackFrames); frames = try a[7].uint(maximumFrames); bytes = try a[8].index(sourceBytes); hash = try a[9].s(64); member = try .init(meeting:a[10],cap:Int64(sourceBytes))
             guard let s = Stage(rawValue:try a[11].uint(5)) else { throw Failure.schema }; stage = s; timing = try .init(a[12])
-            accepted = try a[13].list(maximum:12).isEmpty ? nil : Result(a[13]); attempt = try a[14].list(maximum:4).isEmpty ? nil : Attempt(a[14])
+            accepted = try a[13].list(maximum:12).isEmpty ? nil : Result(a[13]); attempt = try a[14].list(maximum:4).isEmpty ? nil : Attempt(a[14]); audioRemoved = a.count == 16 ? try a[15].flag() : false
         }
         var pending: String { uuid(id) + ".source.pending" }; var final: String { uuid(id) + ".source.wav" }
         var name: String { stage == .sealed || stage == .tooShort ? final : pending }
@@ -363,15 +370,30 @@ extension MeetingSession {
             let a = try j.list(10); id = try a[0].id(); freeze = try a[1].uint(); digest = try a[2].s(64); count = try a[3].index(481); cursor = try a[4].index(count); try require(a[5].uint() == 2); phase = try a[6].uint(3); member = try .init(meeting:a[7],cap:4096); sources = try a[8].s(64); try require(a[9].s(122) == bitmap)
         }
     }
+    struct Retention: Equatable {
+        var keep = false, completed: Int64?, removing: UUID?
+        var json: J { .array([.boolean(keep),completed.map(J.n) ?? .array([]),removing.map(J.u) ?? .array([])]) }
+        init() {}
+        init(_ j: J) throws {
+            let a = try j.list(3); keep = try a[0].flag()
+            if case .integer = a[1] { completed = try a[1].int() } else { try require(a[1].list(0).isEmpty) }
+            if case .string = a[2] { removing = try a[2].id() } else { try require(a[2].list(0).isEmpty) }
+        }
+    }
     struct Ledger: Equatable {
         let owner: UUID, session: UUID, root: SavedAudioImportStorage.Identity, admitted: Int64, expires: Int64
         var revision: UInt64, clock: Int64, state: State, tracks: [Track], segments: [Segment], gaps: [Gap], provenance: [Provenance], chunks: [Chunk], extra: Extra?, terminal: Terminal?, deletion: Deletion?
-        var json: J { .object([("d",.string("parla.meeting.1")),("v",.n(1)),("owner",.u(owner)),("session",.u(session)),("root",.array([.n(root.device),.n(root.inode)])),("revision",.n(revision)),("admitted",.n(admitted)),("expires",.n(expires)),("clock",.n(clock)),("state",.n(state.rawValue)),("tracks",.array(tracks.map(\.json))),("segments",.array(segments.map(\.json))),("gaps",.array(gaps.map(\.json))),("provenance",.array(provenance.map(\.json))),("chunks",.array(chunks.map(\.json))),("extra",extra?.json ?? .array([])),("terminal",terminal?.json ?? .array([])),("deletion",deletion?.json ?? .array([]))]) }
+        var retention: Retention? = nil
+        var json: J {
+            var fields: [(String,J)] = [("d",.string("parla.meeting.1")),("v",.n(1)),("owner",.u(owner)),("session",.u(session)),("root",.array([.n(root.device),.n(root.inode)])),("revision",.n(revision)),("admitted",.n(admitted)),("expires",.n(expires)),("clock",.n(clock)),("state",.n(state.rawValue)),("tracks",.array(tracks.map(\.json))),("segments",.array(segments.map(\.json))),("gaps",.array(gaps.map(\.json))),("provenance",.array(provenance.map(\.json))),("chunks",.array(chunks.map(\.json))),("extra",extra?.json ?? .array([])),("terminal",terminal?.json ?? .array([])),("deletion",deletion?.json ?? .array([]))]
+            if let retention { fields.append(("retention",retention.json)) }
+            return .object(fields)
+        }
         var sourceDigest: String { J.array(tracks.map { .u($0.selection.instance) }).digest }
         var targets: [J] {
             var rows: [J] = []
             for c in chunks {
-                rows.append(.array([.u(c.id),.n(c.generation),.n(sourceBytes),.string(c.hash),c.member.meetingJSON,.n(0),.n(c.stage.rawValue)]))
+                if !c.audioRemoved { rows.append(.array([.u(c.id),.n(c.generation),.n(sourceBytes),.string(c.hash),c.member.meetingJSON,.n(0),.n(c.stage.rawValue)])) }
                 if let r = c.accepted { rows.append(.array([.u(r.id),.n(r.generation),.n(resultBytes),.string(r.hash),r.member.meetingJSON,.n(1),.n(3)])) }
             }
             if let e = extra { let r = e.result; rows.append(.array([.u(r.id),.n(r.generation),.n(resultBytes),.string(r.hash),r.member.meetingJSON,.n(1),.n(e.stage)])) }; return rows
@@ -381,13 +403,17 @@ extension MeetingSession {
             try validate(); return try json.encoded(cap:tier)
         }
         static func decode(_ bytes: Data) throws -> Self {
-            let f = try J.parse(bytes,cap:deletionBytes).fields(["d","v","owner","session","root","revision","admitted","expires","clock","state","tracks","segments","gaps","provenance","chunks","extra","terminal","deletion"])
+            let parsed = try J.parse(bytes,cap:deletionBytes)
+            guard case .object(let entries) = parsed else { throw Failure.schema }
+            let hasRetention = entries.contains { $0.0 == "retention" }
+            let f = try parsed.fields(["d","v","owner","session","root","revision","admitted","expires","clock","state","tracks","segments","gaps","provenance","chunks","extra","terminal","deletion"] + (hasRetention ? ["retention"] : []))
             func get(_ key: String) throws -> J { guard let v = f[key] else { throw Failure.schema }; return v }
             try require(get("d").s(32) == "parla.meeting.1" && get("v").uint() == 1)
             let root = try get("root").list(2); guard let device = Int32(exactly:try root[0].int()), let state = State(rawValue:try get("state").uint(4)) else { throw Failure.schema }
-            let value = try Self(owner:get("owner").id(),session:get("session").id(),root:.init(device:device,inode:root[1].uint()),admitted:get("admitted").int(),expires:get("expires").int(),revision:get("revision").uint(),clock:get("clock").int(),state:state,
+            var value = try Self(owner:get("owner").id(),session:get("session").id(),root:.init(device:device,inode:root[1].uint()),admitted:get("admitted").int(),expires:get("expires").int(),revision:get("revision").uint(),clock:get("clock").int(),state:state,
                 tracks:get("tracks").list(maximum:2).map(Track.init),segments:get("segments").list().map(Segment.init),gaps:get("gaps").list().map(Gap.init),provenance:get("provenance").list(maximum:32).map(Provenance.init),chunks:get("chunks").list().map(Chunk.init),
                 extra:get("extra").list(maximum:5).isEmpty ? nil : Extra(get("extra")),terminal:get("terminal").list(maximum:7).isEmpty ? nil : Terminal(get("terminal")),deletion:get("deletion").list(maximum:10).isEmpty ? nil : Deletion(get("deletion")))
+            value.retention = hasRetention ? try Retention(get("retention")) : nil
             try value.validate(); let tier = value.state == .deleting || value.state == .authorityDead ? deletionBytes : value.terminal == nil ? ordinaryBytes : terminalBytes
             try require(bytes.count <= tier); return value
         }
@@ -437,7 +463,11 @@ extension MeetingSession {
             }
         }
         func validate() throws {
-            try require(admitted >= 0 && expires == add(admitted,lifetime) && clock >= admitted && clock <= expires)
+            try require(admitted >= 0 && expires == add(admitted,retention == nil ? lifetime : RecordingPolicy.transcriptRetention) && clock >= admitted && (retention != nil || clock <= expires))
+            if let retention {
+                if let completed = retention.completed { try require(completed >= admitted) }
+                if let removing = retention.removing { try require(chunks.contains { $0.id == removing && !$0.audioRemoved } && state != .active) }
+            } else { try require(!chunks.contains { $0.audioRemoved }) }
             try require(tracks.count <= 2 && !tracks.isEmpty && chunks.count <= 240 && segments.count <= 240 && gaps.count <= 240 && provenance.count <= 32)
             try require(Set(tracks.map { $0.selection.instance }).count == tracks.count && Set(tracks.map { $0.selection.kind }).count == tracks.count)
             try require(!(tracks.contains { $0.selection.kind == .selectedApplication } && tracks.contains { $0.selection.kind == .disclosedSystem }))
@@ -475,7 +505,7 @@ extension MeetingSession {
                 try require(r.id == allocation(session,role:.result,generation:r.generation) && r.generation <= revision); try attemptReference(r.attempt,chunk:chunk.id)
                 try require(r.member.identity.device == root.device && r.bytes > 0 && r.bytes <= resultBytes && r.source == chunk.id && r.sourceGeneration == chunk.generation && r.sourceHash == chunk.hash)
                 try require(chunk.stage == .sealed && provenance.indices.contains(r.requested) && provenance.indices.contains(r.observed) && r.requested != r.observed)
-                try require(provenance[r.requested].role == .requested && provenance[r.observed].role == .observed && r.created >= admitted && r.created < expires)
+                try require(provenance[r.requested].role == .requested && provenance[r.observed].role == .observed && r.created >= admitted && (retention != nil || r.created < expires))
                 if complete { try require(r.member.bytes == Int64(r.bytes)) }
                 else { try require(r.member.bytes == 0 || r.member.bytes == Int64(r.bytes)) }
             }

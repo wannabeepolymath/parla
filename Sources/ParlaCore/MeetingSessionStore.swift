@@ -5,7 +5,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
     public typealias Failure = MeetingSession.Failure
     public enum Phase: String, Sendable {
         case admission, bootstrap, chunkA, chunkB, chunkC, resultReserve, resultWrite, resultPromote, resultRetire
-        case boundary, attemptBegin, attemptFinish, resultRead, stop, interrupted, expiry, deleteIntent, deleteSlice, deleteAuthority, deleteClose, borrowAcquire, borrowRelease, detach
+        case keep, rawIntent, rawDelete, boundary, attemptBegin, attemptFinish, resultRead, stop, interrupted, expiry, deleteIntent, deleteSlice, deleteAuthority, deleteClose, borrowAcquire, borrowRelease, detach
     }
     public struct Cost: Equatable, Sendable {
         public let domain: MeetingRegistryDomain
@@ -50,6 +50,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
     public struct ChunkMetadata: Equatable, Sendable {
         public let id: UUID, generation: UInt64, source: UUID, sourceGeneration: UInt64
         public let track: Int, sequence: UInt64, canonicalStart: UInt64, frames: UInt64
+        public let audioRemoved: Bool
         public let stage: MeetingSession.Stage, accepted: AcceptedMetadata?, lastAttempt: UInt64?
     }
     public struct Metadata: Equatable, Sendable {
@@ -57,6 +58,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
         public let session: UUID, owner: UUID, revision: UInt64, created: Int64, expires: Int64
         public let selections: [MeetingSession.Selection], chunks: [ChunkMetadata], provenance: [MeetingSession.Provenance]
         public let terminal: MeetingSession.Reason?, unknownCoverage: Bool, expired: Bool, deleting: Bool, unavailable: Bool
+        public let kept: Bool, rawExpires: Int64?
         public let retirement: Retirement
     }
     /// Exclusion facts only; neither a payload grant nor reusable file authority.
@@ -99,13 +101,13 @@ public final class MeetingSessionStore: @unchecked Sendable {
                         requested:l.provenance[r.requested].id,observed:l.provenance[r.observed].id)
                 }
                 return .init(id:c.id,generation:c.generation,source:l.tracks[c.track].selection.instance,sourceGeneration:c.sourceGeneration,
-                    track:c.track,sequence:c.sequence,canonicalStart:c.start,frames:c.frames,stage:c.stage,accepted:accepted,lastAttempt:c.attempt?.state.rawValue)
+                    track:c.track,sequence:c.sequence,canonicalStart:c.start,frames:c.frames,audioRemoved:c.audioRemoved,stage:c.stage,accepted:accepted,lastAttempt:c.attempt?.state.rawValue)
             }
             return .init(session:l.session,owner:l.owner,revision:l.revision,created:l.admitted,expires:l.expires,
                 selections:l.tracks.map(\.selection),chunks:chunks,provenance:l.provenance,terminal:l.terminal?.reason,
                 unknownCoverage:l.terminal.map { $0.mask != 0 } ?? false,expired:expired,
                 deleting:l.state == .deleting || l.state == .authorityDead,unavailable:issue || interruptionPending,
-                retirement:l.extra.map { $0.kind == .retired ? .retired : .candidateUnavailable } ?? .none)
+                kept:l.retention?.keep ?? false,rawExpires:try rawDeadline(l),retirement:l.extra.map { $0.kind == .retired ? .retired : .candidateUnavailable } ?? .none)
         }
     }
     @discardableResult public func retireAcceptedReplacementIfNeeded(authorized: () -> Bool) throws -> Receipt? {
@@ -168,7 +170,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
     }
     private func now(_ l: Ledger?, usable: Bool) throws -> Int64 {
         let n = try wallClock(); guard n >= 0, lastClock == nil || n >= lastClock! else { throw Failure.clock }
-        if let l { guard n >= l.admitted, n >= l.clock else { throw Failure.clock }; if n >= l.expires { expired = true; lease.fence(allWorkers:true); if usable { throw Failure.unavailable } } }
+        if let l { guard n >= l.admitted, n >= l.clock else { throw Failure.clock }; if n >= l.expires && l.retention?.keep != true { expired = true; lease.fence(allWorkers:true); if usable { throw Failure.unavailable } } }
         lastClock = n; return n
     }
     /// Explicit evaluation only. Cached projection itself reads neither clocks nor storage.
@@ -207,7 +209,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
         var out: [Target] = []
         for c in l.chunks {
             let aliases = c.stage == .written ? [c.pending,c.final] : [c.name]
-            out.append(.init(id:c.id,generation:c.generation,cap:Int64(MeetingSession.sourceBytes),hash:c.hash,member:c.member,aliases:aliases,exact:c.stage == .sealed || c.stage == .tooShort))
+            if !c.audioRemoved { out.append(.init(id:c.id,generation:c.generation,cap:Int64(MeetingSession.sourceBytes),hash:c.hash,member:c.member,aliases:aliases,exact:c.stage == .sealed || c.stage == .tooShort)) }
             if let r = c.accepted { out.append(.init(id:r.id,generation:r.generation,cap:Int64(MeetingSession.resultBytes),hash:r.hash,member:r.member,aliases:[MeetingSession.uuid(r.id)+".raw.txt"],exact:true)) }
         }
         if let e = l.extra {
@@ -222,7 +224,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
         for (i,t) in all.enumerated() {
             let present = t.aliases.filter { names.contains($0) }
             let mayBeMissing: Bool
-            if let d = l.deletion { mayBeMissing = i < min(d.count,d.cursor+2) } else { mayBeMissing = l.extra?.kind == .retired && i == all.count-1 }
+            if let d = l.deletion { mayBeMissing = i < min(d.count,d.cursor+2) || l.retention?.removing == t.id } else { mayBeMissing = (l.extra?.kind == .retired && i == all.count-1) || l.retention?.removing == t.id }
             if let d = l.deletion, i < d.cursor { guard present.isEmpty else { throw Failure.unavailable } }
             else { guard present.count == 1 || (present.isEmpty && mayBeMissing) else { throw Failure.unavailable } }
             expected.formUnion(present)
@@ -289,13 +291,14 @@ public final class MeetingSessionStore: @unchecked Sendable {
     public func admit(owner: UUID, session: UUID, selections: [MeetingSession.Selection], segments: [MeetingSession.Segment], authorized: () -> Bool) throws -> Receipt {
         try lock.withLock {
             guard ledger == nil, !issue, !selections.isEmpty, selections.count <= 2, segments.count == selections.count else { throw Failure.bounds }
-            let n = try now(nil,usable:false), end = try MeetingSession.add(n,MeetingSession.lifetime)
+            let n = try now(nil,usable:false), end = try MeetingSession.add(n,MeetingSession.RecordingPolicy.transcriptRetention)
             let b = try lease.begin(cold:true)
             do {
                 guard try lease.acquire(create:true,b), let root = lease.identity else { throw Failure.unavailable }
                 guard try lease.names(b) == Set(["lock"]) else { throw Failure.unavailable }
                 let tracks = selections.enumerated().map { i,s in MeetingSession.Track(selection:s,epoch:segments[i].timing.epoch,captured:0,sequence:0,segment:i) }
-                let l = Ledger(owner:owner,session:session,root:root,admitted:n,expires:end,revision:0,clock:n,state:.active,tracks:tracks,segments:segments,gaps:[],provenance:[],chunks:[],extra:nil,terminal:nil,deletion:nil)
+                var l = Ledger(owner:owner,session:session,root:root,admitted:n,expires:end,revision:0,clock:n,state:.active,tracks:tracks,segments:segments,gaps:[],provenance:[],chunks:[],extra:nil,terminal:nil,deletion:nil)
+                l.retention = .init()
                 try b.charge(f:MeetingSession.timingValidationCredits)
                 let marker = ownerJSON(l).bytes; _ = try l.encoded(tier:MeetingSession.ordinaryBytes)
                 let (token,registered) = try lease.create("owner.json",cap:4096,b)
@@ -438,7 +441,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
     public func beginAttempt(chunk: UUID, requested: MeetingSession.Provenance, authorized: () -> Bool) throws -> AttemptToken {
         let receipt = try transaction(.attemptBegin,token:nil,usable:true,tier:MeetingSession.ordinaryBytes,authorized:authorized) { l,_,_ in
             guard l.state != .active,l.state != .deleting,l.state != .authorityDead,l.extra == nil,!l.chunks.contains(where:{$0.attempt?.state == .pending}),requested.role == .requested,
-                let i = l.chunks.firstIndex(where:{$0.id == chunk}),l.chunks[i].stage == .sealed else { throw Failure.stale }
+                let i = l.chunks.firstIndex(where:{$0.id == chunk && !$0.audioRemoved && l.retention?.removing != $0.id}),l.chunks[i].stage == .sealed else { throw Failure.stale }
             let registry = try self.registry(requested,&l)
             let generation = try MeetingSession.add(l.revision,1), attempt = MeetingSession.allocation(l.session,role:.attempt,generation:generation)
             l.chunks[i].attempt = .init(id:attempt,generation:generation,requested:registry,state:.pending)
@@ -502,6 +505,10 @@ public final class MeetingSessionStore: @unchecked Sendable {
             _ = try self.lease.read(e.name,expected:r.member,cap:Int64(r.bytes),hash:r.hash,collect:false,authorized:auth,b)
             r.member = try self.lease.rename(e.name,member:r.member,to:MeetingSession.uuid(r.id)+".raw.txt",replacing:nil,authorized:auth,b)
             l.chunks[e.chunk].accepted = r; l.chunks[e.chunk].attempt?.state = .completed
+            if l.retention != nil,l.chunks.contains(where: { $0.accepted != nil }),
+               l.chunks.allSatisfy({ $0.accepted != nil || $0.stage == .tooShort }) {
+                let completed = try self.now(l,usable:true); l.retention?.completed = completed
+            }
             l.extra = old.map { .init(kind:.retired,chunk:e.chunk,result:$0,stage:3,authority:e.authority) }
             return (r.id,r.generation,r.member,r.hash)
         }
@@ -523,6 +530,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
                 let (l,_,_) = try fresh(b)
                 try authority(l,usable:true,authorized:authorized)
                 let i = try attemptIndex(token,l), c = l.chunks[i]
+                guard !c.audioRemoved,l.retention?.removing != c.id else { throw Failure.unavailable }
                 let data = try lease.read(c.name,expected:c.member,cap:Int64(c.bytes),hash:c.hash,collect:true,authorized:{try self.authority(l,usable:true,authorized:authorized)},b).1
                 let held = try lease.borrow(c.name,member:c.member,generation:c.generation,b)
                 try audit(lease.names(b),l); let cost = try lease.finish(b)
@@ -552,6 +560,45 @@ public final class MeetingSessionStore: @unchecked Sendable {
             let b = try lease.begin(retirementOnly:true)
             do { try lease.release(.init(context:token.context,epoch:token.epoch,serial:token.serial),b); return receipt(l,phase:.borrowRelease,object:chunk.id,generation:chunk.generation,member:chunk.member,hash:chunk.hash,cost:lease.snapshot(b)) }
             catch { lease.fail(b); issue = true; recordFailure(.borrowRelease,b); throw error }
+        }
+    }
+    private func rawDeadline(_ l: Ledger) throws -> Int64? {
+        guard let policy = l.retention,!policy.keep,l.chunks.contains(where: { !$0.audioRemoved }) else { return nil }
+        return try MeetingSession.add(policy.completed ?? l.admitted,policy.completed == nil ? MeetingSession.RecordingPolicy.failedAudioRetention : MeetingSession.RecordingPolicy.successfulAudioRetention)
+    }
+    @discardableResult public func setKeep(_ keep: Bool,authorized: () -> Bool) throws -> Receipt {
+        try transaction(.keep,token:nil,usable:false,tier:MeetingSession.ordinaryBytes,authorized:authorized) { l,_,_ in
+            guard self.lease.drained,l.state != .active,l.retention != nil,l.retention?.removing == nil else { throw Failure.held }
+            let now = try self.now(l,usable:false)
+            guard !keep || l.retention?.keep == true || now < l.expires else { throw Failure.unavailable }
+            l.retention?.keep = keep; return (nil,nil,nil,nil)
+        }
+    }
+    /// Each source unlink has a durable intent and a separate completion publication.
+    /// Restart accepts only the exact missing source named by that intent; results remain intact.
+    public func sweepRawAudio(authorized: () -> Bool) throws {
+        for _ in 0..<MeetingSession.maximumChunks {
+            let target = try lock.withLock { () throws -> UUID? in
+                guard let l = ledger,!issue,l.state != .active,l.deletion == nil,lease.drained else { return nil }
+                if let removing = l.retention?.removing { return removing }
+                guard let deadline = try rawDeadline(l),try now(l,usable:false) >= deadline,!expired else { return nil }
+                return l.chunks.first(where: { !$0.audioRemoved })?.id
+            }
+            guard let target else { return }
+            _ = try transaction(.rawIntent,token:nil,usable:true,tier:MeetingSession.ordinaryBytes,authorized:authorized) { l,_,_ in
+                guard self.lease.drained,l.state != .active,l.retention?.keep == false,
+                      l.retention?.removing == nil || l.retention?.removing == target else { throw Failure.held }
+                l.retention?.removing = target; return (target,nil,nil,nil)
+            }
+            _ = try transaction(.rawDelete,token:nil,usable:true,tier:MeetingSession.ordinaryBytes,authorized:authorized) { l,b,names in
+                guard self.lease.drained,l.retention?.removing == target,
+                      let i = l.chunks.firstIndex(where: { $0.id == target && !$0.audioRemoved }) else { throw Failure.stale }
+                let c = l.chunks[i]
+                try self.lease.unlink(c.name,member:c.member,cap:Int64(c.bytes),exact:c.stage == .sealed || c.stage == .tooShort,missingAllowed:true,b)
+                try self.lease.syncDirectory(b)
+                l.chunks[i].audioRemoved = true; l.retention?.removing = nil
+                return (target,nil,nil,nil)
+            }
         }
     }
     public func deleteIntent(id: UUID, terminalGeneration: UInt64, holdEpoch: UInt64, authorized: () -> Bool) throws -> Receipt {

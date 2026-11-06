@@ -79,7 +79,7 @@ import ParlaCore
     }
     func requestStopSaving() {
         if pendingStart { captureAuthority?.revoke() }
-        streamIngress?.fence(); ingressOpen = false
+        streams.forEach { $0.ingress.fence() }; ingressOpen = false
         if state == .starting || state == .recording { state = .stopping }
         requestProducerStop(); publish()
     }
@@ -140,10 +140,14 @@ import ParlaCore
     private var unclassifiedProducerTasks: [Task<Void,Never>] = []
     private var streamPort: SingleSourceStreamPort?
     private var streamIngress: MeetingAudioIngress?
-    private var streamObserver: Task<Void,Never>?, streamWriter: Task<Result<Void,Error>,Never>?
-    private var streamQuitPending = false, streamWriterFinished = false
-    private var streamFailure: Error?
-    private var streamWriterID: UUID?
+    private final class StreamRun {
+        let ingress: MeetingAudioIngress, track: Int
+        var observer: Task<Void,Never>?, writer: Task<Result<Void,Error>,Never>?
+        var finished = false, failure: Error?, writerID: UUID?
+        init(_ ingress: MeetingAudioIngress, track: Int) { self.ingress = ingress; self.track = track }
+    }
+    private var streams: [StreamRun] = []
+    private var streamQuitPending = false
     private var pendingStart = false
     private var phaseActive = false
     private var phase: Task<Void,Never>?, idleWaiters: [CheckedContinuation<Void,Never>] = []
@@ -163,7 +167,7 @@ import ParlaCore
         capture = .init(validate:{ _ in false },start:{ _ in .init(first:nil,second:nil) },requestStop:{})
     }
     private func fail(_ error: Error) {
-        streamIngress?.revoke()
+        streams.forEach { $0.ingress.revoke() }
         if streamIngress != nil { captureAuthority?.revoke() }
         switch error {
         case MeetingSession.Failure.clock: concern = .invalidClock
@@ -225,6 +229,17 @@ import ParlaCore
               segment.timing.pts == 0,segment.timing.denominator == 1,segment.timing.sample == 0 else { throw MeetingSession.Failure.bounds }
         try await startImpl(owner:owner,session:session,selections:[selection],segments:[segment],streaming:true)
     }
+    /// One microphone and optionally one application, each with independent bounded ingress.
+    func startSources(owner: UUID, session: UUID, selections: [MeetingSession.Selection], segments: [MeetingSession.Segment]) async throws {
+        guard streamPort != nil,selections.count == 2,segments.count == 2,
+              selections.map(\.kind) == [.microphone,.selectedApplication] else { throw MeetingSession.Failure.bounds }
+        for (i,segment) in segments.enumerated() {
+            guard selections[i].generation > 0,segment.track == i,segment.generation == selections[i].generation,
+                  segment.canonicalStart == 0,segment.timing.mapping == .unknown,segment.timing.rate == 16_000,
+                  segment.timing.pts == 0,segment.timing.denominator == 1,segment.timing.sample == 0 else { throw MeetingSession.Failure.bounds }
+        }
+        try await startImpl(owner:owner,session:session,selections:selections,segments:segments,streaming:true)
+    }
     private func startImpl(owner: UUID, session: UUID, selections: [MeetingSession.Selection], segments: [MeetingSession.Segment], streaming: Bool) async throws {
         guard state == .idle,self.session == nil,!quitIntent,concern == nil,protectionOperation == nil,explicitOutput == nil,!selections.isEmpty,selections.count <= 2 else { throw MeetingSession.Failure.stale }
         reservedSlots = 0; unknownMask = 0; terminalReason = nil; deleteRequested = false; stopRequest = nil; stopTask = nil; deleteTask = nil
@@ -233,7 +248,11 @@ import ParlaCore
         let authority = Authority(); captureAuthority = authority; let store = store
         defer { pendingStart = false; publish() }
         let valid: Bool
-        if streaming,let streamPort { valid = await streamPort.validate(selections[0]) }
+        if streaming,let streamPort {
+            var accepted = true
+            for selection in selections { if !(await streamPort.validate(selection)) { accepted = false } }
+            valid = accepted
+        }
         else { valid = await capture.validate(selections) }
         guard valid,state == .starting,generation == admittedGeneration,!quitIntent,authority.allowed() else {
             authority.revoke()
@@ -253,15 +272,21 @@ import ParlaCore
             for s in selections { holds.append(try store.register(s.kind == .microphone ? .microphone : .system)) }
             let runs: [Producer]
             if streaming,let streamPort {
-                let selection = selections[0], segment = segments[0]
-                let stream = MeetingAudioIngress(context:.init(session:session,ownerGeneration:generation,source:selection.instance,
-                    sourceGeneration:selection.generation,segment:segment.id,epoch:segment.timing.epoch))
-                streamIngress = stream
-                try chargeStream(stream); try chargeStream(stream); try stream.activate()
-                // Both permits and producer hold precede the first possible synchronous callback.
-                runs = [streamPort.start(selection,stream)]
-                if case .notStarted = runs[0].exit {
-                    _ = try stream.end(stream.fence(),tail:UnsafeBufferPointer<Float>(start:nil,count:0))
+                // Prepare every slot before either producer can synchronously deliver PCM.
+                for (i,selection) in selections.enumerated() {
+                    let segment = segments[i]
+                    let stream = MeetingAudioIngress(context:.init(session:session,ownerGeneration:generation,source:selection.instance,
+                        sourceGeneration:selection.generation,segment:segment.id,epoch:segment.timing.epoch))
+                    streams.append(StreamRun(stream,track:i))
+                    try chargeStream(stream); try chargeStream(stream); try stream.activate()
+                }
+                streamIngress = streams.first?.ingress
+                runs = streams.map { run in
+                    let producer = streamPort.start(selections[run.track],run.ingress)
+                    if case .notStarted = producer.exit {
+                        _ = try? run.ingress.end(run.ingress.fence(),tail:UnsafeBufferPointer<Float>(start:nil,count:0))
+                    }
+                    return producer
                 }
             } else { runs = capture.start(selections).all }
             unclassifiedProducerTasks = runs.compactMap { if case .actual(let task) = $0.exit { return task }; return nil }
@@ -275,76 +300,78 @@ import ParlaCore
             }
             unclassifiedProducerTasks.removeAll() // exact task handles are now retained by producers
             if runs.contains(where:{ if case .notStarted = $0.exit { return true }; return false }) {
-                streamIngress?.fence()
+                streams.forEach { $0.ingress.fence() }
                 ingressOpen = false; state = .stopping; requestProducerStop(); try await joinProducers(); throw MeetingSession.Failure.unavailable
             }
             ingressOpen = true; state = .recording; try await cache()
-            if let stream = streamIngress { observeStream(stream) }
+            for run in streams { observeStream(run.ingress) }
         } catch { fail(error); throw error }
     }
     private func chargeStream(_ stream: MeetingAudioIngress) throws {
         guard reservedSlots < 240 else { throw MeetingSession.Failure.bounds }
         let next = reservedSlots+1
-        try stream.reserve(id:UUID(),slot:UInt64(next)); reservedSlots = next
+        try stream.reserve(id:UUID(),slot:stream.facts.allocated+1); reservedSlots = next
     }
     private func observeStream(_ stream: MeetingAudioIngress) {
-        streamObserver = Task { @MainActor [self] in
+        guard let run = streams.first(where: { $0.ingress === stream }) else { return }
+        run.observer = Task { @MainActor [self] in
             for await _ in stream.events {
                 let facts = stream.facts
-                if facts.unknown { unknownMask |= 1; terminalReason = facts.reason ?? .unknownCoverage }
+                if facts.unknown { unknownMask |= UInt64(1) << run.track; terminalReason = facts.reason ?? .unknownCoverage }
                 else if let reason = facts.reason { terminalReason = reason }
                 if !facts.open,!deleteRequested {
                     ingressOpen = false
                     if state == .recording { state = .stopping }
                     if !facts.ended { requestProducerStop() }
                 }
-                if streamWriterFinished,streamWriter != nil {
-                    do { try await joinStreamWriter() } catch { streamFailure = error }
+                if run.finished,run.writer != nil {
+                    do { try await joinStreamWriter(run) } catch { run.failure = error }
                 }
                 launchStreamWriter(stream)
             }
         }
     }
     private func launchStreamWriter(_ stream: MeetingAudioIngress) {
-        guard streamWriter == nil,streamFailure == nil,stream.readyPermit != nil else { return }
-        streamWriterID = UUID()
-        streamWriter = Task { @MainActor [self] in
-            defer { streamWriterFinished = true; stream.wakeCoordinator() }
+        guard let run = streams.first(where: { $0.ingress === stream }),run.writer == nil,run.failure == nil,stream.readyPermit != nil else { return }
+        run.writerID = UUID()
+        run.writer = Task { @MainActor [self] in
+            defer { run.finished = true; stream.wakeCoordinator() }
             do {
                 while let permit = stream.readyPermit { try await writeStreamSlot(stream,permit:permit) }
                 return .success(())
             } catch {
                 stream.revoke()
-                if !deleteRequested { unknownMask |= 1; terminalReason = .unknownCoverage; fail(error) }
+                if !deleteRequested { unknownMask |= UInt64(1) << run.track; terminalReason = .unknownCoverage; fail(error) }
                 return .failure(error)
             }
         }
     }
     private func writeStreamSlot(_ stream: MeetingAudioIngress, permit: MeetingAudioIngress.Permit) async throws {
         await waitForPhase()
-        guard !deleteRequested,stream === streamIngress,stream.context.session == session,stream.context.ownerGeneration == generation,
-              selections.count == 1,let selection = selections.first,
+        guard let run = streams.first(where: { $0.ingress === stream }),!deleteRequested,stream.context.session == session,stream.context.ownerGeneration == generation,
+              selections.indices.contains(run.track),
+              case let selection = selections[run.track],
               selection.kind == .microphone || selection.kind == .selectedApplication,
               stream.context.source == selection.instance,stream.context.sourceGeneration == selection.generation,
-              ingress[0] == nil else { throw MeetingSession.Failure.stale }
+              ingress[run.track] == nil else { throw MeetingSession.Failure.stale }
         // Worker vocabulary identifies ownership; selectedApplication never admits disclosedSystem breadth.
         let hold = try store.register(selection.kind == .microphone ? .microphoneCallback : .systemCallback)
-        let ticket = Ticket(id:permit.id,session:stream.context.session,generation:generation,track:0,
+        let ticket = Ticket(id:permit.id,session:stream.context.session,generation:generation,track:run.track,
                             source:stream.context.source,sourceGeneration:stream.context.sourceGeneration)
         let delivery: MeetingAudioIngress.Delivery
         do { delivery = try stream.take(permit) }
         catch { try store.actualExit(hold); throw error }
-        ingress[0] = .init(ticket:ticket,hold:hold,chunk:true,submitted:false)
+        ingress[run.track] = .init(ticket:ticket,hold:hold,chunk:true,submitted:false)
         do {
             let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:stream.context.epoch,mapping:.unknown)
             let input = try MeetingSessionStore.ChunkInput(session:ticket.session,source:ticket.source,id:permit.id,generation:permit.slot,
-                track:0,sourceGeneration:ticket.sourceGeneration,segment:stream.context.segment,sequence:delivery.sequence,
+                track:run.track,sourceGeneration:ticket.sourceGeneration,segment:stream.context.segment,sequence:delivery.sequence,
                 start:delivery.start,frames:delivery.frames,timing:timing,bytes:delivery.bytes)
             try await submit(ticket,input:input,authorized:{ stream.permitAllowed(permit) })
         } catch {
             // Pre-submit construction errors still own the callback hold. Submitted bodies retire themselves.
-            if let owned = ingress[0],!owned.submitted {
-                try store.actualExit(owned.hold); ingress.removeValue(forKey:0); callbacksExited()
+            if let owned = ingress[run.track],!owned.submitted {
+                try store.actualExit(owned.hold); ingress.removeValue(forKey:run.track); callbacksExited()
             }
             try stream.retire(permit); throw error
         }
@@ -357,24 +384,25 @@ import ParlaCore
             else { terminalReason = .slotExhaustion; stream.fence(); requestProducerStop() }
         }
     }
-    private func joinStreamWriter() async throws {
-        guard let task = streamWriter,let id = streamWriterID else { return }
+    private func joinStreamWriter(_ run: StreamRun) async throws {
+        guard let task = run.writer,let id = run.writerID else { return }
         let result = await task.value
-        if streamWriterID == id { streamWriter = nil; streamWriterID = nil; streamWriterFinished = false }
-        if case .failure(let error) = result { streamFailure = error }
+        if run.writerID == id { run.writer = nil; run.writerID = nil; run.finished = false }
+        if case .failure(let error) = result { run.failure = error }
         try result.get()
     }
     private func drainStream(_ stream: MeetingAudioIngress) async throws {
+        guard let run = streams.first(where: { $0.ingress === stream }) else { throw MeetingSession.Failure.stale }
         // Producer never waits for this method. It has already handed off EOS and actually exited.
         // At source exit there are at most two slots; identity-checked joins tolerate observer reentrancy.
         for _ in 0..<3 {
-            try await joinStreamWriter()
-            if let streamFailure { throw streamFailure }
+            try await joinStreamWriter(run)
+            if let failure = run.failure { throw failure }
             launchStreamWriter(stream)
-            if streamWriter == nil { break }
+            if run.writer == nil { break }
         }
-        guard streamWriter == nil,stream.facts.settled else { throw MeetingSession.Failure.held }
-        if stream.facts.unknown { unknownMask |= 1; terminalReason = stream.facts.reason ?? .unknownCoverage }
+        guard run.writer == nil,stream.facts.settled else { throw MeetingSession.Failure.held }
+        if stream.facts.unknown { unknownMask |= UInt64(1) << run.track; terminalReason = stream.facts.reason ?? .unknownCoverage }
         else if let reason = stream.facts.reason { terminalReason = reason }
     }
     private func increment(_ n: UInt64) throws -> UInt64 { let next = n.addingReportingOverflow(1); guard !next.overflow else { throw MeetingSession.Failure.bounds }; return next.partialValue }
@@ -479,11 +507,12 @@ import ParlaCore
                 for task in unclassifiedProducerTasks { await task.value }; unclassifiedProducerTasks.removeAll()
                 for (producer,hold) in producers {
                     if case .actual(let task) = producer.exit { await task.value }
-                    if let stream = streamIngress {
+                    if let run = streams.first(where: { $0.ingress.context.source == producer.source }) {
+                        let stream = run.ingress
                         guard stream.facts.producerFinished else { throw MeetingSession.Failure.held }
                         try await drainStream(stream)
                         guard stream.facts.settled else { throw MeetingSession.Failure.held }
-                        if let streamObserver { await streamObserver.value; self.streamObserver = nil }
+                        if let observer = run.observer { await observer.value; run.observer = nil }
                     }
                     try store.actualExit(hold)
                 }
@@ -507,7 +536,7 @@ import ParlaCore
     func stop() async throws {
         if let stopTask { try await stopTask.value.get(); return }
         guard state == .recording || state == .stopping || state == .unavailable else { if state == .stopped { return }; throw MeetingSession.Failure.stale }
-        streamIngress?.fence()
+        streams.forEach { $0.ingress.fence() }
         ingressOpen = false; state = .stopping; requestProducerStop()
         let task = Task { @MainActor [self] () -> Result<Void,Error> in
             do {
@@ -516,7 +545,7 @@ import ParlaCore
                 let store = store, generation = generation, epoch = holdEpoch, mask = unknownMask, reason = terminalReason
                 let flags: UInt64 = 0x7f | (reason == .detailExhaustion ? 1 << 10 : 0) | (reason == .slotExhaustion ? 1 << 11 : 0)
                 _ = try await io { try store.terminal(reason:reason ?? (mask == 0 ? .normalStop : .unknownCoverage),unknownMask:mask,generation:generation,holdEpoch:epoch,flags:flags,authorized:{true}) }
-                state = .stopped; concern = nil; captureAuthority?.revoke(); streamIngress?.revoke(); store.fence()
+                state = .stopped; concern = nil; captureAuthority?.revoke(); streams.forEach { $0.ingress.revoke() }; store.fence()
                 if streamQuitPending { store.reserveQuit(); streamQuitPending = false }
                 try await cache(); return .success(())
             } catch { fail(error); return .failure(error) }
@@ -568,7 +597,7 @@ import ParlaCore
     func delete(id: UUID) async throws {
         if let deleteTask { try await deleteTask.value.get(); return }
         guard session != nil else { throw MeetingSession.Failure.stale }
-        streamIngress?.revoke()
+        streams.forEach { $0.ingress.revoke() }
         if streamIngress != nil { captureAuthority?.revoke() }
         ingressOpen = false; deleteRequested = true; state = .deleting; cancelTranscription(); requestProducerStop()
         let task = Task { @MainActor [self] () -> Result<Void,Error> in
@@ -592,34 +621,39 @@ import ParlaCore
                 if receipt.phase != .deleteAuthority { let prior = receipt; receipt = try await io { try store.deleteAuthority(prior,authorized:{true}) } }
                 let dead = receipt; _ = try await io { try store.deleteClose(dead,authorized:{true}) }
                 session = nil; metadata = nil; state = .idle; concern = nil; projection = .idle; lifetime = nil
-                streamIngress = nil; streamObserver = nil; streamWriter = nil; streamQuitPending = false; streamWriterFinished = false; streamWriterID = nil; streamFailure = nil
+                streamIngress = nil; streams.removeAll(); streamQuitPending = false
                 return .success(())
             } catch { fail(error); return .failure(error) }
         }
         deleteTask = task; let result = await task.value; deleteTask = nil; try result.get()
+    }
+    func setKeep(_ keep: Bool) async throws {
+        guard state == .stopped,!quitIntent,!pendingStart,!phaseActive,explicitOutput == nil,protectionOperation == nil else { throw MeetingSession.Failure.held }
+        let store = store
+        _ = try await io { try store.setKeep(keep,authorized:{true}) }; try await cache()
     }
     func evaluateExpiry(deleteID: UUID) async throws {
         do { let n = try wall(); guard n >= 0 else { throw MeetingSession.Failure.clock } }
         catch { if streamIngress != nil { fail(error) }; throw error }
         let store = store
         if streamIngress == nil {
-            try await io(waitingForAdmission:true) { try store.evaluate() }; try await cache()
+            try await io(waitingForAdmission:true) { try store.evaluate(); try store.sweepRawAudio(authorized:{true}) }; try await cache()
             if projection.expired { ingressOpen = false; state = .expired; cancelTranscription(); try await delete(id:deleteID) }
             return
         }
         do {
             await waitForPhase()
             // Revoke before the next actor await once the store observes expiry. The store itself fences first.
-            let expired = try await io { try store.evaluate(); return store.projection.expired }
-            if expired { streamIngress?.revoke(); captureAuthority?.revoke() }
+            let expired = try await io { try store.evaluate(); try store.sweepRawAudio(authorized:{true}); return store.projection.expired }
+            if expired { streams.forEach { $0.ingress.revoke() }; captureAuthority?.revoke() }
             try await cache()
         } catch { fail(error); throw error }
         if projection.expired { ingressOpen = false; state = .expired; cancelTranscription(); try await delete(id:deleteID) }
     }
     func reserveQuit() {
         quitIntent = true; ingressOpen = false; attemptAuthority?.revoke(); if pendingStart { captureAuthority?.revoke() }; revokeTextReads()
-        if let stream = streamIngress,(!stream.facts.settled || !producers.isEmpty || streamWriter != nil || streamObserver != nil) {
-            stream.fence(); streamQuitPending = true; requestProducerStop()
+        if streamIngress != nil && (streams.contains(where: { !$0.ingress.facts.settled || $0.writer != nil || $0.observer != nil }) || !producers.isEmpty) {
+            streams.forEach { $0.ingress.fence() }; streamQuitPending = true; requestProducerStop()
         } else { store.reserveQuit() }
         if recognitionTask != nil { recognition.requestCancel() }
     }
@@ -627,8 +661,7 @@ import ParlaCore
     var shutdownReady: Bool {
         // Reject owner-recorded work before consulting predicates that take the store IO lock.
         guard quitIntent,explicitOutput == nil,protectionOperation == nil,textAuthority == nil,
-              !streamQuitPending,streamWriter == nil,streamObserver == nil,
-              streamIngress == nil || streamIngress!.facts.settled,
+              !streamQuitPending,streams.allSatisfy({ $0.writer == nil && $0.observer == nil && $0.ingress.facts.settled }),
               !pendingStart,stopTask == nil,deleteTask == nil,producerJoin == nil,
               !phaseActive,phase == nil,producers.isEmpty,unclassifiedProducerTasks.isEmpty,
               ingress.isEmpty,submissions.isEmpty,recognitionTask == nil,transcriptionTask == nil,

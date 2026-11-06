@@ -288,7 +288,7 @@ extension MeetingMicrophoneCaptureTests {
         for trigger in Trigger.allCases {
             let r = try MeetingHubRig(),gate = HubOwnedLatch();defer {gate.open();r.release()}
             r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
-            r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+            r.controller.startConsentedRecording();guard await hubComplete({await r.controller.drainActions()}) else {return}
             guard await hubEntered([r.engine.started]) else {return}
             r.engine.emit(Array(repeating:Float(0.5),count:8000))
             let entered = XCTestExpectation(description:"actual fake converter EOS held for \(trigger)")
@@ -310,7 +310,7 @@ extension MeetingMicrophoneCaptureTests {
     @MainActor func testControllerHeldActualCallbackBodyCannotBeRetiredByWindowClose() async throws {
         let r = try MeetingHubRig(),gate = HubOwnedLatch();defer {gate.open();r.release()}
         r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording();guard await hubComplete({await r.controller.drainActions()}) else {return}
         guard await hubEntered([r.engine.started]) else {return}
         let entered = XCTestExpectation(description:"actual callback converter feed entered")
         let returned = XCTestExpectation(description:"actual callback body returned")
@@ -336,7 +336,7 @@ extension MeetingMicrophoneCaptureTests {
         r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {HubApplicationFailureResources.retainMicrophone(r);return}
         XCTAssertNil(r.controller.prepareApplicationStart())
         r.controller.confirmApplicationStart(challengeID:UUID(),affirmed:true);XCTAssertEqual(r.microphoneFactories,0)
-        r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}),await hubEntered([r.engine.started]) else {HubApplicationFailureResources.retainMicrophone(r);return}
+        r.controller.startConsentedRecording();guard await hubComplete({await r.controller.drainActions()}),await hubEntered([r.engine.started]) else {HubApplicationFailureResources.retainMicrophone(r);return}
         let uid = r.engine.requestedUID
         var saved = r.settings.current;saved.inputDeviceUID = "later";r.settings.current = saved;r.changedSettings()
         r.controller.focusChanged();XCTAssertEqual(r.engine.requestedUID,uid);XCTAssertEqual(applicationFactories,0)

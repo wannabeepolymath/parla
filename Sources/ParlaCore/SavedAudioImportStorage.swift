@@ -481,6 +481,7 @@ public protocol MeetingStorageBottom: AnyObject {
     func checkpoint(_ operation: String, name: String?) throws
     func open(parent: Int32?, name: String, mode: MeetingOpenMode) throws -> Int32
     func mkdir(parent: Int32, name: String) throws
+    func excludeFromBackup(_ fd: Int32) throws
     func inspect(_ fd: Int32) throws -> stat
     func named(parent: Int32, name: String) throws -> stat?
     func volume(_ fd: Int32) throws -> MeetingVolume
@@ -499,6 +500,13 @@ public protocol MeetingStorageBottom: AnyObject {
     func unlink(parent: Int32, name: String, directory: Bool) throws
     /// Must consume the raw descriptor once even when the close result is unknown.
     func close(_ fd: Int32) throws
+}
+
+public extension MeetingStorageBottom {
+    /// Virtual bottoms have no OS backup service. Physical bottoms must implement the exclusion.
+    func excludeFromBackup(_ fd: Int32) throws {
+        guard case .virtual = registryDomain else { throw MeetingStorageFault.io }
+    }
 }
 
 private func meetingExclusiveLock(_ fd: Int32) -> Int32 { flock(fd,LOCK_EX | LOCK_NB) }
@@ -522,6 +530,11 @@ public final class MeetingDarwinBottom: MeetingStorageBottom {
         guard fd >= 0 else { throw error() }; return fd
     }
     public func mkdir(parent: Int32, name: String) throws { guard mkdirat(parent,name,0o700) == 0 else { throw error() } }
+    public func excludeFromBackup(_ fd: Int32) throws {
+        let value = try PropertyListSerialization.data(fromPropertyList:"com.apple.backupd",format:.binary,options:0)
+        let result = value.withUnsafeBytes { fsetxattr(fd,"com.apple.metadata:com_apple_backup_excludeItem",$0.baseAddress,$0.count,0,0) }
+        guard result == 0 else { throw error() }
+    }
     public func inspect(_ fd: Int32) throws -> stat { var s = stat(); guard fstat(fd,&s) == 0 else { throw error() }; return s }
     public func named(parent: Int32, name: String) throws -> stat? { var s = stat(); if fstatat(parent,name,&s,AT_SYMLINK_NOFOLLOW) == 0 { return s }; guard errno == ENOENT else { throw error() }; return nil }
     public func volume(_ fd: Int32) throws -> MeetingVolume {
@@ -926,6 +939,7 @@ extension SavedAudioImportStorage {
                 let s = try directoryInfo(child,privateRoot:i == parts.count-1,strictParent:i == parts.count-2,budget:b)
                 bindings.append(.init(parent:parent,fd:child,name:name,identity:Identity(s))); parent = child
             }
+            try bottom.excludeFromBackup(directory)
             let key = Identity(try directoryInfo(directory,privateRoot:true,strictParent:false,budget:b))
             guard SelfRegistry.insert(key,domain:registryDomain!) else { throw Failure.contended }; registered = key; try bottom.checkpoint("root-registered",name:nil)
             if create { guard rootCreated else { throw Failure.unknown }; holdLock.withLock { revoked = false; quit = false; outputRevoked = false } }
