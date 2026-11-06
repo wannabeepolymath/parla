@@ -7,7 +7,7 @@ struct HubMeetingView: View {
     let openSettings: () -> Void
     @State private var consentAcknowledged = false
     @State private var deletion: DeleteConfirmation?
-    private struct DeleteConfirmation: Identifiable { let id = UUID(),session: UUID,intent: UUID }
+    private struct DeleteConfirmation: Identifiable { let id = UUID(),session: UUID?,intent: UUID }
     private static func policyDuration(_ nanoseconds: Int64, units: NSCalendar.Unit = [.day,.hour,.minute,.second]) -> String {
         let formatter = DateComponentsFormatter()
         var calendar = Calendar(identifier:.gregorian)
@@ -108,6 +108,11 @@ struct HubMeetingView: View {
                             if let confirmation = controller.deleteConfirmation { deletion = .init(session:confirmation.session,intent:confirmation.intent) }
                         }.disabled(value.busy || value.stoppingAvailable)
                     }
+                    if value.recoveryDeleteAvailable {
+                        Button("Delete all meeting data…",role:.destructive) {
+                            if let intent = controller.recoveryDeleteConfirmation { deletion = .init(session:nil,intent:intent) }
+                        }.disabled(value.busy || value.stoppingAvailable)
+                    }
                     VStack(alignment:.leading,spacing:8) {
                         Button("Retry opening saved meeting",action:controller.retryOpen).disabled(value.busy)
                         Button("Local recognition settings",action:openSettings)
@@ -137,12 +142,14 @@ struct HubMeetingView: View {
         }
         .sheet(item:$deletion) { confirmation in
             VStack(alignment:.leading,spacing:18) {
-                Text("Delete this meeting’s saved audio and text?").font(.headline)
+                Text(confirmation.session == nil ? "Delete all meeting data?" : "Delete this meeting’s saved audio and text?").font(.headline)
                 Text("Copies you exported remain.").font(.body)
                 HStack {
                     Button("Cancel") { deletion = nil }.keyboardShortcut(.cancelAction)
                     Button("Delete saved audio and text",role:.destructive) {
-                        deletion = nil; controller.deleteConfirmed(session:confirmation.session,intent:confirmation.intent)
+                        deletion = nil
+                        if let session = confirmation.session { controller.deleteConfirmed(session:session,intent:confirmation.intent) }
+                        else { controller.deleteAllMeetingDataConfirmed(intent:confirmation.intent) }
                     }
                 }
             }.padding(24).frame(width:390)

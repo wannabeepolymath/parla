@@ -398,6 +398,14 @@ final class ApplicationAudioResources: @unchecked Sendable {
     var listeners: [ApplicationOwnedListener] = []
     var uncertain = false
     // Receipts are minted by the per-run ownership ledger, including partial creations.
+    /// A refusal with no returned object owns nothing; only a possible handle needs an uncertainty hold.
+    func recordTapCreation(status: OSStatus, id: AudioObjectID) throws {
+        if id != kAudioObjectUnknown { try ownTap(id) }
+        guard status == noErr,id != kAudioObjectUnknown else {
+            uncertain = id != kAudioObjectUnknown
+            throw MeetingSession.Failure.unavailable
+        }
+    }
     func ownTap(_ id: AudioObjectID) throws {
         guard tap == nil,id != kAudioObjectUnknown else { throw MeetingSession.Failure.stale }; tap = .init(id,owner:nonce)
     }
@@ -680,10 +688,7 @@ private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
               description.muteBehavior == .unmuted else { throw MeetingSession.Failure.bounds }
         var id = AudioObjectID(0)
         let status = AudioHardwareCreateProcessTap(description,&id)
-        if id != kAudioObjectUnknown { try owned.ownTap(id) }
-        guard status == noErr,id != kAudioObjectUnknown else {
-            owned.uncertain = true; throw MeetingSession.Failure.unavailable
-        }
+        try owned.recordTapCreation(status:status,id:id)
         do {
             guard id != plan.process,!plan.routes.contains(where:{ $0.id == id }),
                   try read(id,kAudioObjectPropertyClass,AudioClassID(0)) == kAudioTapClassID else { throw MeetingSession.Failure.bounds }

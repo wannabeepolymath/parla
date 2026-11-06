@@ -5,7 +5,7 @@ import ParlaCore
 struct HubMeetingModel {
     var state = MeetingSessionOwner.State.idle
     var metadata: MeetingSessionStore.Metadata?
-    var captureAvailable = false, busy = false, captureOwned = false
+    var captureAvailable = false, busy = false, captureOwned = false, recoveryDeleteAvailable = false
     var source = "Saved microphone", message: String?, text: String?
     var stoppingAvailable: Bool { captureOwned || state == .starting || state == .recording || state == .stopping }
     var canStart: Bool { captureAvailable && !busy && metadata == nil && state == .idle }
@@ -23,6 +23,10 @@ struct HubMeetingModel {
                 return metadata?.chunks.contains(where: { $0.accepted != nil }) == true ? "Transcript saved. Raw audio deleted." : "Raw audio expired. Delete this meeting to start another."
             }
             if metadata?.unknownCoverage == true,metadata?.selections.contains(where: { $0.kind == .selectedApplication }) == true {
+                if let metadata,let track = metadata.selections.firstIndex(where: { $0.kind == .selectedApplication }),
+                   !metadata.chunks.contains(where: { $0.track == track }) {
+                    return "Couldn't capture that app's audio. Check System Audio Recording access in System Settings and that the selected app is playing audio. Any saved microphone audio is kept."
+                }
                 return "Recording stopped early. Check System Audio Recording access in System Settings and that the selected app is playing audio. Any saved audio is kept; some audio may be missing."
             }
             if metadata?.unknownCoverage == true { return "Recording stopped early. Saved audio is available; some audio may be missing." }

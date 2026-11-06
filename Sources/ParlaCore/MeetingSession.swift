@@ -342,6 +342,7 @@ extension MeetingSession {
         }
         var pending: String { uuid(id) + ".source.pending" }; var final: String { uuid(id) + ".source.wav" }
         var name: String { stage == .sealed || stage == .tooShort ? final : pending }
+        var aliases: [String] { stage == .written ? [pending,final] : [name] }
     }
     struct Extra: Equatable {
         enum Kind: UInt64 { case candidate, retired }

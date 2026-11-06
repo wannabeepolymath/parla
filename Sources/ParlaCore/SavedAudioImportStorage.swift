@@ -1042,6 +1042,13 @@ extension SavedAudioImportStorage {
             let changed = try fileInfo(source.fd,cap:member.bytes,budget:b); guard changed.renamedFrom(member) else { throw Failure.changed }; try namedMatch(to,changed)
             b.syncAttempts += 1; try bottom.sync(directory); if to == "manifest.json" { b.publications += 1 }; try consume(source,b); return changed
         }
+        func inspect(_ name: String, cap: Int64, _ b: Work) throws -> Member {
+            try checkpoint("inspect-member",name:name,fixed:29,b); try validate(b)
+            guard SavedAudioImportStorage.validName(name) else { throw Failure.unknown }
+            let token = try acquired(bottom.open(parent:directory,name:name,mode:.read),base:false,b)
+            let member = try fileInfo(token.fd,cap:cap,budget:b)
+            try namedMatch(name,member); try consume(token,b); return member
+        }
         func unlink(_ name: String, member: Member, cap: Int64, exact: Bool, missingAllowed: Bool, _ b: Work) throws {
             try checkpoint("unlink",name:name,fixed:32,b); try validate(b)
             guard borrowed?.member.sameBirth(member) != true else { throw MeetingSession.Failure.held }

@@ -2,6 +2,58 @@
 
 Base: `054cd2e`; lane: `lane/b43-meetings`. This is source/test evidence, not release acceptance or native hardware qualification. The proposed policy still requires final user sign-off. The existing single retained meeting slot remains; optional meeting AI cleanup/summary has no action and no provider is called.
 
+
+## B43 v2 release-blocker corrections — 2026-11-07
+
+Base: `53b447ad7070b6e039b20cb9d3f64f192ac3ccb4`; branch: `lane/b43-meetings-v2`. This section supersedes the earlier source candidate for the four reproduced release blockers only. Native qualification and policy sign-off remain open; B43 is not complete.
+
+The reviewer fixtures from `/tmp/parla-b43r-extra-tests` were imported as `B43ReviewRetentionTests` and `B43ReviewExpiryFlowTests`. Before fixes, all four imported methods compiled and failed locally: **4 methods / 7 assertion failures**, exit 1 (`/tmp/b43v2-baseline.log`). The publication regression now follows the raw pass with whole-meeting deletion at transcript expiry, rather than expecting raw-only deletion of an expired meeting.
+
+| Finding | Correction and source | Regression methods |
+|---|---|---|
+| Zero-handle tap refusal holds Stop/Quit | `MeetingApplicationAudioCapture.swift`: production and fake taps share `recordTapCreation`; error + zero ID owns no resource. Nonzero error handles remain uncertain. `HubMeetingModel.swift` explains the app-audio refusal. | `B43MeetingReleaseBlockerTests.testZeroHandleTapRefusalCompletesStopAndTermination`: fake tap → actual producer exit → Stop/writer drain → termination participant reply; nonzero-handle control stays uncertain. |
+| Retention misses renamed written source | `MeetingSession.swift` shares the accepted aliases with `MeetingSessionStore.swift`; raw unlink uses the alias actually present before recording removal. Whole-meeting Delete uses the same aliases. | `B43ReviewRetentionTests.testRawSweepHandlesRenameBeforeLedgerPublication`: literal crash snapshot, virtual filesystem unlink, audio tombstone and clean cold reopen. |
+| Pending raw intent prevents transcript expiry | `MeetingSessionStore.swift` checks whole-meeting expiry before resuming a raw intent; `MeetingSessionOwner.swift` prioritizes whole-meeting deletion over the raw pass. The existing single retained slot remains; no multi-meeting collection/sweep was introduced. | `B43ReviewRetentionTests.testRawIntentCanRetireAfterTranscriptExpiry`; `B43ReviewExpiryFlowTests.testStartupDeletesExpiredTranscriptWithInterruptedRawIntent` checks the actual controller maintenance path and removal of expired text. |
+| Unpublished metadata permanently blocks maintenance/Delete | `MeetingSessionStore.swift` audits committed authority before discarding exactly `manifest.next`. `SavedAudioImportStorage.swift` classifies descriptor-bound private regular files without reading payload. Store/owner/controller/model/view expose confirmed recovery deletion after clean cold failure. Recovery preflights the entire namespace before unlinking, one bounded file step at a time, with metadata last and lock held. | `B43ReviewRetentionTests.testCrashPublicationDoesNotPermanentlyPreventRetention`; `testInvalidCommittedManifestAllowsOnlyExplicitBoundedOwnedDeletion`; `B43MeetingReleaseBlockerTests.testInvalidManifestOffersExplicitDeleteAllMeetingDataRecovery`. Controls reject unknown entries, symlinks, unauthorized deletion and stale confirmation; invalid committed metadata never permits automatic unlink. |
+
+### V2 fail-without-fix proof
+
+All seven new methods passed before reversal (`/tmp/b43v2-fixed-first.log`). Each behavior was then temporarily restored to its failing form, retaining test API seams so the selected tests compiled. Every selected method must fail at runtime; source bytes are restored after each group. Proof receipts and logs: `/tmp/b43v2-proof/results.json`, `/tmp/b43v2-proof/restoration.json`, `/tmp/b43v2-proof/*.log`.
+
+| Temporary reversal | Required runtime failures |
+|---|---:|
+| Classify zero-handle tap error as uncertain again | 1/1 |
+| Unlink only the ledger's pending source name | 1/1 |
+| Resume raw intents before checking expiry; restore owner raw-first ordering | 2/2 |
+| Refuse `manifest.next` at bootstrap again | 1/1 |
+| Disable explicit unavailable-manifest deletion (API retained, throws) | 2/2 |
+
+The first full v2 Meeting invocation ran all 245 methods: 244 passed, including the capacity method (315.378 seconds); the owned-real-file admission method failed with `io` because the runner had supplied a fixture root through macOS's `/var` symlink. `MeetingDarwinBottom.open` deliberately uses `O_NOFOLLOW`. Canonicalizing the environment paths to `/private/var/...` made that exact method pass (0.152 seconds), with no source change. The failed run and focused recheck are retained at `/tmp/b43v2-meeting-symlink-fixture.log` and `/tmp/b43v2-real-path-recheck.log`; the first command receipts are `/tmp/b43v2-initial-check-results.json`. A fresh full Meeting run uses the corrected environment. Final results and cleanup follow below.
+
+
+### V2 final command results and resources
+
+After restoring every reversal and canonicalizing the fixture paths, one fresh full Meeting invocation passed all **245 methods** with zero failures (379.187 seconds). Its capacity method passed in 269.662 seconds. The related selection passed **68 methods**, and the explicit seven-method regression selection passed again. Counts overlap and must not be summed as distinct coverage.
+
+| Command / scope | Result |
+|---|---|
+| `swift test --scratch-path .build-b43v2 --filter Meeting` | **245 passed, 0 failures**, exit 0; includes capacity and owned real-file positive |
+| `swift test --scratch-path .build-b43v2 --filter 'SavedAudioImportStorageTests\|SavedAudioImportStoreTests\|HubHistoryExportTests'` | **68 passed, 0 failures**, exit 0 |
+| `swift test --scratch-path .build-b43v2 --filter 'B43Review\|B43Meeting'` after restoration | **7 passed, 0 failures**, exit 0 |
+| `swift build --scratch-path .build-b43v2` | exit 0 |
+| `bash -n scripts/make-app.sh` | exit 0 |
+| `git diff --check` | clean, including final documentation/staged changes |
+
+Final logs are `/tmp/b43v2-final-{regressions,meeting,related,build,shell,diff}.log`; command receipts are `/tmp/b43v2-final-results.json`. All five compiled reversal groups failed their selected methods: **7 distinct selected methods, all failing at runtime**, with exact source restoration hashes in `/tmp/b43v2-proof/restoration.json`. No independent review round was run by this implementation sub-agent.
+
+Task resources were `.build-b43v2`, the new fixture root recorded in `/tmp/b43v2-env.json`, and the exact external UUID fixture directories journaled by the tests. After all test processes exited, cleanup checked recorded device/inode/owner identities, descendant ownership and the open-file inventory. It removed **293** receipt-owned paths (including scratch and fixture roots), observed **32** already absent paths, and preserved **0** leftovers. One exact test-authored `everyone deny delete` ACL was removed from its verified `wave7e1-storage-*` fixture parent. Journals were copied to `/tmp/b43v2-proof/fixtures/` first. Cleanup receipt: `/tmp/b43v2-cleanup.json`; root identities: `/tmp/b43v2-owned-resources.json`. Only diagnostic scripts, logs, JSON receipts and proof snapshots under `/tmp/b43v2-*` and `/tmp/b43v2-proof/` remain for review. No task database, test process, server, browser or device remains. No user namespace, shared cache, dependency tree or other checkout was cleaned.
+
+### V2 fixture environment
+
+The test runner uses a fresh 0700 owned root (canonical absolute path; no symlink ancestors) recorded in `/tmp/b43v2-env.json`; its `meeting-fixtures.jsonl` and `general-fixtures.jsonl` files are precreated 0600, and its `fixtures/` directory is 0700. The environment keys are `PARLA_MEETING_OWNED_RUN_ROOT`, `PARLA_MEETING_FIXTURE_MANIFEST` (exactly `$PARLA_MEETING_OWNED_RUN_ROOT/meeting-fixtures.jsonl`), `PARLA_TEST_FIXTURE_MANIFEST`, and `TMPDIR` (the new root's `fixtures/`). Foundation's temporary-directory helpers can still create UUID fixtures in the system temp directory; their exact identities and paths are journaled for cleanup. No historical fixture root is reused. `/tmp/b43v2-run.py LOG COMMAND...` loads only those fixture variables and records the command's output/exit code.
+
+Commands: `swift test --scratch-path .build-b43v2 --filter Meeting`; `swift test --scratch-path .build-b43v2 --filter 'SavedAudioImportStorageTests|SavedAudioImportStoreTests|HubHistoryExportTests'`; `swift test --scratch-path .build-b43v2 --filter 'B43Review|B43Meeting'`; `swift build --scratch-path .build-b43v2`; `bash -n scripts/make-app.sh`; `git diff --check`. All capture, conversion and recognition in new tests are injected. No real capture, provider, download, browser/device launch, signing, push or tag is authorized or performed.
+
 ## Source files
 
 | Files | Change |

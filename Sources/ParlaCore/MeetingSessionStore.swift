@@ -152,7 +152,8 @@ public final class MeetingSessionStore: @unchecked Sendable {
     private typealias Ledger = MeetingSession.Ledger
     private typealias J = MeetingJSON
     private typealias Member = SavedAudioImportStorage.Member
-    private let lock = NSLock(), lease: Lease, wallClock: () throws -> Int64
+    private let lock = NSLock(), wallClock: () throws -> Int64
+    private var lease: Lease, recoveryAvailable = false
     private var ledger: Ledger?, ledgerMember: Member?, ownerMember: Member?, issue = false, expired = false, interruptionPending = false
     private var lastClock: Int64?
     private var operationReceipt: Receipt?, failureDiagnostic: FailureDiagnostic?
@@ -208,7 +209,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
     private func targets(_ l: Ledger) -> [Target] {
         var out: [Target] = []
         for c in l.chunks {
-            let aliases = c.stage == .written ? [c.pending,c.final] : [c.name]
+            let aliases = c.aliases
             if !c.audioRemoved { out.append(.init(id:c.id,generation:c.generation,cap:Int64(MeetingSession.sourceBytes),hash:c.hash,member:c.member,aliases:aliases,exact:c.stage == .sealed || c.stage == .tooShort)) }
             if let r = c.accepted { out.append(.init(id:r.id,generation:r.generation,cap:Int64(MeetingSession.resultBytes),hash:r.hash,member:r.member,aliases:[MeetingSession.uuid(r.id)+".raw.txt"],exact:true)) }
         }
@@ -315,7 +316,7 @@ public final class MeetingSessionStore: @unchecked Sendable {
             } catch { lease.fail(b,cold:true); issue = true; recordFailure(.admission,b); throw error }
         }
     }
-    /// Metadata only. A surviving next/orphan/foreign intent refuses; no persisted state is adopted by its name.
+    /// Metadata only. Discard an unpublished next generation only after auditing the committed authority.
     public func bootstrap() throws -> MeetingSession.Projection {
         try lock.withLock {
             guard ledger == nil, !issue else { throw Failure.unavailable }
@@ -324,19 +325,85 @@ public final class MeetingSessionStore: @unchecked Sendable {
                 guard try lease.acquire(create:false,b) else { _ = try lease.finish(b); return .idle }
                 // Acquisition already performed the entry V; omit the duplicate warm-entry charge/validation.
                 let names = try lease.names(b)
-                guard names.contains("owner.json"),names.contains("manifest.json"),!names.contains("manifest.next") else { throw Failure.unavailable }
+                guard names.contains("owner.json"),names.contains("manifest.json") else { throw Failure.unavailable }
                 let owner = try lease.read("owner.json",expected:nil,cap:4096,hash:nil,collect:true,authorized:{},b)
                 let current = try lease.read("manifest.json",expected:nil,cap:Int64(MeetingSession.deletionBytes),hash:nil,collect:true,authorized:{},b)
                 try lease.checkpoint("closed-schema",name:nil,fixed:32,b)
                 try b.charge(f:MeetingSession.timingValidationCredits)
                 let l = try Ledger.decode(current.1)
                 guard l.root == lease.identity, try J.parse(owner.1,cap:4096) == ownerJSON(l) else { throw Failure.unavailable }
-                try audit(names,l); _ = try now(l,usable:false)
+                try audit(names.subtracting(["manifest.next"]),l)
+                if names.contains("manifest.next") {
+                    // Full namespace/committed manifest validation precedes this one bounded unlink.
+                    let next = try lease.inspect("manifest.next",cap:Int64(MeetingSession.deletionBytes),b)
+                    try lease.unlink("manifest.next",member:next,cap:next.bytes,exact:true,missingAllowed:false,b)
+                    try lease.syncDirectory(b)
+                }
+                _ = try now(l,usable:false)
                 try lease.validate(b); try audit(lease.names(b),l); let cost = try lease.finish(b)
                 _ = receipt(l,phase:.bootstrap,object:nil,generation:nil,member:nil,hash:nil,cost:cost)
                 ledger = l; ledgerMember = current.0; ownerMember = owner.0; interruptionPending = l.state == .active || l.chunks.contains { $0.attempt?.state == .pending }
                 return .init(session:l.session,state:interruptionPending && l.state == .active ? .interrupted : l.state,acknowledgedChunks:l.chunks.filter { $0.stage == .sealed || $0.stage == .tooShort }.count,acceptedResults:l.chunks.filter { $0.accepted != nil }.count,expired:expired,unavailable:false)
-            } catch { lease.fail(b,cold:true); issue = true; recordFailure(.bootstrap,b); throw error }
+            } catch { lease.fail(b,cold:true); issue = true; recoveryAvailable = true; recordFailure(.bootstrap,b); throw error }
+        }
+    }
+    /// Explicit destructive recovery is available only after a cold failure retired all descriptors.
+    public var canDeleteUnavailableMeetingData: Bool {
+        lock.withLock { recoveryAvailable && issue && ledger == nil && lease.drained && lease.rawCount == 0 && !lease.poisoned && !protectionUncertain }
+    }
+    public func deleteAllUnavailableMeetingData(authorized: () -> Bool) throws {
+        try lock.withLock {
+            guard recoveryAvailable,issue,ledger == nil,lease.drained,lease.rawCount == 0,!lease.poisoned,!protectionUncertain,authorized() else { throw Failure.held }
+            // A clean cold failure closed the old lease. Acquire and lock the same private root anew.
+            lease = Lease(root:lease.root,profile:lease.profile,bottom:lease.bottom)
+            var work = try lease.begin(cold:true)
+            do {
+                guard try lease.acquire(create:false,work) else {
+                    _ = try lease.finish(work); issue = false; recoveryAvailable = false; return
+                }
+                let names = try lease.names(work)
+                guard names.contains("owner.json") else { throw Failure.unavailable }
+                let owner = try lease.read("owner.json",expected:nil,cap:4096,hash:nil,collect:true,authorized:{ guard authorized() else { throw Failure.stale } },work)
+                let f = try J.parse(owner.1,cap:4096).fields(["d","v","owner","session","root","created","expires"])
+                guard f["d"] == .string("parla.meeting.1"),f["v"] == .n(1),let identity = lease.identity,
+                      f["root"] == .array([.n(identity.device),.n(identity.inode)]) else { throw Failure.unavailable }
+                _ = try f["owner"]!.id(); let session = try f["session"]!.id()
+                let created = try f["created"]!.int(), expires = try f["expires"]!.int()
+                guard created >= 0,expires > created else { throw Failure.schema }
+                _ = try lease.finish(work)
+                // Preflight EVERY name and private regular-file identity before the first unlink.
+                // Never infer targets from an invalid manifest, recurse, or remove unknown contents.
+                var members: [(String,Member)] = []
+                for name in names.subtracting(["lock"]).sorted() {
+                    let cap: Int64
+                    if name == "owner.json" { cap = 4096 }
+                    else if name == "manifest.json" || name == "manifest.next" { cap = Int64(MeetingSession.deletionBytes) }
+                    else if name == MeetingSession.uuid(session)+".delete" { cap = 4096 }
+                    else {
+                        let suffixes = [".source.pending",".source.wav",".result.pending",".raw.txt"]
+                        guard let suffix = suffixes.first(where: { name.hasSuffix($0) }),
+                              let id = UUID(uuidString:String(name.dropLast(suffix.count))),
+                              name == MeetingSession.uuid(id)+suffix else { throw Failure.unavailable }
+                        cap = Int64(suffix.hasPrefix(".source") ? MeetingSession.sourceBytes : MeetingSession.resultBytes)
+                    }
+                    work = try lease.begin()
+                    let member = try lease.inspect(name,cap:cap,work)
+                    members.append((name,member)); _ = try lease.finish(work)
+                }
+                // Preserve authority metadata until all payloads are gone so an interrupted wipe can retry.
+                let ordered = members.filter { $0.0 != "owner.json" && $0.0 != "manifest.json" } + members.filter { $0.0 == "manifest.json" } + members.filter { $0.0 == "owner.json" }
+                for (name,member) in ordered {
+                    guard authorized() else { throw Failure.stale }
+                    work = try lease.begin()
+                    try lease.unlink(name,member:member,cap:member.bytes,exact:true,missingAllowed:false,work)
+                    try lease.syncDirectory(work); _ = try lease.finish(work)
+                }
+                work = try lease.begin()
+                guard try lease.names(work) == ["lock"],authorized() else { throw Failure.unavailable }
+                try lease.unlinkLock(work); try lease.syncDirectory(work); try lease.finalClose(work); _ = try lease.finish(work)
+                issue = false; recoveryAvailable = false; expired = false; lastClock = nil
+                ledgerMember = nil; ownerMember = nil; interruptionPending = false
+            } catch { lease.fail(work,final:true); recordFailure(.deleteClose,work); throw error }
         }
     }
     private func canonical(_ input: ChunkInput) throws {
@@ -580,8 +647,11 @@ public final class MeetingSessionStore: @unchecked Sendable {
         for _ in 0..<MeetingSession.maximumChunks {
             let target = try lock.withLock { () throws -> UUID? in
                 guard let l = ledger,!issue,l.state != .active,l.deletion == nil,lease.drained else { return nil }
+                // Whole-meeting deletion resolves any raw intent once the transcript expires.
+                let current = try now(l,usable:false)
+                guard !expired else { return nil }
                 if let removing = l.retention?.removing { return removing }
-                guard let deadline = try rawDeadline(l),try now(l,usable:false) >= deadline,!expired else { return nil }
+                guard let deadline = try rawDeadline(l),current >= deadline else { return nil }
                 return l.chunks.first(where: { !$0.audioRemoved })?.id
             }
             guard let target else { return }
@@ -594,7 +664,10 @@ public final class MeetingSessionStore: @unchecked Sendable {
                 guard self.lease.drained,l.retention?.removing == target,
                       let i = l.chunks.firstIndex(where: { $0.id == target && !$0.audioRemoved }) else { throw Failure.stale }
                 let c = l.chunks[i]
-                try self.lease.unlink(c.name,member:c.member,cap:Int64(c.bytes),exact:c.stage == .sealed || c.stage == .tooShort,missingAllowed:true,b)
+                // chunkC may have renamed a written source before publishing its ledger.
+                for name in c.aliases where names.contains(name) {
+                    try self.lease.unlink(name,member:c.member,cap:Int64(c.bytes),exact:c.stage == .sealed || c.stage == .tooShort,missingAllowed:true,b)
+                }
                 try self.lease.syncDirectory(b)
                 l.chunks[i].audioRemoved = true; l.retention?.removing = nil
                 return (target,nil,nil,nil)

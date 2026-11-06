@@ -77,6 +77,13 @@ import ParlaCore
         else { let store = store; try await io { try store.evaluate() }; try await cache() }
         guard state != .unavailable else { throw MeetingSession.Failure.unavailable }
     }
+    var canDeleteUnavailableMeetingData: Bool { state == .unavailable && session == nil && store.canDeleteUnavailableMeetingData }
+    func deleteAllUnavailableMeetingData() async throws {
+        guard canDeleteUnavailableMeetingData,!pendingStart,!phaseActive,producers.isEmpty,explicitOutput == nil,protectionOperation == nil else { throw MeetingSession.Failure.held }
+        let store = store
+        try await io { try store.deleteAllUnavailableMeetingData(authorized:{true}) }
+        metadata = nil; projection = .idle; concern = nil; state = .idle; lifetime = nil
+    }
     func requestStopSaving() {
         if pendingStart { captureAuthority?.revoke() }
         streams.forEach { $0.ingress.fence() }; ingressOpen = false
@@ -637,14 +644,14 @@ import ParlaCore
         catch { if streamIngress != nil { fail(error) }; throw error }
         let store = store
         if streamIngress == nil {
-            try await io(waitingForAdmission:true) { try store.evaluate(); try store.sweepRawAudio(authorized:{true}) }; try await cache()
+            try await io(waitingForAdmission:true) { try store.evaluate(); if !store.projection.expired { try store.sweepRawAudio(authorized:{true}) } }; try await cache()
             if projection.expired { ingressOpen = false; state = .expired; cancelTranscription(); try await delete(id:deleteID) }
             return
         }
         do {
             await waitForPhase()
             // Revoke before the next actor await once the store observes expiry. The store itself fences first.
-            let expired = try await io { try store.evaluate(); try store.sweepRawAudio(authorized:{true}); return store.projection.expired }
+            let expired = try await io { try store.evaluate(); if !store.projection.expired { try store.sweepRawAudio(authorized:{true}) }; return store.projection.expired }
             if expired { streams.forEach { $0.ingress.revoke() }; captureAuthority?.revoke() }
             try await cache()
         } catch { fail(error); throw error }

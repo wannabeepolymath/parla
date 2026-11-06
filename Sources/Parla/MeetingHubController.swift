@@ -599,6 +599,14 @@ import ParlaCore
             catch { self?.model.message = "Deletion is not finished. Saved files may remain." }
         }
     }
+    var recoveryDeleteConfirmation: UUID? { owner?.canDeleteUnavailableMeetingData == true ? pageIntent : nil }
+    func deleteAllMeetingDataConfirmed(intent: UUID) {
+        guard admits,idle,pageIntent == intent,let value = owner,value.canDeleteUnavailableMeetingData else { return }
+        launch(.delete) { [weak self,value] in
+            do { try await value.deleteAllUnavailableMeetingData(); self?.model.message = "Saved meeting deleted." }
+            catch { self?.model.message = "Deletion is not finished. Saved files may remain." }
+        }
+    }
     func keepMeeting(_ keep: Bool) {
         guard admits,idle,let value = owner else { return }
         verifiedText = nil
@@ -739,6 +747,7 @@ import ParlaCore
     private func publish(_ snapshot: MeetingSessionOwner.Snapshot? = nil) {
         let snapshot = snapshot ?? owner?.snapshot
         model.captureOwned = activeCapture != nil
+        model.recoveryDeleteAvailable = owner?.canDeleteUnavailableMeetingData == true
         model.state = snapshot?.state ?? .idle; model.metadata = snapshot?.metadata; model.busy = !work.isEmpty || permission != nil || reservation != nil || lifecycleDriver != nil
         if let active = activeCapture {
             model.source = active.microphone == nil ? active.selection.label : "Microphone + " + active.selection.label
