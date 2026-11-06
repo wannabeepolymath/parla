@@ -1,50 +1,251 @@
-# Surrounding text source experiment
+# Surrounding text for cleanup
 
-Default off. **NO FIELDS SUPPORTED IN THIS BUILD.** The native qualification set is empty in code and cannot be enabled through settings. This connected source experiment accepts explicitly qualified fake ports for isolated tests. It makes no native usability or quality claim. B26 remains partial. The Stage A ownership amendment is an artifact source candidate only: **UNCOMPILED / UNREVIEWED / NATIVE_FALSE**. Native qualification and human comparison remain separate.
+Parla can use a short passage before the caret to help cleanup with spelling,
+casing and continuity. Existing document text is separate untrusted context in
+the cleanup request; it is never concatenated into the dictation or used as an
+instruction. The existing cleanup sanitizer, output validator and literal rules
+still run once.
 
-Review one saved exact app profile in Profiles. Browser/site/global profiles, live dictation, Shortcuts, transforms, dictated presets, retry, imports, guided forms, recovery, canceled capture, previews and evaluation cannot borrow this permission. The same saved start and output profile must win. Capture freezes metadata before ASR; enabling later never authorizes an old capture. Any present backup policy closes context before a read. Apple Intelligence keeps its ordinary local primitive and gets no new reads.
+## Defaults and consent
 
-The dedicated `surroundingTextContext` root value is read independently from Settings decoding. Null, invalid, future or unknown authority refuses only context. Full writers preserve the freshest raw value semantically, including malformed values; formatting is not preserved. Narrow review/confirm/edit/disable uses a one MiB exact byte CAS under the store lock and preserves unknown roots and legacy secrets. Relevant profile shape/order/vocabulary, primary, output, scope and global word/rule/style edits revoke review. Local editor away/back, failed disable, observed saved invalidity and quit/restart intent irrevocably revoke held grants. Reconfirm authorizes only future captures. Unobserved cross-process away/back cannot be detected.
+- **Apple Intelligence:** on by default, including existing installations. The
+  normal **Profiles → Surrounding text → Use nearby text with Apple Intelligence**
+  switch saves `cleanup.localSurroundingTextEnabled`. Turning it off immediately
+  closes new captures and revokes held work, including before or after a failed
+  save. Only a new enable intent may reopen that draft latch. A missing preference defaults on; a present invalid preference refuses.
+  Apple Intelligence remains on-device, with no endpoint, credentials, HTTP or
+  fallback provider. Its ordinary language, availability and input-budget gates
+  still apply.
+- **Cloud and OpenAI-compatible providers (including loopback):** off by default.
+  The user must choose **Review cloud context** for one saved exact app profile,
+  read the provider/endpoint/model disclosure, and explicitly enable it. The UI
+  states that existing text the user did not dictate will be sent with dictation.
+  Consent is user settings, never inferred from Accessibility permission, local
+  mode, a provider key, or another profile. Reviewing does not sample a field,
+  read credentials, or contact a provider.
 
-Disclosure binds the exact requested provider, canonical endpoint, model and complete ordinary credential precedence/access. Environment may override at request time. The selected endpoint's Keychain entry is shared across models, including ordinary cleanup. No key value, status or model discovery occurs during review. Blank/autodiscovered models cannot opt in. Response model bytes must exactly equal the requested bytes; missing model uses the existing client's coalescing. Alias-to-dated reports can reject output after the request was sent and billed. This is not remote identity attestation.
+Cloud consent binds the saved profile, requested provider, canonical endpoint,
+exact model and ordinary credential precedence. Profile/order/word/rule/style or
+provider changes revoke it. Reconfirming authorizes future captures only. The raw
+`surroundingTextContext` authority keeps its independent strict decoding and
+compare-and-swap preservation, including unknown/malformed roots. Older reviewed
+signatures pause and need review again under this contract. An invalid/old cloud
+block is preserved and cannot suppress or authorize the independent local setting.
+Cloud context never
+uses a backup provider. A reported model mismatch rejects output after the
+request may already have been sent and billed.
 
-Stage A supplies an inert optional `open(operationUUID, exactTarget)` factory and operation-owned async proof/read/drain abstractions, plus explicit fake compatibility. Unsupported returns nil before policy, subscription, watchdog, timer or job creation. A supported scope is retained, current-grant validated, subscribed and parent-cancellation owned before its first metadata job. Every proof invokes its backend anew outside Settings/scope locks, compares against the sealed first nontext field, and uses an explicit per-job synchronous admission callback returning positive remaining phase/overall time. A sealed comparison field is never returned as fresh proof. A future qualified backend must independently establish positive nontext PID/window/field identity, security, a collapsed caret and safe Unicode boundaries. Inert MainActor issuance constructs one exact preceding-range handle of at most 512 UTF-16 units; it starts no read or native work and runs outside the Settings lock. No native backend, worker, target capsule, AX facade, security qualification or production binding is supplied here. It never uses paste/full-value/selected-text helpers, after-text, clipboard, OCR, screenshots, window search or expanding reads. Retained preceding text is at most 256 UTF-16 units and 1024 UTF-8 bytes. Invalid scalars, provenance, ranges and unproved grapheme boundaries refuse. Native/foreign allocation and process RSS are not bounded by these logical caps.
+Only ordinary physical, non-live keyboard dictation into the same start/landing
+app is eligible. Local mode supports global or saved app profiles; cloud mode
+requires the same reviewed saved app profile at start and landing. Browser/site
+profiles, transforms, saved presets, Shortcuts, imports, retries, guided forms,
+recovery, previews and evaluation do not gain context permission. Raw, cleanup-off
+and exact snippet branches bypass collection.
 
-Before arming, metadata ineligibility/refusal can follow ordinary category cleanup once, only through independently eligible ordinary operation/factory authority, including independent backup authority. Parent cancellation or an aborted operation cannot use that fallback. After the immediate pre-read proof, a short pure grant action marks participation (`readIssued`). Learning is then disarmed on MainActor OUTSIDE Settings, followed by fresh pure grant/run/operation/latch/deadline admission before inert issue. Revocation during disarm is therefore a participated refusal with no issue, credentials, HTTP or category resend. After arming, invalidity/error/late return yields raw speech plus local literal rules or existing security disposal, with no category resend or backup. Only an exact successful zero-unit response at a proved document-start caret zero may select category cleanup once.
+## Native Accessibility reader
 
-The lazy supplier runs inside the existing Pipeline provider branch after raw, preset, snippet and off bypasses. The context system contract and escaped separate `dictated_transcript`/`preceding_text` JSON user fields never place source in instructions or selection. Nil context keeps baseline prompt/request behavior. One sanitizer/validator/literal pass remains. Actual cleanup uses the real factory and bounded HTTP serializers: 16 KiB prompt, 128 KiB body, 16 KiB headers each direction including authorization, 256 KiB response, one MiB logical payload ledger. No speech/rules truncation or provider shopping.
+`NativeSurroundingText.swift` supplies the production `SurroundingTextPort.native`.
+It uses an operation-owned serial Dispatch worker, never synchronous AX reads on
+the main actor or inside a Settings lock. The source facade exposes only focus,
+PID, bundle ID, role/subrole, editability, selected range, character count, window
+and exact parameterized string ranges. There is no full-value or selected-text
+read, clipboard access, AX wake-up, OCR, screenshot, window search or expanding
+range fallback.
 
-One monotonic 15-second logical deadline begins before the first supported metadata job. One absolute one-second window begins before immediate pre-read proof and includes that proof, participation/disarm/admission, read and post-read acceptance; equality expires. Later post-credential, post-response and post-watchdog proofs use the remaining overall window. No native/proof/job/join or arbitrary backend callback executes in the new short grant actions. Existing credential preparation is unchanged: it can use ordinary interactive credential access under its pre-existing grant action. This is not a claim that all old grant actions are native-free or hard-bounded.
+The reader requires existing Accessibility trust, secure event input off, an
+editable standard text field/area/search field, a collapsed selection, matching
+positive PID, and a matching focused window. It refuses secure/password subroles,
+known password managers, terminals, browsers, remote clients and code editors
+(including their integrated terminals). Unknown/noneditable roles refuse. This
+is capability-based support, not a certification of every app that exposes AX.
+The named `refusedRemoteClientBundleIDs` constant explicitly refuses Apple
+Screen Sharing/Remote Desktop, Microsoft Remote Desktop (stable/beta),
+TeamViewer, AnyDesk, Jump Desktop, Parsec, RealVNC and Splashtop Business before
+AX field access, in addition to the existing substring and category checks.
 
-Scope cancellation is a bounded one-shot memory latch with one fixed standard-library AsyncStream wake; it runs no supplied backend callback, waits for no task/main actor, enters no Settings/native API and releases no backend. The read's single owned notification task invokes a legacy fake cancellation callback outside Settings/scope locks. That task is joined through the callback's real return before the read returns. It is a cancellation handoff inside the existing owned lane, not a second admission queue or a native worker. A cancellation signal is not actual exit. The `proof:issue:` fake initializer keeps both supplied callbacks on MainActor and invokes proof anew each time. Its synthetic safety/boundary defaults are explicit fake authority; no new native operation may use that initializer or inherit its defaults. Large-caret exact-window fakes remain supported without Stage B document-end restrictions.
+Fresh observations compare actual AX application, window and field references
+with `CFEqual`, plus PID, bundle, caret, selection and document length. They run
+before and after the native range read, and again at the existing cleanup
+admission/response/delivery boundaries. A changed identity/caret/length or unknown
+security signal refuses. No hashes or pointer addresses are used as identity.
+Only operation-local numeric tokens cross into the nontext policy proof.
 
-The scope latch stays in the policy cancellation slot through quiescent HTTP. HTTP keeps its separate grant subscription, task cancellation handler, joined-watchdog child cancellation and completion-PLUS-exit settlement. No HTTP-slot handoff is invented and no metadata/read job overlaps HTTP. Parent task cancellation also surrounds the final proof and final drain beyond `joined`. Every nonnil scope explicitly awaits nonthrowing `finishAndWaitForExit`, including grant/subscription failure, nil proof/empty response, issue/read/credential/transport/proof error, deadline, cancellation and success. Close prevents further scheduling and joins/releases backend work and handoffs; it does not revoke a successful run or stop an otherwise valid policy. A never-returning job/callback/cleanup keeps its owner and serial lane pending. No timer, cancel acknowledgment, timeout loser or asynchronous defer releases that lane.
+One exact preceding range reads **at most 512 UTF-16 units**. At most **two
+following UTF-16 units** are inspected locally to establish a Unicode caret
+boundary; following text never enters the provider prompt. If the leading range
+starts inside an unproved grapheme, the reader discards through a proven LF or
+ASCII space/tab-to-letter/digit break. An unbroken truncated window, invalid
+surrogate, split caret grapheme, over-returning source or unproved boundary
+refuses. Retained provider context walks complete graphemes backwards to **256
+UTF-16 units and 1024 UTF-8 bytes**, whichever binds first.
 
-After final proof, watchdog join and backend drain, transient cancellation captures are cleared. While the old subscription still covers revocation, a fresh grant-validated callback retaining only weak run authority is registered; then the old subscription is removed. Final pure grant/run/operation/latch/budget acceptance precedes `holdAuthority` with Settings' bounded unsubscribe token. Neither final callback nor token retains operation/policy, backend, worker, text, or proof/read/admission closures. Run authority remains live for influenced insertion and can still be vetoed by later configuration observation. The worker scope closing is not revocation.
+Each AX reference receives its own positive messaging timeout immediately before
+remote access, at most **100 ms** and at most the remaining absolute job/phase
+budget. Focus comes from the frontmost application; the reader never changes
+the process-wide timeout through a system-wide AX element. Equal-but-distinct
+references do not inherit timeouts; this follows
+[Apple's AX timeout contract](https://developer.apple.com/documentation/applicationservices/1459345-axuielementsetmessagingtimeout).
+A job has a one-second acceptance deadline; the existing one-second pre-read
+phase includes proof, learning disarm, read and acceptance. The overall cleanup
+budget remains 15 seconds. Deadline equality refuses. A late result cannot become
+context or trigger a provider request.
 
-Fresh matching metadata and short admission actions remain observational. Field/focus/security/source state can change after a proof/action and before the unlocked future OS call, including unobserved away/back or same-length edits. No atomic cross-process snapshot, syscall-entry authorization, native hard return, remote stop, billing stop, foreign-allocation bound or erasure is promised. Stage B per-reference timeout, endpoint/source/host and native worker semantics require separate authorization and evidence.
+Cancellation closes admission through the existing memory latch and the worker's
+cancellation flag. Every native job and cancellation relay is retained through
+actual return. `finishAndWaitForExit` joins the serial queue and releases retained
+AX references before output authority is handed off or the pending lane exits.
+An armed but unused handle is also drained. Neither a timeout nor a cancellation
+acknowledgment is treated as worker exit. AX messaging timeouts bound IPC waits;
+this is **not** an OS scheduling guarantee or permission to detach a stuck native
+call. If an OS call ignores its timeout, the owning lane stays pending until exit.
 
-Context-influenced output may reach only the independently authorized current pending insertion. It cannot enter tail replacement, History/retry/export, last-result retrieval, correction learning or caches. Pending and active correction watchers are disarmed at context admission and before influenced insertion; later ordinary learning still works. Raw History remains independently latched and History off remains off. Original/explicit Copy still holds exact finalized ASR under its independent existing capability. Read consent grants no paste, Undo, selection or Copy permission. Content-free errors and finite diagnostic/timing observations exclude context, keys, model echoes and response bodies. Context usage is operation-owned and discarded; an owned empty metrics value prevents raw History borrowing global cleanup usage. Successful empty-prefix reads also suppress global cleanup usage. Posting preparation rechecks context after configuration callbacks before native posting; the actual dispatch hook does not read configuration.
+Before read participation, unsupported metadata may follow ordinary cleanup once.
+After participation, failures return raw speech with local literal rules, without
+another category request or backup. The sole participated ordinary fallback is a
+proved exact empty document-start prefix. An unsupported context echo instead
+allows one context-free cleanup retry on the same provider/client and settings,
+inside the original 15-second deadline and cancellation/authority scope. This
+retry never switches to ordinary category cleanup or a backup provider.
 
-Strings and request copies are ephemeral through actual exit, without guarantees of zeroization, no swap or erasure of foreign/provider copies. Native qualification and genuine consented human comparison require separate work; fake tests do not measure usefulness, quality, latency, cost or broad field support.
+## Data lifetime and output
 
+Nearby text exists only in the worker/read/request lifetime. It is not Codable,
+placed on a Session, stored in History, exported, cached, logged, or included in
+diagnostics. Errors remain content-free. Context-assisted output is eligible only
+for the independently authorized pending insertion; it cannot enter tail
+replacement, History/retry/export, last-result retrieval or correction learning.
+History, when independently enabled, stores raw dictation and empty owned cleanup
+metrics. Explicit Original/Copy retains only the user's dictated speech under its
+separate permission. Context admission and influenced insertion disarm learning.
 
-Historical source-authoring state (superseded by the verification records below):
+Before context-assisted output reaches Pipeline, the ephemeral prefix rejects
+any shared four-word window absent from the raw dictation. The named
+`unsupportedEchoWordThreshold = 4` balances sentence-copy detection with common
+short phrases. Matching uses canonical Unicode normalization, case folding, and
+letter/number words separated by punctuation or whitespace. Shorter overlaps and
+windows also present in raw dictation remain eligible. A rejected response never
+reaches insertion or persistence; only a successful context-free retry may
+continue. That retry is checked against the same prefix too. A repeated echo,
+provider error or invalid retry result preserves the existing raw-text fallback.
+This deterministic overlap guard does not detect paraphrases or shorter leaks.
 
-The new Stage A integration selectors author finite synthetic ownership schedules only, including held first/pre-read/post-credential/post-response/post-watchdog metadata, read, watchdog and cleanup; cancellation before start, independent store revocation, disarm revocation, issue refusal, armed-unused cleanup, split HTTP settlement, backend/admission lifetime release and revocation during subscription handoff. Existing S2 positive/configuration-veto and boundary/serializer tests remain authoritative only for their explicit fake inputs. All new source is UNCOMPILED/UNREVIEWED/NATIVE_FALSE; no new test, native qualification, runtime or comparison pass is claimed.
+Matching observations are not an atomic cross-process snapshot. Unobserved
+away/back transitions and same-length edits can evade observation; the field can
+change immediately after a proof. AX implementations can allocate more than the
+logical text cap. Swift/native/provider copies are not guaranteed zeroized or
+erased, and remote execution/billing cannot be forcibly stopped.
 
-Future integration runs require `PARLA_TEST_FIXTURE_MANIFEST` naming a precreated writable private regular file (0600) under a fresh owned parent (0700). The runner should also set `PARLA_B26_FIXTURE_ROOT` to a precreated 0700 directory dedicated to this run. The rig creates only fresh `parla-b26-<UUID>` empty 0700 children, records their path/owner/purpose/preservation and empty RecordingStore policy-read/retention scope in that manifest, and retains the existing no-audio-writer/remover assertions. If the optional parent is unset, Foundation's `temporaryDirectory` is used for fresh UUID children; the manifest is still required. No historical fixed task directory, existing folder reuse or sweeping/cleanup is permitted. These filesystem fixtures are future test resources, not created by this source-only task. Separate root authorization is required to compile/run; the artifact report lists exact selectors and environment/check steps.
+## Verification and remaining qualification
 
+`NativeSurroundingTextTests` uses an owned synthetic AX field facade with the
+production worker and reader, not a real third-party app or provider. It covers
+late-return timeout and per-reference timeout application, caret/field changes,
+secure input/field/password-manager/terminal/unknown-role refusal, oversized-window
+trimming, mid-field Unicode boundaries, held cancellation drain, and connected
+History/diagnostic/learning isolation. Its Apple Intelligence test injects a local
+runtime and asserts the native context reaches only that runtime, with zero HTTP
+or credential reads. `SurroundingTextDefaultsTests` covers old/fresh defaults,
+saved opt-out, explicit cloud review, local global profiles, revocation and
+provider-switch refusal. Existing core, connected ownership and Hub tests remain
+part of the focused check.
 
-### Current Stage A source verification
+The B26 lane verification receipt records actual pass counts and behavioral
+revert failures below. No live provider calls, real third-party application reads,
+model downloads, human quality comparison, packaged UI inspection, or broad
+app/OS compatibility claims are authorized by those synthetic checks. Native
+source implementation is supplied; those qualifications remain separate.
 
-Independent full review found two test-fixture findings and no demonstrated A1–A5 production regression. Root corrected the credential-refusal precondition with an observed additional denied read, and removed two HTTP resume self-capture cycles. Compiler corrections make one stored-property reference explicit, propagate a throwing test wrapper, and handle authority-check errors locally in nonthrowing test callbacks. The 33 existing integration test bodies/suffix and the 20 core methods remain unchanged.
+### 2026-11-07 lane verification receipt
 
-The corrected source compiled. That compilation invocation selected zero tests because its anchored filter lacked module prefixes; it remains a nonpositive test observation. A subsequent invocation used the exact pinned compiled binary and verified the complete source/Git freeze before running all 71 intended methods: 51 integration methods (18 new plus 33 existing) and 20 core methods, all passing. Binary, inputs, original checkout and local main were preserved during the run. Earlier compiler failures are retained separately.
+The focused selector is:
 
-These checks use injected metadata/read/HTTP/credential ports and fresh owned empty recording fixtures. They provide no native AX/field/host qualification, atomic cross-process snapshot, hard return bound, provider/human benefit, permission or production activation evidence. Native qualifications remain empty and the production port remains unsupported; B26 remains partial and canonical completion remains 23/43. Scratch outputs, manifests and fixture directories are retained in the task evidence tree.
+```sh
+swift test --scratch-path /tmp/parla-b26-build-t3-c45379f7 --filter 'NativeSurroundingTextTests|SurroundingTextDefaultsTests|SurroundingTextContextTests|SurroundingTextContextIntegrationTests|HubSurroundingTextContextTests|AppleIntelligenceCleanupTests|CleanupFailoverIntegrationTests'
+swift build --scratch-path /tmp/parla-b26-build-t3-c45379f7
+```
 
+The runner supplies `PARLA_TEST_FIXTURE_MANIFEST`, `PARLA_B26_FIXTURE_ROOT`,
+`PARLA_B21_FIXTURE_ROOT` and `PARLA_B21_EVIDENCE` pointing to precreated private
+resources under `/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-b26-evidence-g59ebxa0`. Every recording child is fresh, empty, manifest-owned
+and retained. No audio writer or remover is used. The build directory, receipts,
+manifest, synthetic B21 comparison records and empty fixture directories are
+preserved for review; no database, server or browser was created.
 
-### 2026-11-02 current finite source recheck
+Positive: **111 executed, 2 optional B21 elapsed checks skipped, 0 failures**.
+All nine new methods run. `swift build` and `git diff --check` pass. Existing
+unrelated compiler warnings remain. The UI detector reports no findings; the
+packaged native UI has not been visually qualified.
 
-The current 74 selected methods passed with zero failures (20 core, 51 connected integration and 3 Hub). A fresh independent gpt-6.1-sol high/Standard read-only review APPROVED the finite consent/disclosure, secure-exclusion policy, injection serialization and revocable output-ownership scope, with no behavioral correction identified. The historical UNCOMPILED/UNREVIEWED label above describes the earlier drafting snapshot; it does not describe these tested Stage A methods. NATIVE_FALSE remains current. Production still selects the unsupported port, and native qualifications remain empty. Native backend/proof/timeout/drain work, an owned synthetic-field harness and the category-only quality comparison remain open. No provider request, native field read or human quality comparison ran. B26 stays reviewed/PARTIAL, with no acceptance promotion. Receipts and the retained owned fixture manifest are under the fixed scratch parent at resume-packaging-20261102/{b26-focused,b26-review,b26-fixtures}.
+Fail-without-fix proof restores pre-B26 unsupported-port/no-local-grant behavior
+with compile-compatible interfaces. The run exits 1 with **all nine new methods
+failing, 18 failures total**, including an expected nil-request unwrap after the
+connected path falls back to ordinary cleanup. This is an assertion/behavior
+failure, not a compilation failure. The runner restores original source bytes
+in `finally`, verifies their SHA-256 hashes, and reruns the positive selector.
+The exact reverted source hashes, failed method names, exit code and restoration
+receipt are in `/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-b26-evidence-g59ebxa0/revert-receipt.json`, with output in `revert-tests.log`.
+
+The nine failed methods were:
+
+- `testLocalDefaultUsesNativeContextWithoutCloudOrCredentialAccess`
+- `testNativeCancellationDrainsHeldReadBeforeScopeExit`
+- `testNativeCaretOrFieldChangeDuringReadRefuses`
+- `testNativeContextNeverReachesHistoryDiagnosticsOrOrdinaryRequest`
+- `testNativeOversizeWindowTrimsAndChecksCaretUnicodeBoundary`
+- `testNativeSecurePasswordTerminalAndUnknownFieldsNeverReadText`
+- `testNativeTimeoutRejectsLateReturnAndSetsEachReferenceTimeout`
+- `testLocalDefaultCloudConsentAndSavedOptOut`
+- `testLocalGlobalCaptureGrantCannotCrossProviderOrRevocation`
+
+Additional targeted pre-fix runs recorded the unsaved local opt-out reopening and
+invalid cloud-block suppression assertions failing before their corrections.
+The implementation lane did not spawn an independent review agent. Native
+app/OS coverage and genuine category-only quality comparison remain open.
+
+### 2026-11-07 B26 context-echo and remote-client follow-up
+
+P1 now rejects unsupported context overlap before Pipeline receives output, then
+uses one context-free retry on the same client. P2 adds the explicit remote-client
+bundle-ID refusal list. The three reviewer probes from
+`/tmp/parla-b26-review-probes.swift` were inverted and extended in
+`SurroundingTextContextRegressionTests`; the existing connected sentinel test now
+requires safe retry insertion. Coverage includes both cloud serializers, local
+Apple Intelligence, context-only/appended echoes, Unicode case/punctuation,
+short and raw-supported overlaps, failed/invalid/repeated-echo retries, raw
+History isolation, and all ten remote-client IDs through the production reader.
+
+Focused commands (all fixture parents and files are precreated, private and owned
+by this task; recording children remain empty and manifest-recorded):
+
+```sh
+B26_V2_ROOT=/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-b26-v2-6s7x_om7
+export PARLA_TEST_FIXTURE_MANIFEST="$B26_V2_ROOT/manifest.jsonl"
+export PARLA_B26_FIXTURE_ROOT="$B26_V2_ROOT/b26"
+export PARLA_B21_FIXTURE_ROOT="$B26_V2_ROOT/b21"
+export PARLA_B21_EVIDENCE="$B26_V2_ROOT/b21-evidence.jsonl"
+swift test --jobs 4 --scratch-path "$B26_V2_ROOT/build" --filter 'SurroundingText.*Tests|NativeSurroundingTextTests|PipelineTests|CleanupTests|CleanupFactoryTests|CleanupFailoverTests|AppleIntelligenceCleanupTests|LocalCleanupSettingsTests|LocalCleanupIntegrationTests|CleanupFailoverIntegrationTests|HubCleanupFailoverTests'
+swift build --jobs 4 --scratch-path "$B26_V2_ROOT/build"
+git diff --check
+```
+
+Positive: **224 executed, 2 optional B21 elapsed checks skipped, zero failures**.
+`swift build` and `git diff --check` also pass.
+Separate behavioral reverts restore the original production file for each
+finding: P1 fails all three affected methods with **32 assertions**; P2 fails its
+production-reader method with **21 assertions**, including Screen Sharing.
+Both commands exit 1 through assertions, not compiler failures. Fixed source
+bytes are restored in `finally` and SHA-256 checked. All four new/changed test
+methods fail without their respective fix; positive overlap controls are grouped
+with rejection controls. The focused selector is rerun after restoration.
+
+An initial loose `SurroundingText|NativeSurroundingText|Pipeline|Cleanup` selector
+also selected an unrelated ActivityShadow method requiring the absent historical
+`/tmp/parla-implementation-2026-10-28` fixture parent: 266 executed, 2 skipped,
+1 missing-fixture failure. Its requested feature suites passed; the named-suite
+selector above avoids that unrelated fixture dependency.
+
+Retained task resources are under `/var/folders/vp/_gvcxwbx3rg9cz0193_n4kr00000gn/T/parla-b26-v2-6s7x_om7`: build scratch, empty
+fixture children/manifest, B21 evidence, baseline/revert/final logs and
+`revert-receipt.json` with commands, failing methods and restoration hashes.
+No server, browser, database, live provider, third-party app read or download was
+used. Existing compiler warnings and the earlier qualification limits remain.

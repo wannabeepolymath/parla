@@ -34,7 +34,7 @@ private final class SurroundingTextCancellation: @unchecked Sendable {
     var isCanceled: Bool { lock.withLock { canceled } }
 }
 
-/// Stage A ownership abstraction only: no native worker, facade or binding.
+/// Operation-owned proof/read lifecycle shared by native and synthetic ports.
 /// Jobs are sequential in the caller's lane. A backend must retain any internal
 /// handoffs until its nonthrowing finish returns; cancellation is never exit.
 final class SurroundingTextOperation: @unchecked Sendable {
@@ -193,7 +193,6 @@ struct SurroundingTextPort {
             })
         }
     }
-    static let nativeQualifications: Set<String> = []
     // Genuinely inert: no proof, policy, subscription, watchdog, timer or job.
     static let unsupported = SurroundingTextPort(open: { _, _ in nil })
 }
@@ -205,19 +204,20 @@ enum SurroundingTextCapture {
         transcript: String, context: CleanupContext, store: SettingsStore, environment: [String: String],
         port: SurroundingTextPort, driver: @escaping HistoryRetryHTTP.Driver,
         now: @escaping () -> TimeInterval, sleep: ((TimeInterval) async throws -> Void)?,
-        disarmLearning: @escaping @MainActor () -> Void) async throws -> String? {
+        disarmLearning: @escaping @MainActor () -> Void,
+        localRuntime: LocalCleanupRuntime = LocalCleanupRuntime()) async throws -> String? {
         guard let grant = session.surroundingTextGrant, session.delivery == .keyboard,
               session.mode == .dictation, !session.live, landed.landing == .pending,
               session.effectiveSettings.outputMode == .cleanup, session.effectiveSettings.cleanupEnabled,
-              !session.effectiveSettings.usesAppleIntelligence, session.effectiveSettings.cleanupFailover == nil,
-              session.output?.profile?.id == grant.policy.profileID, landed.bundleID == grant.policy.target,
+              session.effectiveSettings.cleanupFailover == nil,
+              SurroundingTextAuthority.matches(grant.policy, profileID: session.output?.profile?.id), landed.bundleID == grant.policy.target,
               !TextRules.isBrowser(bundleID: landed.bundleID),
-              (try? CleanupChainIdentity.primary(session.effectiveSettings)) == grant.policy.primary,
+              (try? SurroundingTextAuthority.primary(session.effectiveSettings)) == grant.policy.primary,
               !session.operation.shouldAbort else { return nil }
         guard let scope = port.open(session.operation.id, grant.policy.target) else { return nil }
         let run = session.surroundingTextRun
         // Begins before the first supported metadata job, not after its proof.
-        let policy = HistoryRetryExecutionPolicy(planned: 1, budget: 15, now: now,
+        let policy = HistoryRetryExecutionPolicy(planned: 2, budget: 15, now: now,
             sleep: sleep ?? { seconds in try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000)) })
         func pureAdmission(before phaseDeadline: TimeInterval? = nil) throws -> TimeInterval {
             try policy.check(); try run.check(); try scope.checkCancellation()
@@ -287,11 +287,20 @@ enum SurroundingTextCapture {
                     run.willSend()
                     let construct = { try makeSurroundingTextCleanupClient(settings: session.effectiveSettings,
                         access: access, grant: grant, operationID: session.operation.id, store: store,
-                        run: run, policy: policy, driver: driver, shouldContinue: { !session.operation.shouldAbort }) }
+                        run: run, policy: policy, driver: driver, localRuntime: localRuntime, shouldContinue: { !session.operation.shouldAbort }) }
                     let client = try session.operation.diagnostics.map { diagnostic in
                         try diagnostic.makeProvider(settings: session.effectiveSettings, factory: construct)
                     } ?? construct()
-                    let result = try await client.clean(transcript: transcript, context: requestContext)
+                    var result = try await client.clean(transcript: transcript, context: requestContext)
+                    if prefix.containsUnsupportedEcho(in: result, dictated: transcript) {
+                        // One context-free retry on the same client/settings and
+                        // shared deadline; keep all context ownership protections.
+                        _ = try admit(); try await proof(field); _ = try admit()
+                        result = try await client.clean(transcript: transcript, context: context)
+                        guard !prefix.containsUnsupportedEcho(in: result, dictated: transcript) else {
+                            throw SurroundingTextFailure.refused
+                        }
+                    }
                     _ = try admit(); try await proof(field); _ = try admit()
                     return result
                 }

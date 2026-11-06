@@ -216,7 +216,7 @@ final class B26AppHTTP: @unchecked Sendable {
     }
     func work(_ s: DictationSession.Session, field: B26AppField, http: B26AppHTTP,
               previous: Task<Void, Never>? = nil, port: SurroundingTextPort? = nil,
-              recognition: RecognitionClient? = nil) -> Task<Void, Never> {
+              recognition: RecognitionClient? = nil, localRuntime: LocalCleanupRuntime = LocalCleanupRuntime()) -> Task<Void, Never> {
         PendingOperationQueue.enqueue(previous: previous, operation: s.operation, completes: true, work: {
             defer { s.surroundingTextRun.finish() }
             let final = OrdinaryDictationFinalization(recordings: self.recordings, settings: self.d.store, entered: { self.storageEntries.append($0) })
@@ -244,7 +244,7 @@ final class B26AppHTTP: @unchecked Sendable {
                             }, stop: {})
                         },
                         backupDriver: self.backup ?? { _, _ in XCTFail("No backups"); return B26AppHandle(start: {}, stop: {}) },
-                        now: { self.time }, sleep: self.sleep, run: self.failoverRun, usage: { _, _, _ in XCTFail("No local usage") }, primitiveUsage: { _, _, _ in self.primitiveUsageCalls += 1 },
+                        now: { self.time }, sleep: self.sleep, localRuntime: localRuntime, run: self.failoverRun, usage: { _, _, _ in XCTFail("No local usage") }, primitiveUsage: { _, _, _ in self.primitiveUsageCalls += 1 },
                         contextPort: port ?? field.port, contextDriver: http.driver, disarmLearning: { self.disarm() }, contextLog: { self.logs.append($0) })
                 }, completed: { pair, text, failure in
                     await MainActor.run {
@@ -328,19 +328,20 @@ final class SurroundingTextContextIntegrationTests: XCTestCase {
     @MainActor func testA26A28A30ConnectedBothSerializersRawHistoryOriginalAndLearner() async throws {
         for provider in ["anthropic", "openai-compatible"] {
             for history in [false, true] {
-                let d = try B26AppDocument(provider: provider, history: history), r = try B26AppRig(d), field = B26AppField("中文😀 PREFIX_QUOTED_SENTINEL"), http = B26AppHTTP()
+                let d = try B26AppDocument(provider: provider, history: history), r = try B26AppRig(d), field = B26AppField("中文😀 PRIVATE CONTEXT SENTINEL MUST STAY PRIVATE"), http = B26AppHTTP()
+                http.onResume = { [unowned http] in http.text = http.resumed == 1 ? "PRIVATE CONTEXT SENTINEL MUST STAY PRIVATE" : "Dictated speech." }
                 let before = Metrics.shared.snapshot(), s = try r.start()
                 XCTAssertNotNil(s.surroundingTextGrant); XCTAssertNil(s.settings.physicalSurroundingTextGrant)
                 await r.work(s, field: field, http: http).value
-                XCTAssertEqual(field.issues, 1); XCTAssertEqual(http.resumed, 1); XCTAssertEqual(r.categories, 0)
-                XCTAssertEqual(r.posted, ["PREFIX_QUOTED_SENTINEL"]); XCTAssertTrue(s.operation.hasExited)
+                XCTAssertEqual(field.issues, 1); XCTAssertEqual(http.resumed, 2); XCTAssertEqual(r.categories, 0)
+                XCTAssertEqual(r.posted, ["Dictated speech."]); XCTAssertTrue(s.operation.hasExited)
                 XCTAssertFalse(r.pendingLearner); XCTAssertFalse(r.activeLearner); XCTAssertGreaterThanOrEqual(r.disarms, 2); XCTAssertTrue(r.learned.isEmpty)
                 XCTAssertNil(r.runtime.results.read()); XCTAssertEqual(Metrics.shared.snapshot(), before)
                 XCTAssertEqual(d.history.entries.count, history ? 1 : 0)
                 if history { XCTAssertEqual(d.history.entries[0].raw, r.raw); XCTAssertNil(d.history.entries[0].cleaned); XCTAssertEqual(d.history.entries[0].metrics, PipelineMetrics()) }
-                XCTAssertFalse(String(decoding: d.historyBytes, as: UTF8.self).contains("PREFIX_QUOTED_SENTINEL"))
+                XCTAssertFalse(String(decoding: d.historyBytes, as: UTF8.self).contains("PRIVATE CONTEXT SENTINEL"))
                 let export = TranscriptExport(entries: d.history.entries.map { .init(text: $0.best, date: $0.date) }).encoded(content: .result, format: .text)
-                XCTAssertFalse(String(decoding: export, as: UTF8.self).contains("PREFIX_QUOTED_SENTINEL"))
+                XCTAssertFalse(String(decoding: export, as: UTF8.self).contains("PRIVATE CONTEXT SENTINEL"))
                 let token = try XCTUnwrap(r.original.refresh().token); XCTAssertTrue(r.original.copyOriginal(token: token)); XCTAssertEqual(r.originals, [r.raw])
                 XCTAssertTrue(r.storageEntries.contains(.stash)); XCTAssertTrue(r.storageEntries.contains(.resolve))
                 // Future category-only learning remains available through the same executor.
@@ -352,7 +353,6 @@ final class SurroundingTextContextIntegrationTests: XCTestCase {
     }
     @MainActor func testA01A16A18UnsupportedIsPreIssuanceCategoryOnce() async throws {
         let d = try B26AppDocument(history: false), r = try B26AppRig(d), s = try r.start(), f = B26AppField(), h = B26AppHTTP()
-        XCTAssertTrue(SurroundingTextPort.nativeQualifications.isEmpty)
         await r.work(s, field: f, http: h, port: .unsupported).value
         XCTAssertEqual(f.issues, 0); XCTAssertEqual(h.resumed, 0); XCTAssertEqual(r.categories, 1); XCTAssertFalse(s.surroundingTextRun.participated)
         XCTAssertEqual(r.posted, ["Category result."])
@@ -905,7 +905,7 @@ extension SurroundingTextContextIntegrationTests {
         guard await task.joinObserved(identity) else { return }
         XCTAssertEqual(opened, 1); XCTAssertEqual(slept, 0); XCTAssertEqual(f.proofs, 0); XCTAssertEqual(f.issues, 0)
         XCTAssertEqual(h.constructed, 0); XCTAssertEqual(r.categories, 1); XCTAssertEqual(r.primitiveUsageCalls, 1)
-        XCTAssertFalse(s.surroundingTextRun.participated); XCTAssertTrue(SurroundingTextPort.nativeQualifications.isEmpty)
+        XCTAssertFalse(s.surroundingTextRun.participated)
     }
 
     @MainActor func testStageA02HeldMetadataAndCleanupOwnLaneThroughGrantAndParentCancellation() async throws {

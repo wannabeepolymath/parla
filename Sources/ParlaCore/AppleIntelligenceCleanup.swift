@@ -192,6 +192,7 @@ struct AppleIntelligenceCleanup: CleanupProviding, DiagnosticModelObserving, Loc
             for _ in text.utf8 { bytes += 1; if bytes > limit { throw LocalCleanupReason.inputTooLarge.error } }
         }
         try add(transcript, limit: 8192)
+        if let prefix = context.precedingText { try add(prefix.text, limit: 12 * 1024) }
         if let selection = context.selection { try add(selection, limit: 8192) }
         // All configured rules must fit; do not silently use the network hint prefix.
         for word in context.localDictionary { try add(word, limit: 12 * 1024) }

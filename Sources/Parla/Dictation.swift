@@ -1019,7 +1019,7 @@ enum DictationCleanupOutput {
         localRuntime: LocalCleanupRuntime = LocalCleanupRuntime(),
         run: CleanupFailoverRun, usage: @escaping CleanupUsageSink,
         primitiveUsage: @escaping CleanupUsageSink = recordCleanupUsage,
-        contextPort: SurroundingTextPort = .unsupported, contextDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
+        contextPort: SurroundingTextPort = .native, contextDriver: @escaping HistoryRetryHTTP.Driver = HistoryRetryURLSession.init,
         disarmLearning: @escaping @MainActor () -> Void = { CorrectionWatcher.shared.disarm() },
         contextLog: @escaping (String) -> Void = { NSLog("%@", $0) }) async -> (text: String, failure: String?) {
         let settings = session.effectiveSettings
@@ -1047,7 +1047,7 @@ enum DictationCleanupOutput {
             pipeline.log = contextLog
             pipeline.surroundingText = { transcript, context in
                 try await SurroundingTextCapture.clean(session: session, landed: landed, transcript: transcript, context: context,
-                    store: store, environment: environment, port: contextPort, driver: contextDriver, now: now, sleep: sleep, disarmLearning: disarmLearning)
+                    store: store, environment: environment, port: contextPort, driver: contextDriver, now: now, sleep: sleep, disarmLearning: disarmLearning, localRuntime: localRuntime)
             }
         }
         return await pipeline.clean(transcript: landed.raw)

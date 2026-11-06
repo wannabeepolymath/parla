@@ -37,17 +37,20 @@ struct HubProfilesView: View {
                 }
                 if model.settings.profiles.isEmpty { EmptyHint(text: "No profiles — global settings apply") }
             }
-            HubSection("Surrounding text source experiment", footer: "Default off. Review one saved app profile; browser/site/global profiles cannot opt in. Review never samples a field or reads credentials.") {
+            HubSection("Surrounding text", footer: "Nearby text can help cleanup with names and sentence continuity. Only the cleaned dictation is inserted. Nearby text is never saved in History or diagnostics. Secure fields, password managers, terminals and unsupported fields are excluded.") {
+                Toggle("Use nearby text with Apple Intelligence", isOn: $model.settings.cleanup.localSurroundingTextEnabled)
+                Text("On by default for on-device cleanup. Reads a short passage before the caret and keeps it on this Mac.").font(.caption).foregroundStyle(Theme.muted)
+                Text("Nearby text for cloud cleanup is off by default. To enable it, review a saved app profile below. Up to 256 UTF-16 units of existing text before the caret will be sent to your selected cleanup provider along with your dictation.").font(.caption)
                 Text(model.surroundingState).font(.headline)
                 ForEach(model.settings.profiles.filter { $0.targetKind == .app && $0.enabled }) { profile in
                     HubRow(profile.name, detail: profile.target) {
-                        Button("Review") { model.reviewSurrounding(profileID: profile.id) }
-                        Button("Disable") { model.disableSurrounding(profileID: profile.id) }
+                        Button("Review cloud context") { model.reviewSurrounding(profileID: profile.id) }
+                        Button("Disable cloud context") { model.disableSurrounding(profileID: profile.id) }
                     }
                 }
                 if let review = model.surroundingReview {
                     Text(model.surroundingDisclosure(review.policy)).font(.caption).textSelection(.enabled)
-                    Button("Confirm reviewed scope for future captures") { model.confirmSurrounding() }
+                    Button("Enable cloud context for this profile") { model.confirmSurrounding() }
                 }
                 if let message = model.surroundingMessage { Text(message).font(.caption) }
             }
