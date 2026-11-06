@@ -201,7 +201,17 @@ public protocol HTTPPosting {
 public struct URLSessionPoster: HTTPPosting {
     public init() {}
     public func post(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        try await URLSession.shared.data(for: request)
+        try await URLSession.shared.data(for: request, delegate: RefuseRedirects.shared)
+    }
+}
+
+/// A 307/308 would resend the transcript, and every redirect would carry `x-api-key`, to an origin the user
+/// never chose. Refusing returns the 3xx response itself, which clients already treat as a failed request.
+private final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
+    static let shared = RefuseRedirects()
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
 
