@@ -5,12 +5,16 @@ import XCTest
 @testable import Parla
 @testable import ParlaCore
 
-/// Shares HAL's result classification; all native calls and identity checks are injected.
+/// Aggregate/IO refusals execute the native bottom with raw HAL results injected.
+@available(macOS 14.2, *)
 private final class B43RefusingCreation: ApplicationAudioBottom {
     enum Step { case tap, aggregate, io }
     let step: Step
     let refused = XCTestExpectation(description:"no-handle creation actually returned")
     private(set) var destroyed: [String] = []
+    private let native = NativeApplicationAudioBottom(creation:.init(
+        aggregate:{ _ in (status:-1,id:kAudioObjectUnknown) },
+        ioProc:{ _,_,_ in (status:-1,raw:nil) }))
     init(_ step: Step) { self.step = step }
     @MainActor func bindIdentity(_ b: SelectedApplicationBinding,owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws {}
     @MainActor func revalidateIdentity(_ b: SelectedApplicationBinding,owned: ApplicationAudioResources) throws {}
@@ -28,8 +32,8 @@ private final class B43RefusingCreation: ApplicationAudioBottom {
     func createAggregate(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources) throws {
         if step == .aggregate {
             defer { refused.fulfill() }
-            try owned.recordAggregateCreation(status:-1,id:kAudioObjectUnknown)
-        } else { try owned.recordAggregateCreation(status:noErr,id:401) }
+            try native.createAggregate(plan,owned:owned)
+        } else { try owned.ownAggregate(401) }
     }
     func installListeners(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws {
         for id in UInt32(601)...604 {
@@ -39,7 +43,7 @@ private final class B43RefusingCreation: ApplicationAudioBottom {
     func revalidateInput(_ owned: ApplicationAudioResources) throws {}
     func installIOProc(_ owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws {
         defer { refused.fulfill() }
-        try owned.recordIOProcCreation(status:-1,raw:nil)
+        try native.installIOProc(owned,gate:gate,queues:queues)
     }
     func start(_ owned: ApplicationAudioResources) throws { XCTFail("No start after refusal") }
     func stop(_ owned: ApplicationAudioResources) throws { XCTFail("No IO to stop") }
@@ -57,6 +61,7 @@ private final class B43RefusingCreation: ApplicationAudioBottom {
 }
 
 final class B43MeetingReleaseBlockerTests: XCTestCase {
+    @available(macOS 14.2, *)
     @MainActor func testZeroHandleTapRefusalCompletesStopAndTermination() async throws {
         // A handle returned alongside an error still requires an uncertainty hold.
         let possible = ApplicationAudioResources()
@@ -64,6 +69,7 @@ final class B43MeetingReleaseBlockerTests: XCTestCase {
         XCTAssertTrue(possible.uncertain); XCTAssertNotNil(possible.tap)
         try await noHandleRefusal(.tap,expected:[])
     }
+    @available(macOS 14.2, *)
     @MainActor func testZeroHandleAggregateRefusalCompletesStopAndTermination() async throws {
         // Adapted from the independent native probe: the known tap must remain destroyable.
         let possible = ApplicationAudioResources()
@@ -76,6 +82,7 @@ final class B43MeetingReleaseBlockerTests: XCTestCase {
         XCTAssertNil(refused.aggregate); XCTAssertFalse(refused.uncertain); XCTAssertNotNil(refused.tap)
         try await noHandleRefusal(.aggregate,expected:["tap"])
     }
+    @available(macOS 14.2, *)
     @MainActor func testNilHandleIOProcRefusalCompletesStopAndTermination() async throws {
         let possible = ApplicationAudioResources()
         let raw: AudioDeviceIOProcID = { _,_,_,_,_,_,_ in noErr }
@@ -86,6 +93,7 @@ final class B43MeetingReleaseBlockerTests: XCTestCase {
         XCTAssertNil(refused.io); XCTAssertFalse(refused.uncertain)
         try await noHandleRefusal(.io,expected:["listeners","aggregate","tap"])
     }
+    @available(macOS 14.2, *)
     @MainActor private func noHandleRefusal(_ step: B43RefusingCreation.Step, expected: [String]) async throws {
         let bottom = B43RefusingCreation(step)
         let core = MeetingApplicationAudioCapture(makeBottom:{bottom},makeConverter:{ _ in XCTFail("No PCM after creation refusal"); return nil })

@@ -3,6 +3,45 @@
 Base: `054cd2e`; lane: `lane/b43-meetings`. This is source/test evidence, not release acceptance or native hardware qualification. The proposed policy still requires final user sign-off. The existing single retained meeting slot remains; optional meeting AI cleanup/summary has no action and no provider is called.
 
 
+## B43 v4 clean refusal and production-call-site coverage — 2026-11-07
+
+Base: `68ee2d3cc1c8aa3fa4d3793125cff419ba68f2dc`; branch: `lane/b43-meetings-v4`. This section supersedes v3 for clean cold-refusal termination and aggregate/IO-proc regression coverage. B43 remains **needs qualification**; final user policy sign-off and native qualification remain open.
+
+- `MeetingSessionOwner.shutdownReady` permits an existing concern only when the owner has no session and the store exposes clean cold-failure recovery: no ledger, all holds drained, zero descriptors, no poisoned lease or protection quarantine. All owner work must still have actually exited. The concern and damaged namespace remain available for explicit confirmed recovery. Failed live capture and uncertain closes retain their lifecycle vetoes.
+- `B43MeetingCleanRefusalTests.testCleanCorruptManifestCanQuitWithoutDeletingData` imports `/tmp/parla-b43r3-review-probe.swift` (review failure: `/tmp/parla-b43r3-review-independent-red.log`). It records/saves through the injected Hub, corrupts the manifest, runs startup maintenance without opening Meetings, and requires Quit approval with zero descriptors/capture/recognition, drained holds and no quarantine. Names and write count remain unchanged; a later explicit confirmed recovery still succeeds. Against unchanged production source it compiled and failed at the Quit reply assertion: **1 method, 1 runtime failure**, exit 1 (`/tmp/b43v4-clean-baseline.log`).
+- `ApplicationAudioCreationAPI` injects raw `(OSStatus, AudioObjectID)` and `(OSStatus, AudioDeviceIOProcID?)` results beneath `NativeApplicationAudioBottom.createAggregate` and `installIOProc`. Production defaults invoke the same HAL calls. `B43MeetingReleaseBlockerTests` now executes those exact production methods with error + zero/nil results; its injected bottom no longer classifies those refusals itself. The full producer → Stop/writer drain → termination reply assertions remain. Tap and possible-handle classifier controls remain covered. No native HAL call or permission API runs in the injected regressions.
+
+### V4 fail-without-fix proof
+
+The first fixed focused selection passed **8 methods, zero failures** (`/tmp/b43v4-fixed-first.log`): the new clean-refusal regression, all four release-blocker methods, and the existing cold-close/unknown-owned-cleanup lifecycle veto controls. Each reversal below then compiled and failed its single selected method at runtime, with zero selected methods passing. The aggregate/IO reversals change only their production call sites; the shared classifiers and test injection remain unchanged.
+
+| Temporary reversal | Runtime result |
+|---|---|
+| Restore unconditional concern veto in `MeetingSessionOwner.shutdownReady` | `B43MeetingCleanRefusalTests.testCleanCorruptManifestCanQuitWithoutDeletingData`: 1/1 failed, Quit replies false |
+| Restore aggregate error/zero-ID uncertainty at `NativeApplicationAudioBottom.createAggregate` | `testZeroHandleAggregateRefusalCompletesStopAndTermination`: 1/1 failed, actual producer/Stop chain cannot retire |
+| Restore nil IO receipt and unconditional error uncertainty at `NativeApplicationAudioBottom.installIOProc` | `testNilHandleIOProcRefusalCompletesStopAndTermination`: 1/1 failed, actual producer/Stop chain cannot retire |
+
+The restored-source B43/Core regression selection passed **14 methods, zero failures**, including all 111 recovery checkpoints (`/tmp/b43v4-final-regressions.log`). This is **one new method and two strengthened methods**, each independently failing without its production correction. `/tmp/b43v4-proof.py` restored exact fixed-source bytes after every reversal; `/tmp/b43v4-proof/restoration.jsonl` records SHA-256 equality, verified again before final checks. Reversal results: `/tmp/b43v4-proof/results.jsonl`; compiled runtime logs and fixed/mutated snapshots: `/tmp/b43v4-proof/{clean,aggregate,io}*`. No independent review agent was launched by this implementation sub-agent.
+
+### V4 final command results and resources
+
+After exact source restoration, the full Meeting invocation passed **252 methods, zero failures** (273.186 seconds of test execution). Its 240-source/240-result capacity method passed in 205.445 seconds. The related selection passed **68 methods** and the B43/Core selection passed **14 methods**. These selections overlap; their counts must not be added as distinct coverage.
+
+| Command | Result |
+|---|---|
+| `swift test --scratch-path .build-b43v4 --filter Meeting` | **252 passed, 0 failures**, exit 0; includes capacity, owned-real-file admission/reopen and shutdown veto controls |
+| `swift test --scratch-path .build-b43v4 --filter 'SavedAudioImportStorageTests\|SavedAudioImportStoreTests\|HubHistoryExportTests'` | **68 passed, 0 failures**, exit 0 |
+| `swift test --scratch-path .build-b43v4 --filter 'B43Review\|B43Meeting\|testNoHandleCreationFailuresRetireBothCaptureModes'` | **14 passed, 0 failures**, exit 0 |
+| `swift build --scratch-path .build-b43v4` | exit 0 |
+| `bash -n scripts/make-app.sh` | exit 0 |
+| `git diff --check`; final staged `git diff --cached --check` | clean, exit 0 |
+
+Final command logs: `/tmp/b43v4-final-{regressions,meeting,related,build,shell,diff}.log`; all command receipts, including the expected failing baseline/reversals: `/tmp/b43v4-results.jsonl`. Final documentation/staged checks are retained at `/tmp/b43v4-final-{doc-diff,staged-diff}.log`. Existing unrelated compiler warnings remain; no new source/test compiler error occurred.
+
+`/tmp/b43v4-run.py` applied only the four fixture variables from the V2 fixture environment to a fresh canonical 0700 root, `/private/tmp/parla-b43v4-93q878d7`, with precreated 0600 journals and a 0700 `fixtures/` directory. Exact values: `/tmp/b43v4-env.json`. No historical fixture root, dependency installation, model/provider download, real capture, native permission request, browser/device, packaging/signing, push or tag was used. All code changes are confined to this worktree.
+
+After every test/build process exited, cleanup verified recorded root/member device/inode/owner identities, descendant ownership and an empty matching open-file inventory. It removed **290** task-owned paths, found **17** already absent and preserved **0** leftovers, including removal of `.build-b43v4` and the fresh fixture root. It removed one exact test-authored `everyone deny delete` ACL from its verified fixture parent. Journals were archived first to `/tmp/b43v4-proof/fixtures/`. Ownership receipts: `/tmp/b43v4-owned-resources.json`; cleanup inventory/result: `/tmp/b43v4-cleanup-plan.json`, `/tmp/b43v4-cleanup.json`; matching open files: `/tmp/b43v4-open-files.json` (empty). Only diagnostic scripts, logs, receipts and proof snapshots under `/tmp/b43v4-*` and `/tmp/b43v4-proof/` remain. No task database, process, server, browser or device remains; no user namespace, shared cache or other checkout was cleaned.
+
 ## B43 v3 remaining release-blocker corrections — 2026-11-07
 
 Base: `dd275b4b78d48b0bd1cee5c5bfc68f6781494628`; branch: `lane/b43-meetings-v3`. This section supersedes v2 only for the two independently reproduced remaining defects. B43 remains **needs qualification**; policy sign-off and native hardware/crash qualification remain open.

@@ -671,9 +671,11 @@ import ParlaCore
               !streamQuitPending,streams.allSatisfy({ $0.writer == nil && $0.observer == nil && $0.ingress.facts.settled }),
               !pendingStart,stopTask == nil,deleteTask == nil,producerJoin == nil,
               !phaseActive,phase == nil,producers.isEmpty,unclassifiedProducerTasks.isEmpty,
-              ingress.isEmpty,submissions.isEmpty,recognitionTask == nil,transcriptionTask == nil,
-              concern == nil else { return false }
+              ingress.isEmpty,submissions.isEmpty,recognitionTask == nil,transcriptionTask == nil else { return false }
         guard !store.protectionQuarantined else { return false }
+        // A clean cold refusal owns no session, descriptors or holds. Preserve its
+        // concern and files for confirmed recovery without preventing normal Quit.
+        guard concern == nil || canDeleteUnavailableMeetingData else { return false }
         return session == nil || store.shutdownReady
     }
     /// Explicit future composition hook. Request acknowledgment never substitutes for any owned actual exit.
