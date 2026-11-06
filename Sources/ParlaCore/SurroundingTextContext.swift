@@ -229,12 +229,17 @@ public struct SurroundingTextPrefix: Sendable {
     // Four consecutive words catch sentence copying while allowing common short
     // phrases; a span actually dictated is always supported, regardless of length.
     private static let unsupportedEchoWordThreshold = 4
+    // Cleanup removes these, so they must not make a dictated span look unsupported.
+    private static let fillers: Set<String> = ["uh", "um", "er", "ah", "hmm", "mm"]
 
     public func containsUnsupportedEcho(in output: String, dictated transcript: String) -> Bool {
         func spans(_ text: String) -> Set<[String]> {
-            let words = text.precomposedStringWithCanonicalMapping
-                .folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
-                .split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            // Compatibility mapping folds full-width forms; format characters (soft hyphen,
+            // zero-width joiners) are dropped so invisible formatting can't split a word.
+            let folded = String(String.UnicodeScalarView(text.precomposedStringWithCompatibilityMapping.unicodeScalars
+                .filter { $0.properties.generalCategory != .format }))
+            let words = folded.folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+                .split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { !Self.fillers.contains($0) }
             let width = Self.unsupportedEchoWordThreshold
             guard words.count >= width else { return [] }
             return Set((0...words.count - width).map { Array(words[$0..<$0 + width]) })
