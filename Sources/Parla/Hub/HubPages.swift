@@ -856,8 +856,8 @@ struct PrivacyPage: View {
                 }
             }
             HubSection("Brief Original copy",
-                       footer: "Opt in to keep one ordinary dictation Original in RAM for 30 seconds from paste dispatch, up to 64 KiB of UTF-8. Works with history off. Only an explicit Copy Original writes it to the clipboard; no transcript preview. Paste acceptance is unverified. Guarded Undo / Restore Raw remain unavailable pending native qualification.") {
-                HubRow("Keep last Original briefly", detail: "Off by default; new capture, insertion, disable, expiry or quit clears it") {
+                       footer: "Keep one ordinary dictation Original in RAM for 30 seconds from paste dispatch, up to 64 KiB of UTF-8. Works with history off. Only an explicit Copy Original writes it to the clipboard. Undo Last Dictation and Restore Raw Text are available from the menu for 10 minutes after a verified insertion, while the field and caret still match. This Copy preference does not disable guarded edits.") {
+                HubRow("Keep last Original briefly", detail: "On by default; new capture, insertion, disable, expiry or quit clears the copy") {
                     Toggle("", isOn: $model.settings.keepLastOriginalEnabled).toggleStyle(.switch).labelsHidden()
                 }
                 HubDivider()

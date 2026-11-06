@@ -22,7 +22,7 @@ final class VocabularyDeliveryTests: XCTestCase {
         let session = start(machine, settings: settings, cleanup: false)
         let effects = machine.handle(.transcribed(session, raw: "cat", probe: LandingProbe(
             focus: .editable, bundleID: "com.apple.TextEdit", appName: "Editor", deferInsertionUntilClean: true)))
-        XCTAssertTrue(effects.contains(.insertText("dog\nnext")))
+        XCTAssertTrue(effects.contains(.insertText("dog\nnext", original: OriginalDictationContext(raw: "cat", generation: session.gen, operationID: session.operation.id))))
         XCTAssertTrue(effects.contains(.appendHistory(raw: "cat", cleaned: "dog\nnext", appName: "Editor")))
         XCTAssertFalse(effects.contains { if case .polish = $0 { return true }; return false })
     }
@@ -33,12 +33,13 @@ final class VocabularyDeliveryTests: XCTestCase {
             let session = start(machine, settings: settings, cleanup: false)
             let effects = machine.handle(.transcribed(session, raw: "Shortcut!", probe: LandingProbe(
                 focus: .unknown, bundleID: "com.apple.TextEdit", deferInsertionUntilClean: true, singleLine: singleLine)))
-            XCTAssertTrue(effects.contains(.insertText(singleLine ? "cat $1\\literal" : "cat\n$1\\literal")))
+            XCTAssertTrue(effects.contains(.insertText(singleLine ? "cat $1\\literal" : "cat\n$1\\literal",
+                original: OriginalDictationContext(raw: "Shortcut!", generation: session.gen, operationID: session.operation.id))))
         }
         let machine = DictationSession()
         let session = start(machine, settings: settings, cleanup: false)
         XCTAssertTrue(machine.handle(.transcribed(session, raw: "cat", probe: LandingProbe(
-            focus: .editable, bundleID: "com.apple.Terminal"))).contains(.insertText("dog next")))
+            focus: .editable, bundleID: "com.apple.Terminal"))).contains(.insertText("dog next", original: OriginalDictationContext(raw: "cat", generation: session.gen, operationID: session.operation.id))))
     }
 
     func testProviderFailureProductionHandoffKeepsLocalResultInHistoryAndSingleLineField() async {
@@ -54,7 +55,7 @@ final class VocabularyDeliveryTests: XCTestCase {
                                 settings: { s }, frontBundleID: { nil })
         let result = await pipeline.clean(transcript: landed.raw)
         let output = machine.handle(.cleanReady(session, landed, text: result.text, failure: result.failure, focus: .unknown))
-        XCTAssertTrue(output.contains(.insertText("dog next")))
+        XCTAssertTrue(output.contains(.insertText("dog next", original: OriginalDictationContext(raw: "cat", generation: session.gen, operationID: session.operation.id))))
         XCTAssertTrue(output.contains(.appendHistory(raw: "cat", cleaned: "dog\nnext", appName: nil)))
         XCTAssertTrue(output.contains(.hud(.rawFallback("cleanup timed out"))))
     }

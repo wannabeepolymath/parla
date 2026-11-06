@@ -75,7 +75,7 @@ public struct Settings: Codable, Equatable, Sendable {
     public var canceledCaptureUndoEnabled = false
     public var clipboardReceiptRestoreEnabled = false
     public var energyActivityShadowEnabled = false
-    public var keepLastOriginalEnabled = false
+    public var keepLastOriginalEnabled = true
     public var automationEnabled = false
     public var historyEnabled: Bool = true
     /// Independent of audio retention and enablement; zero is never “off”.
@@ -206,7 +206,7 @@ public struct Settings: Codable, Equatable, Sendable {
         canceledCaptureUndoEnabled = try c.decodeIfPresent(Bool.self, forKey: .canceledCaptureUndoEnabled) ?? false
         clipboardReceiptRestoreEnabled = try c.decodeIfPresent(Bool.self, forKey: .clipboardReceiptRestoreEnabled) ?? false
         energyActivityShadowEnabled = try c.decodeIfPresent(Bool.self, forKey: .energyActivityShadowEnabled) ?? false
-        keepLastOriginalEnabled = try c.decodeIfPresent(Bool.self, forKey: .keepLastOriginalEnabled) ?? false
+        keepLastOriginalEnabled = try c.decodeIfPresent(Bool.self, forKey: .keepLastOriginalEnabled) ?? true
         automationEnabled = try c.decodeIfPresent(Bool.self, forKey: .automationEnabled) ?? false
         outputMode = try c.decodeIfPresent(DictationOutputMode.self, forKey: .outputMode) ?? .cleanup
         transformPresets = try c.decodeIfPresent([TransformPreset].self, forKey: .transformPresets) ?? []

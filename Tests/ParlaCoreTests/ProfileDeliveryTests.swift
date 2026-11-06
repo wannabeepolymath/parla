@@ -60,7 +60,7 @@ final class ProfileDeliveryTests: XCTestCase {
         XCTAssertEqual(client.context?.dictionary, ["OutputWord", "Global"])
         XCTAssertEqual(client.context?.style, .formal)
         let done = m.handle(.cleanReady(s, landed, text: result.text, failure: result.failure, focus: .editable))
-        XCTAssertTrue(done.contains(.insertText("dog next")))
+        XCTAssertTrue(done.contains(.insertText("dog next", original: OriginalDictationContext(raw: landed.raw, generation: s.gen, operationID: s.operation.id))))
         XCTAssertTrue(done.contains(.appendHistory(raw: "cat", cleaned: "dog\nnext", appName: nil)))
     }
 
@@ -72,7 +72,7 @@ final class ProfileDeliveryTests: XCTestCase {
         let s = start(m, settings: globals)
         for (raw, expected) in [("cat", "dog"), ("Shortcut!", "cat\nlocked")] {
             let fx = m.handle(.transcribed(s, raw: raw, probe: .init(focus: .editable, bundleID: "local", deferInsertionUntilClean: true)))
-            XCTAssertTrue(fx.contains(.insertText(expected)))
+            XCTAssertTrue(fx.contains(.insertText(expected, original: OriginalDictationContext(raw: raw, generation: s.gen, operationID: s.operation.id))))
             XCTAssertFalse(fx.contains { if case .polish = $0 { return true }; return false })
             XCTAssertTrue(fx.contains(.appendHistory(raw: raw, cleaned: expected, appName: nil)))
         }
@@ -111,10 +111,10 @@ final class ProfileDeliveryTests: XCTestCase {
         let pending = m.handle(.transcribed(s, raw: "cat", probe: .init(focus: .editable, bundleID: "output", deferInsertionUntilClean: true)))
         guard case .polish(let output, let landed)? = pending.first(where: { if case .polish = $0 { return true }; return false }) else { return XCTFail("missing output") }
         let changed = m.handle(.cleanReady(output, landed, text: "result", failure: nil, focus: .none))
-        XCTAssertFalse(changed.contains(.insertText("result")))
+        XCTAssertFalse(changed.contains { if case .insertText = $0 { return true }; return false })
         _ = start(m, settings: globals)
         let stale = m.handle(.cleanReady(output, landed, text: "result", failure: nil, focus: .editable))
-        XCTAssertFalse(stale.contains(.insertText("result")))
+        XCTAssertFalse(stale.contains { if case .insertText = $0 { return true }; return false })
         XCTAssertTrue(stale.contains(.appendHistory(raw: "cat", cleaned: "result", appName: nil)))
     }
 

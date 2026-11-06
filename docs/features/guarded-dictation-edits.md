@@ -1,163 +1,130 @@
-# Brief Original copy — partial B24
+# Undo Last Dictation / Restore Raw — B24
 
-B24 is **PARTIAL**. This source slice provides an optional Copy Original fallback.
-Guarded Undo Last Dictation and Restore Raw are **blocked on a safe mutation
-contract**, with real-app qualification tracked separately under B08. There is
-no field receipt, qualified native mutation adapter,
-Undo button, Cmd-Z interception, automatic replacement or blind backspace.
+B24 ships on by default in 0.7.0. **Undo Last Dictation** and **Restore Raw
+Text** appear beside **Copy Original** in the menu bar. They are enabled only
+while a verified insertion receipt exists. There is no experimental toggle,
+Cmd-Z interception, blind backspace, automatic replacement or keystroke fallback.
+B08 still tracks real-app qualification; source tests do not qualify an editor.
 
-## Opt-in and retention
+## 0.7.0 accepted safety contract
 
-`keepLastOriginalEnabled` defaults to `false`. Missing or null decodes as false;
-a malformed value rejects decoding under the settings policy. A settings load
-error disables retention and copying even if unrelated globals were recovered.
-The Hub's Data & Privacy page explains the choice. Saving only this flag, mouse
-binding changes, coalesced reverts or net-zero general edits uses passive
-configuration; it does not call the general mic/model setup callback. Genuine
-general preference changes retain their existing callback.
+macOS Accessibility has no conditional write. B24 uses the same contract as the
+shipping `Inserter.replaceTypedTail`: **read immediately before writing, write
+only on exact match, then verify by readback**. The previous safety stop demanded
+a stronger target-side transaction than AX provides; that requirement has been
+explicitly replaced by this contract.
 
-When opted in **at capture and at dispatch**, ordinary non-live `.dictation`
-with keyboard delivery may retain one exact finalized ASR original in RAM.
-Physical keyboard and mouse dictation share this path. This is the original
-passed to the reducer, before local replacements, snippet expansion, provider
-cleanup or destination shaping. It is carried directly to the actual insertion
-effect and executor; it is not recovered from History, the automation result
-store or a global latest-transcript property.
+A receipt records the target pid and bundle id, focused AX element identity,
+full field values before and after insertion, selection/caret after insertion,
+inserted UTF-16 range, exact raw transcript, delivered cleaned text and monotonic
+timestamp. The before selection is also retained so Undo can recover text that
+was selected and replaced. Ordinary non-live keyboard dictation carries its raw
+ASR directly to its actual insertion effect, before replacements, snippets,
+provider cleanup or destination shaping. It never reconstructs raw from History
+or a global latest-transcript property.
 
-The slot is independent of history and usable with history off. It retains no
-field text, selection, AX identity, audio, credentials or full-field snapshots.
-It changes no history schema, result retrieval schema or profile policy. Its
-maximum is **65,536 UTF-8 bytes (64 KiB)**; overflow refuses retention rather
-than truncating. Its deadline is **30 seconds from paste dispatch**, using a
-monotonic clock. Slow clipboard preparation precedes that start, while time
-spent returning from the paste counts against the deadline. Reading, refreshing
-and copying do not extend it. Timer closures carry only an epoch, not text.
-This bounds the experiment-owned slot, not all existing ASR/session/history
-copies in process memory. No secure physical zeroization is claimed.
+The production adapter requires nonsecure, readable text/selection and settable
+value/selection attributes. It checks the element's pid against the frontmost
+app and refuses missing role/subrole security evidence. It does not prompt,
+wake an AX tree or capture a secure field's value. Opaque and read-only fields
+cannot acquire receipts. The snapshot is captured in the actual dispatch hook,
+after clipboard preparation. Posting Command-V alone proves nothing. A bounded
+one-second sequence of AX reads (a single AX call can overrun its deadline) must find the exact expected complete field
+value, caret, element, pid and bundle id before publishing a receipt. There is
+no receipt for failed or unverified delivery, including paste-only targets.
+Clipboard data requests are not insertion evidence.
 
-Publication requires a real authorized insertion returning `posted = true`, a
-dispatch callback, the accepted capture's operation and generation, current valid
-opt-in, and a still-current epoch. This is **posted-unverified**: it establishes
-neither acceptance nor insertion into an external field. Existing normal paste,
-correction learning, diagnostic posting, history and final-result semantics
-remain independent. Old raw text may deliberately still paste under existing
-policy after a newer capture; it cannot gain new Original-copy authority.
+On an explicit action, Parla computes the desired text, consumes the receipt,
+then re-reads the focused field immediately before its write. The app, element,
+security, full UTF-16 value and selection must exactly match the receipt.
+Any mismatch or expired/missing receipt refuses with:
 
-Spoken transforms, selected-text transforms, dictated presets, result-only
-automation, stored/history paste and legacy live typing do not publish a slot.
-Turning on the preference after capture cannot retroactively authorize it.
+> The text changed since Parla typed it — use Copy Original
 
-## Explicit action and invalidation
+Undo restores the complete pre-insertion value and places the caret at the
+insertion point, including when dictation replaced a selection. Restore Raw
+replaces only the inserted cleaned range with the exact raw ASR and puts the
+caret after it. Both preserve surrounding text. One AX value assignment and one
+selection assignment are followed by exact focused-field readback of both.
+A failed native return or readback mismatch is **unverified**: the edit may land
+later, so Parla never retries the write or falls back to keystrokes. The receipt
+is consumed on success, refusal or unverified outcome; it cannot authorize a
+second action. Copy Original remains independent.
 
-The production menu and Hub show only scalar availability and the
-posted-unverified label, with **Copy Original** enabled for a fresh owner.
-They do not preview the transcript or put it in a tooltip or log. The same
-controller rechecks valid current settings, the displayed token, epoch, deadline,
-generation, revocation and nonprompt current security immediately before an
-explicit clipboard write. Secure or unavailable security evidence clears the
-slot and refuses the action. The production adapter uses existing current-focus
-classification and secure-input/permission evidence, without opaque paste
-fallback or AX wake-up. Failed role/subrole evidence refuses copy; controls
-with known nonsecure roles do not need to be editable. No field value/range is
-captured for this security check.
-Hub activation does not itself invalidate Original: copying needs no retained
-field identity. No native focus-preservation claim follows from this.
+### Accepted residual risk
 
-Each deliberate click may copy once until the original deadline. Copy writes
-only the bounded original, never prepared/final text. It uses the app's existing
-explicit clear-and-set clipboard semantics: the change count changes so an older
-temporary-paste restore cannot overwrite a new user copy. It neither pastes nor
-edits a field, runs a model, nor writes history. There is no keyboard shortcut.
+AX reads and writes cross process boundaries. Between the final read and the
+unconditional value assignment, the receiving app may process a user edit,
+focus change or security transition. The small read-to-write window (including
+the microsecond-scale race in a healthy target) is accepted. AX can also delay
+an issued set. A successful readback cannot prove that no intervening edit was
+lost. Value and selection are separate AX attributes and assignments, not a
+transaction. An edit-and-revert or focus round trip returning to the exact same
+snapshot is not detectable. This is snapshot equality, not revision-history
+proof or an atomic compare-and-set guarantee. No observer, polling outside the
+bounded insertion readback, or target-side revision API is claimed.
 
-A new accepted capture clears before capture effects, including automation and
-transform captures. Any new actual insertion/edit clears, even if it cannot
-publish or posting fails. Revocation, secure refusal or an already-observed
-secure transition, disabled/invalid configuration, exact deadline expiry and
-quit/restart clear authority. Tryout, microphone-test and shortcut-recording
-entry also clear without adding recorder/model setup. A completed operation may
-own a fresh slot until its deadline; revoked work cannot. Canceled timers,
-delayed completions and newly enabled settings cannot revive an old slot.
-The disabled path adds no experiment field/security reads, timer, retention or
-copy. No observer, focus polling or clipboard polling is added; an unobserved
-external security change is checked on explicit Copy rather than polled for.
+## Receipt lifecycle and privacy
 
-## Later work and release prerequisites
+Only one receipt lives in RAM. A new accepted dictation clears it before capture
+effects, even if the new dictation later fails or delivers a result only.
+Other actual insertions/edits, observed secure refusal, discard, explicit
+tryout/microphone-test/shortcut-recording entry and quit also invalidate it.
+Receipts expire exactly **10 minutes** after dispatch. Expiry cancels authority
+and releases the full snapshots; menu refresh and actions also check the clock.
+Callbacks hold scalar tokens and weak owners, never transcript/field snapshots.
+A canceled callback or old-generation delivery cannot revive a cleared receipt.
 
-Full-field receipts and proven mutations are later work. Enabling Undo/Restore
-requires a separately qualified, narrowly bounded native field capability with
-positive same-field identity, coherent full text and UTF-16 selection, freshness,
-observed target changes, exact accepted-paste evidence and a demonstrated single
-mutation restoring both text and desired selection, followed by exact readback.
-Generic cross-process AX read/check/set is not a transaction and cannot by itself
-establish atomic prevention of concurrent external edits. An empty capability
-allowlist would not qualify support.
+Receipts are never encoded, persisted to disk, sent to a model, added to History
+or included in diagnostics. History and recording preferences are unchanged.
+This bounds the receipt owner's retention; it does not promise physical memory
+zeroization, absence of OS swap, or removal of existing ASR/session copies.
+Selected-text transforms, dictated presets, result-only automation, stored
+history paste and legacy live typing do not create receipts.
 
-Opaque, rich, terminal/remote and unqualified editors remain outside native
-mutation support. Qualification must document app/OS/version/field behavior,
-selection replacement, Unicode, concurrent edits, focus changes, delayed native
-operations, security/permission loss and target model/formatting consistency.
-Source tests with fake poster, security, clipboard, clock and scheduler establish
-application authority and provenance only. They do not qualify native paste
-acceptance, AX mutation, clipboard timing or Hub/menu focus behavior. No native
-qualification or B19 build/sign/extraction permission is implied by this slice.
+## Copy Original fallback
 
-## 0.7.0 safety stop (B24, 2026-11-07)
+`keepLastOriginalEnabled` now defaults to **true** (including missing/null
+settings). Existing explicit false values still disable only this separate
+fallback. Malformed values reject decoding; settings load failures disable
+copying. The Hub retains the Copy preference and explains that it does not
+disable guarded edits. The menu omits the old permanently grey “Original copy
+is off” status row and hides Copy Original when explicitly disabled.
 
-The default-on implementation was stopped under the task's explicit safety-stop
-condition. This is unfinished source work, not a B08 qualification-only gate.
-No Undo/Restore Raw action, shortcut, full-field retention or new default was
-added. The existing optional Copy Original behavior and menu remain unchanged.
+When enabled at capture and dispatch, an ordinary non-live keyboard dictation
+may retain one original ASR in RAM, at most **65,536 UTF-8 bytes**, for **30 seconds
+from paste dispatch**. Overflow refuses fallback retention rather than truncating;
+guarded receipt provenance is independent of this copy-size bound. This works
+with history off and for posted-but-unverified delivery. Publication requires
+actual posting and current operation/generation/epoch authority. Reading or
+copying never renews the deadline. New capture, insertion, disable, invalid
+settings, revocation, security refusal, expiry and quit clear it.
 
-The requested contract includes *no edits since insertion*, not merely equality
-at the instant of a read. The existing production primitives cannot prove that
-contract or condition a mutation on it:
+Explicit Copy Original rechecks settings, token, generation, expiry and current
+nonprompt security evidence before writing only the raw transcript to the
+clipboard. It does not paste, edit a field, invoke a model or write History.
+The existing clipboard change-count ownership prevents a pending temporary
+paste restore from overwriting this explicit copy. No new keyboard shortcuts
+were added: global shortcut dispatch requires separate binding/schema/UI work.
 
-- `Inserter.postPaste` posts Command-V events. Its successful return means
-  dispatch, not acceptance by a particular field. `ClipboardDelivery.paste`
-  records `posted` after the callback; a pasteboard data request is not field
-  insertion evidence.
-- `Inserter.fieldState(of:)` reads `AXValue` and `AXSelectedTextRange` separately.
-  `Inserter.Destination` retains field/app identity, but no target revision or
-  edit history. Identical values after an edit-and-revert or focus round trip
-  cannot establish that no intervening change happened.
-- `Inserter.replaceTypedTail` checks a previously read value, then sends an
-  unconditional `AXUIElementSetAttributeValue`, then reads back. Its “atomic
-  write” comment describes one value assignment, not an atomic conditional
-  read/check/write. Selection restoration is another write. Its own comments
-  acknowledge that a target can apply an issued AX set later.
-- `CorrectionWatcher` receives AX notifications through a run loop and delays
-  attachment after paste. It is a learning observer, not a synchronous target
-  revision barrier or an insertion receipt; it cannot authorize these actions.
-- The installed SDK's `AXUIElementSetAttributeValue(element, attribute, value)`
-  accepts no expected old value/revision. `AXUIElementCopyMultipleAttributeValues`
-  supplies a read API, not a conditional write. Neither provides the missing
-  target-side compare-and-replace operation.
+## Verification
 
-A concrete unsafe ordering is: Parla verifies the receipt's full value and
-selection; the receiving app processes an edit (or changes focus/security);
-Parla's unconditional AX assignment applies a value computed from the old
-snapshot. The assignment can discard that edit. A subsequent exact readback can
-match Parla's requested value while the user's edit has already been lost.
-Adding another read, an observer, a shorter deadline or a main-thread lock in
-Parla does not serialize the receiving process. A fake field with an atomic
-compare-and-replace method would test a stronger capability than this production
-AX path implements.
-
-Unblocking the strict contract requires a supported target capability that
-checks field identity, security, focus/edit revision and expected value/selection
-at the point of mutation, with confirmed insertion provenance. No such external
-adapter is present in this checkout. A best-effort snapshot/check/set product
-would require an explicit change to the safety contract; it must not be shipped
-as the requested proven guard. B08 remains responsible for real-app qualification
-of an eventual adapter; it does not supply this missing source capability.
-
-
-Verification for this stop: `swift test --scratch-path
-/tmp/parla-b24-safety-CDanac/build --filter OriginalCopyTests` passed all 28
-existing tests, including existing menu enablement checks. `swift build
---scratch-path /tmp/parla-b24-safety-CDanac/build` passed; `git diff --check`
-passed. These validate the unchanged fallback and compilation only. No new
-receipt/guard tests or temporary-revert proof were produced because no guarded
-action was implemented. No third-party app, computer use or microphone was used.
-Logs are retained in `/tmp/parla-b24-safety-CDanac/`; its isolated build directory
-was removed after both commands exited. No dependencies were installed.
+XCTest uses the production guard and lifecycle logic with fake field read/write,
+clock, scheduler and paste ports. It covers success, selection replacement,
+Unicode, all identity/value/selection/security/expiry refusals, unverified paste,
+delayed readback, stale callbacks/generations, readback mismatch with no second
+write, next-capture clearing and menu enablement. Temporary implementation
+reverts establish that all **27 new tests fail** without receipt publication/the
+new menu (71 assertion failures). A separate revert of the fresh equality guard,
+receipt consumption and readback-result handling fails **13 safety tests** (77
+assertions). Both reverts were restored exactly. **278 focused tests pass**,
+covering the new tests plus existing insertion, reducer, settings, clipboard,
+vocabulary/profile and surrounding-text delivery suites. Existing reducer
+expectations now assert the exact raw/session provenance on insertion effects.
+`swift build` and `git diff --check` also pass. Commands use the isolated scratch
+directory `/tmp/parla-b24-v2-artifacts/build`; proof scripts/logs and the private
+fixture manifest are retained under `/tmp/parla-b24-v2-artifacts/`. The surrounding-
+text suite requires `PARLA_TEST_FIXTURE_MANIFEST` and `PARLA_B26_FIXTURE_ROOT`;
+a run without that setup refused its fixtures, and the configured rerun passed. No third-party apps,
+computer use or microphone are used. Native rich-editor model/formatting,
+clipboard timing and menu-focus qualification remain B08 work.

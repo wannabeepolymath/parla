@@ -229,8 +229,11 @@ public final class DictationSession {
         }
 
         fileprivate func originalCopy(_ raw: String) -> OriginalDictationContext? {
-            guard permitsOriginalCopy, effectiveSettings.outputMode != .selectedPreset else { return nil }
-            return OriginalDictationContext(raw: raw, generation: gen, operationID: operation.id)
+            // Guarded receipts are default-on, independent of the legacy Copy
+            // Original preference. Carry provenance on the actual effect.
+            guard delivery == .keyboard, !live, mode == .dictation,
+                  settings.outputMode != .selectedPreset, effectiveSettings.outputMode != .selectedPreset else { return nil }
+            return OriginalDictationContext(raw: raw, generation: gen, operationID: operation.id, maximumBytes: .max)
         }
 
         public var willPolish: Bool { effectiveSettings.outputMode != .raw && effectiveSettings.cleanupEnabled && cleanupConfigured }

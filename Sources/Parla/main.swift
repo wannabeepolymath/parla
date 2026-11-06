@@ -116,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         templates.invalidatePriorAuthority = { [weak self] in
             guard let self else { return }
-            self.canceledCaptureUndo.invalidate(); self.originalCopy.clear(); self.physicalInput.invalidateQueuedMouseStarts()
+            self.canceledCaptureUndo.invalidate(); self.clearDictationRecovery(); self.physicalInput.invalidateQueuedMouseStarts()
             MainActor.assumeIsolated { self.invocation.clearResult() }
         }
         templates.enqueue = { [weak self] operation, work, finished in
@@ -181,7 +181,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return await MainActor.run { self.residentRecognition }
         }, factory: self.recognitionFactory, preparationRefused: { [weak self] in self?.nativePreparation.notice($0) }) },
         ordinary: { [weak self] session, samples, ledger in await self?.finish(session, samples: samples, ledger: ledger) })
-    lazy var originalCopyMenu = OriginalCopyMenuActions(controller: originalCopy)
+    lazy var guardedEdits = GuardedDictationController(edits: GuardedDictationEdits(
+        read: Inserter.dictationField, write: Inserter.writeDictationField))
+    lazy var originalCopyMenu: OriginalCopyMenuActions = {
+        let actions = OriginalCopyMenuActions(controller: originalCopy)
+        actions.edit = { [weak self] action, token in
+            // Menu dismissal may precede the target app's focus handoff.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard let self else { return }
+                CorrectionWatcher.shared.disarm()
+                switch self.guardedEdits.perform(action, token: token) {
+                case .replaced: self.hud.show(.notice(action == .undo ? "Last dictation undone" : "Raw text restored"))
+                case .refused: self.hud.show(.notice(GuardedDictationEdits<Inserter.FieldIdentity>.refusalMessage))
+                case .unverified: self.hud.show(.notice("Couldn’t verify the edit — use Copy Original"))
+                }
+            }
+        }
+        return actions
+    }()
+    func clearDictationRecovery() { originalCopy.clear(); guardedEdits.clear() }
     lazy var insertionExecutor: DictationInsertionExecutor = {
         let configuration: () -> Settings? = { [weak self] in
             guard let self else { return nil }
@@ -190,11 +208,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let executor = DictationInsertionExecutor(originals: originalCopy,
             post: DictationInsertionExecutor.configuredPoster(configuration: configuration),
             preparedPost: DictationInsertionExecutor.configuredPreparedPoster(configuration: configuration),
+            edits: guardedEdits,
             didPost: { [weak self] text in
                 guard let self else { return }
                 CorrectionWatcher.shared.arm(inserted: text, dictionary: self.store.load().dictionary)
             })
         executor.disarmLearning = { CorrectionWatcher.shared.disarm() }
+        executor.isCurrentOriginal = { [weak self] in self?.session.gen == $0.generation }
         executor.beforeStoredInsertion = { [weak self] in self?.canceledCaptureUndo.invalidate() }
         return executor
     }()
@@ -410,7 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         deliberateASREntry: { [weak self] request in
             guard let self else { return }; ParakeetAudioEntry.deliberate(request, owner: self.parakeetPreparation)
         },
-        invalidateOriginal: { [weak self] in self?.originalCopy.clear() },
+        invalidateOriginal: { [weak self] in self?.clearDictationRecovery() },
         invalidateCanceledCapture: { [weak self] in self?.canceledCaptureUndo.deliberateEntry() },
         captureAccepted: { [weak self] session, physical in self?.canceledCaptureUndo.accepted(session, physical: physical) },
         ordinaryBusyReason: { [weak self] in self?.localCleanupAdmission.ordinaryBusyReason },
@@ -694,7 +714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioImport.invalidate("Import discarded for quit.")
         MainActor.assumeIsolated { revokeRecognitionPreview(); revokeActivityShadow() }
         canceledCaptureUndo.shutdown()
-        originalCopy.clear()
+        clearDictationRecovery()
         activeMicrophoneTest?.lifecycle(.quit)
         MainActor.assumeIsolated { automationBroker.quit() }
         captureDiagnostics.clear()
@@ -731,7 +751,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         && self.appleSpeechPreparation.restartReady() && self.parakeetPreparation.restartReady()
                 }, claimOther: { self.catalogDownloads.claimRestartIfIdle() }, rejected: {})
                 guard allowed else { return false }
-                originalCopy.clear()
+                clearDictationRecovery()
                 updater.committing = true
                 return true
             }
@@ -955,7 +975,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showSecureRefusal(_ passwordField: String) {
         templates.cancel("Form discarded after secure-input evidence.")
         audioImport.invalidate("Import discarded after secure-input evidence.")
-        originalCopy.clear()
+        clearDictationRecovery()
         MainActor.assumeIsolated {
             invocation.secureRefusal {
                 let message = Inserter.secureRefusalMessage(passwordField)
@@ -970,7 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// then flatten newlines where Return would fire: terminals run commands,
     /// chat apps (Slack, Discord, etc.) send the message.
     func insertStoredText(_ text: String) {
-        originalCopy.clear()
+        clearDictationRecovery()
         // Mid-swap: the relaunch would exit before this paste's clipboard restore.
         guard !updater.committing else { return hud.show(.notice("Updating Parla…")) }
         // The ONE insertion path with no secure-field check otherwise: ⌃⌘V and

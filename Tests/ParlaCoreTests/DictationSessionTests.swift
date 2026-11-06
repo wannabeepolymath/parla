@@ -68,6 +68,12 @@ final class DictationSessionTests: XCTestCase {
         LandingProbe(focus: focus, bundleID: bundleID, appName: appName, typedIsOurs: typedIsOurs)
     }
 
+    /// Ordinary insertion now carries raw provenance for default-on receipts.
+    func original(_ session: Session, _ raw: String) -> OriginalDictationContext? {
+        OriginalDictationContext(raw: raw, generation: session.gen,
+                                 operationID: session.operation.id, maximumBytes: .max)
+    }
+
     // MARK: - Happy path
 
     func pending(_ s: Session, focus: Inserter.FocusTarget = .unknown, singleLine: Bool = false) -> Landed {
@@ -89,7 +95,7 @@ final class DictationSessionTests: XCTestCase {
         let landed = pending(s)
         let email = "Hi Sam,\n\nThanks.\n\nBest,\nAlex"
         let fx = m.handle(.cleanReady(s, landed, text: email, failure: nil, focus: .unknown))
-        XCTAssertEqual(fx.filter { if case .insertText = $0 { return true }; return false }, [.insertText(email)])
+        XCTAssertEqual(fx.filter { if case .insertText = $0 { return true }; return false }, [.insertText(email, original: original(s, landed.raw))])
         XCTAssertFalse(fx.contains { if case .replaceTailIfOurs = $0 { return true }; return false })
         XCTAssertTrue(fx.contains(.hud(.done)))
         XCTAssertTrue(fx.contains(.appendHistory(raw: landed.raw, cleaned: email, appName: "Chrome")))
@@ -100,7 +106,7 @@ final class DictationSessionTests: XCTestCase {
         let s = startDictation()
         let landed = pending(s)
         let fx = m.handle(.cleanReady(s, landed, text: landed.raw, failure: "cleanup timed out", focus: .editable))
-        XCTAssertTrue(fx.contains(.insertText(landed.raw)))
+        XCTAssertTrue(fx.contains(.insertText(landed.raw, original: original(s, landed.raw))))
         XCTAssertTrue(fx.contains(.hud(.rawFallback("cleanup timed out"))))
     }
 
@@ -130,7 +136,7 @@ final class DictationSessionTests: XCTestCase {
         let result = m.handle(.cleanReady(s, landed, text: "Review this code.", failure: nil,
                                          focus: before.matches(after) ? currentFocus : .none))
         XCTAssertEqual(result.filter { if case .insertText = $0 { return true }; return false },
-                       [.insertText("Review this code.")])
+                       [.insertText("Review this code.", original: original(s, "review this code"))])
         XCTAssertTrue(result.contains(.hud(.done)))
         XCTAssertFalse(result.contains(.hud(.savedToHistory)))
     }
@@ -158,7 +164,7 @@ final class DictationSessionTests: XCTestCase {
         let s = startDictation()
         let landed = pending(s, singleLine: true)
         let fx = m.handle(.cleanReady(s, landed, text: "Project\n\nupdate", failure: nil, focus: .editable))
-        XCTAssertTrue(fx.contains(.insertText("Project update")))
+        XCTAssertTrue(fx.contains(.insertText("Project update", original: original(s, landed.raw))))
     }
 
     /// The cleaned swap flattens by the same rule as the raw landing: browser chat
@@ -188,7 +194,7 @@ final class DictationSessionTests: XCTestCase {
 
         let fx = m.handle(.transcribed(s, raw: "hello world", probe: probe()))
         XCTAssertEqual(quiet(fx), [
-            .insertText("hello world"),
+            .insertText("hello world", original: original(s, "hello world")),
             .hud(.done),                 // no polish coming ⇒ terminal state, no interstitial
             .trace(.landed),
             .playSound(.finish),
@@ -293,10 +299,10 @@ final class DictationSessionTests: XCTestCase {
         let fx = m.handle(.transcribed(s, raw: "hello world", probe: probe()))
         let landed = Landed(landing: .field, raw: "hello world", insertText: "hello world",
                             bundleID: "com.apple.TextEdit", appName: "TextEdit")
-        XCTAssertEqual(quiet(fx), [.insertText("hello world"), .hud(.polishing), .trace(.landed),
+        XCTAssertEqual(quiet(fx), [.insertText("hello world", original: original(s, "hello world")), .hud(.polishing), .trace(.landed),
                                    .polish(s, landed), .playSound(.finish)])
         // The contract is the ORDER: keystrokes on screen, then the POST.
-        XCTAssertLessThan(fx.firstIndex(of: .insertText("hello world"))!,
+        XCTAssertLessThan(fx.firstIndex(of: .insertText("hello world", original: original(s, "hello world")))!,
                           fx.firstIndex(of: .polish(s, landed))!)
         XCTAssertEqual(m.state, .polishing(gen: 1))
 
@@ -338,7 +344,7 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.stopRequested)
         let fx = m.handle(.transcribed(s, raw: "ls -la\nthen exit",
                                        probe: probe(bundleID: "com.apple.Terminal", appName: "Terminal")))
-        XCTAssertTrue(fx.contains(.insertText("ls -la then exit")))
+        XCTAssertTrue(fx.contains(.insertText("ls -la then exit", original: original(s, "ls -la\nthen exit"))))
         guard case .polish(_, let landed)? = fx.first(where: {
             if case .polish = $0 { return true }; return false
         }) else { return XCTFail("no polish") }
@@ -416,7 +422,7 @@ final class DictationSessionTests: XCTestCase {
         let s = startDictation(cleanup: false)
         _ = m.handle(.stopRequested)
         let fx = m.handle(.transcribed(s, raw: "my secret plan", probe: probe()))
-        XCTAssertTrue(fx.contains(.insertText("my secret plan")))
+        XCTAssertTrue(fx.contains(.insertText("my secret plan", original: original(s, "my secret plan"))))
         for case .log(let line) in fx {
             XCTAssertFalse(line.contains("secret"), line)
         }
@@ -426,7 +432,7 @@ final class DictationSessionTests: XCTestCase {
         let s = startDictation(cleanup: false, focus: .unknown)
         _ = m.handle(.stopRequested)
         XCTAssertTrue(m.handle(.transcribed(s, raw: "hello world", probe: probe(.unknown)))
-            .contains(.insertText("hello world")))
+            .contains(.insertText("hello world", original: original(s, "hello world"))))
     }
 
     /// The landing branches on the focus resolved AT LANDING, not the fn-down
@@ -445,7 +451,7 @@ final class DictationSessionTests: XCTestCase {
         s = startDictation(cleanup: false, focus: .none)
         _ = m.handle(.stopRequested)
         fx = quiet(m.handle(.transcribed(s, raw: "hello world", probe: probe(.editable))))
-        XCTAssertTrue(fx.contains(.insertText("hello world")))
+        XCTAssertTrue(fx.contains(.insertText("hello world", original: original(s, "hello world"))))
     }
 
     func testEmptyTranscriptUndoesTheStreamedTextAndHidesTheHUD() {
@@ -535,7 +541,7 @@ final class DictationSessionTests: XCTestCase {
         let s = startDictation(cleanup: false)
         _ = m.handle(.stopRequested)
         let fx = m.handle(.transcribed(s, raw: "new text", probe: probe()))
-        XCTAssertTrue(fx.contains(.insertText("new text")))
+        XCTAssertTrue(fx.contains(.insertText("new text", original: original(s, "new text"))))
         XCTAssertFalse(fx.contains { if case .eraseTypedIfOurs = $0 { return true }; return false })
     }
 
@@ -791,7 +797,7 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.stopRequested)
         startDictation()                                  // gen 2 takes over
         let fx = m.handle(.transcribed(old, raw: "old text", probe: probe()))
-        XCTAssertTrue(fx.contains(.insertText("old text")))
+        XCTAssertTrue(fx.contains(.insertText("old text", original: original(old, "old text"))))
         XCTAssertTrue(fx.contains(.appendHistory(raw: "old text", cleaned: nil, appName: "TextEdit")))
         XCTAssertFalse(fx.contains(.menuBar(.idle)))
         XCTAssertFalse(fx.contains(.releaseModelIfPolicyImmediate))

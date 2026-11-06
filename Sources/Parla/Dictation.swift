@@ -59,6 +59,7 @@ extension AppDelegate {
         }
         canceledCaptureUndo.observe(event)
         originalCopy.observe(event)
+        guardedEdits.observe(event)
         guard event.operation?.shouldAbort != true else { return }
         if case .discardPending(let token) = event { MainActor.assumeIsolated { invocation.discarded(token) } }
         if case .operationFinished(let operation) = event { MainActor.assumeIsolated { invocation.finished(operation) } }
@@ -78,6 +79,7 @@ extension AppDelegate {
 
     func perform(_ effect: DictationSession.Effect) {
         originalCopy.observe(effect)
+        guardedEdits.observe(effect)
         switch effect {
 
         case .captureAccepted(let s): MainActor.assumeIsolated { invocation.accepted(s) }

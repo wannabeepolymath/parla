@@ -93,9 +93,9 @@ private final class OriginalCopyRig {
 
 final class OriginalCopyTests: XCTestCase {
     @MainActor func testFlagDefaultMissingNullRoundTripAndMalformedFailClosed() throws {
-        XCTAssertFalse(Settings().keepLastOriginalEnabled)
+        XCTAssertTrue(Settings().keepLastOriginalEnabled)
         for json in ["{}", "{\"keepLastOriginalEnabled\":null}"] {
-            XCTAssertFalse(try JSONDecoder().decode(Settings.self, from: Data(json.utf8)).keepLastOriginalEnabled)
+            XCTAssertTrue(try JSONDecoder().decode(Settings.self, from: Data(json.utf8)).keepLastOriginalEnabled)
         }
         var settings = Settings(); settings.keepLastOriginalEnabled = true
         XCTAssertTrue(try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(settings)).keepLastOriginalEnabled)
@@ -108,7 +108,7 @@ final class OriginalCopyTests: XCTestCase {
         let backend = FakeCredentialBackend()
         let store = SettingsStore(url: root.appendingPathComponent("settings.json"), credentials: CredentialStore(backend: backend))
         try Data("{\"keepLastOriginalEnabled\":\"yes\"}".utf8).write(to: store.url)
-        XCTAssertFalse(store.load().keepLastOriginalEnabled); XCTAssertNotNil(store.lastError)
+        XCTAssertTrue(store.load().keepLastOriginalEnabled); XCTAssertNotNil(store.lastError)
         XCTAssertEqual(backend.reads + backend.statuses + backend.adds, 0)
     }
 
@@ -118,7 +118,7 @@ final class OriginalCopyTests: XCTestCase {
         XCTAssertEqual(rig.texts, ["private canary"]); XCTAssertEqual(rig.corrections, rig.texts)
         XCTAssertNil(rig.controller.refresh().token); XCTAssertFalse(rig.copy())
         XCTAssertEqual(rig.securityReads, 0); XCTAssertTrue(rig.timers.isEmpty); XCTAssertTrue(rig.copies.isEmpty)
-        XCTAssertTrue(rig.effects.allSatisfy { if case .insertText(_, _, let context) = $0 { return context == nil }; return true })
+        XCTAssertTrue(rig.effects.allSatisfy { if case .insertText(_, _, let context) = $0 { return context?.raw == "private canary" }; return true })
     }
 
     @MainActor func testDirectReducerCopiesExactASRInsteadOfLocalRulesSnippetOrShapeWithHistoryOff() {
@@ -338,7 +338,8 @@ final class OriginalCopyTests: XCTestCase {
         XCTAssertEqual(rig.copies.count, 1); XCTAssertEqual(rig.texts.count, textCount)
         XCTAssertEqual(rig.corrections.count, correctionCount); XCTAssertEqual(rig.effects.count, effectCount)
         menu.removeAllItems(); AppDelegate.addOriginalCopy(to: menu, status: rig.controller.refresh(), target: actions)
-        XCTAssertFalse(menu.items[1].isEnabled); XCTAssertNil(menu.items[1].action)
+        let unavailable = try XCTUnwrap(menu.items.first { $0.title == "Copy Original" })
+        XCTAssertFalse(unavailable.isEnabled); XCTAssertNil(unavailable.action)
     }
 }
 
@@ -626,5 +627,53 @@ extension OriginalCopyTests {
         clipboard.fire(clipboard.timers.last!)
         XCTAssertEqual(clipboard.current.values[.string], Data("exact raw Original 😀".utf8))
         XCTAssertEqual(rig.corrections, ["cleaned"]); XCTAssertNil(rig.controller.status.token)
+    }
+}
+
+extension OriginalCopyTests {
+    @MainActor func testGuardedReceiptUsesActualReducerRawWithCopyOptedOutAndClearsOnStoredPaste() throws {
+        let rig = OriginalCopyRig()
+        rig.settings?.keepLastOriginalEnabled = false
+        var field = DictationField(process: 42, bundleID: "test.app", identity: "field",
+            value: "prefix ", selection: NSRange(location: 7, length: 0))
+        var writes = 0
+        let edits = GuardedDictationEdits(read: { field }, write: { field = $0; writes += 1; return true })
+        let controller = GuardedDictationController(edits: edits, schedule: { _, _ in {} })
+        rig.executor = DictationInsertionExecutor(originals: rig.controller, post: { text, _, hook in
+            hook()
+            field = field.replacing(field.selection, with: text,
+                selection: NSRange(location: field.selection.location + text.utf16.count, length: 0))!
+            return true
+        }, edits: controller, didPost: { _ in })
+        let session = rig.start(cleanup: true), landed = rig.pending(rig.accepted.last!, "um raw 😀")
+        rig.send(.cleanReady(session, landed, text: "Clean", failure: nil, focus: .editable))
+        XCTAssertEqual(edits.receipt?.raw, "um raw 😀"); XCTAssertEqual(edits.receipt?.cleaned, "Clean")
+        XCTAssertNil(rig.controller.refresh().token)
+        let token = try XCTUnwrap(controller.refresh())
+        XCTAssertEqual(controller.perform(.restoreRaw, token: token), .replaced)
+        XCTAssertEqual(field.value, "prefix um raw 😀"); XCTAssertEqual(writes, 1)
+        // A second actual dictation creates authority; stored paste clears it.
+        rig.land("next")
+        XCTAssertNotNil(controller.refresh())
+        XCTAssertTrue(rig.executor.insertStored("history")); XCTAssertNil(controller.refresh())
+    }
+
+    @MainActor func testGuardedReceiptRejectsStaleGenerationAtActualDispatch() throws {
+        let rig = OriginalCopyRig()
+        var field = DictationField(process: 42, bundleID: "test.app", identity: "field",
+            value: "", selection: NSRange(location: 0, length: 0))
+        let edits = GuardedDictationEdits(read: { field }, write: { _ in XCTFail("no action"); return false })
+        let controller = GuardedDictationController(edits: edits, schedule: { _, _ in {} })
+        rig.executor = DictationInsertionExecutor(originals: rig.controller, post: { text, _, hook in
+            hook(); field = DictationField(process: 42, bundleID: "test.app", identity: "field",
+                value: text, selection: NSRange(location: text.utf16.count, length: 0)); return true
+        }, edits: controller, didPost: { _ in })
+        rig.executor.isCurrentOriginal = { $0.generation == rig.machine.gen }
+        rig.land("first"); XCTAssertNotNil(controller.refresh())
+        let stale = rig.accepted.last!
+        _ = rig.start()
+        let context = try XCTUnwrap(OriginalDictationContext(raw: "stale", generation: stale.gen, operationID: stale.operation.id))
+        _ = rig.executor.insert("stale", original: context, operation: stale.operation)
+        XCTAssertNil(controller.refresh()); XCTAssertNil(edits.receipt)
     }
 }

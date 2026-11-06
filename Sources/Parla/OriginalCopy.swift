@@ -119,6 +119,7 @@ final class OriginalCopyController: ObservableObject {
         let accepted = capture
         clear()
         guard enabled(), let context, let operation, !operation.shouldAbort,
+              context.raw.utf8.count <= OriginalDictationContext.maximumBytes,
               context.operationID == operation.id, context.generation == generation(),
               accepted?.operation == operation.id, accepted?.generation == context.generation else { return nil }
         return Attempt(token: epoch, context: context, operation: operation)
@@ -194,8 +195,10 @@ final class DictationInsertionExecutor {
     private let post: Poster
     private let preparedPost: PreparedPoster?
     private let didPost: (String) -> Void
+    private let edits: DictationEditRecording?
     var beforeStoredInsertion: () -> Void = {}
     var disarmLearning: () -> Void = {}
+    var isCurrentOriginal: (OriginalDictationContext) -> Bool = { _ in true }
 
     /// The app and fake-entry tests use the same fresh-valid-config factory.
     typealias ConfiguredPoster = (String, DiagnosticOperation?, ClipboardRestoreMode, () -> Void) -> Bool
@@ -223,19 +226,22 @@ final class DictationInsertionExecutor {
     init(originals: OriginalCopyController,
          post: @escaping Poster = { text, diagnostic, dispatch in
              Inserter.insert(text, diagnostics: diagnostic, willPost: dispatch)
-         }, preparedPost: PreparedPoster? = nil, didPost: @escaping (String) -> Void) {
+         }, preparedPost: PreparedPoster? = nil, edits: DictationEditRecording? = nil, didPost: @escaping (String) -> Void) {
         self.originals = originals; self.post = post; self.preparedPost = preparedPost; self.didPost = didPost
+        self.edits = edits
     }
 
     /// Stored/history paste keeps its existing no-correction-learning behavior.
     func insertStored(_ text: String) -> Bool {
         beforeStoredInsertion()
         originals.clear()
+        edits?.clear()
         return post(text, nil, {})
     }
 
     /// nil preserves the interpreter's existing silent unauthorized path.
     func insert(_ text: String, original: OriginalDictationContext?, operation: PendingOperation?, contextRun: SurroundingTextRun? = nil) -> Bool? {
+        edits?.clear()
         let suppressLearning = contextRun?.participated == true
         if suppressLearning {
             disarmLearning()
@@ -244,6 +250,11 @@ final class DictationInsertionExecutor {
             }
         }
         let attempt = originals.beginInsertion(original, operation: operation)
+        func recordEdit() {
+            guard let original, original.operationID == operation?.id,
+                  operation?.shouldAbort == false, isCurrentOriginal(original) else { return }
+            edits?.willPost(raw: original.raw, cleaned: text)
+        }
         let posted: Bool
         if let contextRun, contextRun.insertionRequiresAuthority {
             var vetoed = false
@@ -252,7 +263,10 @@ final class DictationInsertionExecutor {
                 let dispatch = originals.preparedWillPost(attempt)
                 guard (try? contextRun.check()) != nil,
                       operation?.authorizeDispatch() != false else { vetoed = true; return nil }
-                return dispatch
+                return {
+                    dispatch()
+                    recordEdit()
+                }
             }
             if let preparedPost { posted = preparedPost(text, operation?.diagnostics, prepare) }
             else {
@@ -262,8 +276,12 @@ final class DictationInsertionExecutor {
             if vetoed { return nil }
         } else {
             guard operation?.authorizeDispatch() != false else { return nil }
-            posted = post(text, operation?.diagnostics) { originals.willPost(attempt) }
+            posted = post(text, operation?.diagnostics) {
+                originals.willPost(attempt)
+                recordEdit()
+            }
         }
+        edits?.completed(posted: posted)
         originals.completed(attempt, posted: posted)
         if posted && !suppressLearning { didPost(text) }
         return posted
@@ -274,6 +292,15 @@ final class DictationInsertionExecutor {
 final class OriginalCopyMenuActions: NSObject {
     private let controller: OriginalCopyController
     init(controller: OriginalCopyController) { self.controller = controller }
+    var edit: (GuardedDictationEdits<Inserter.FieldIdentity>.Action, UUID) -> Void = { _, _ in }
+    @objc func undoLastDictation(_ sender: NSMenuItem) {
+        guard let token = sender.representedObject as? UUID else { return }
+        edit(.undo, token)
+    }
+    @objc func restoreRawText(_ sender: NSMenuItem) {
+        guard let token = sender.representedObject as? UUID else { return }
+        edit(.restoreRaw, token)
+    }
     @objc func copyOriginal(_ sender: NSMenuItem) {
         guard let token = sender.representedObject as? UUID else { return }
         controller.copyOriginal(token: token)

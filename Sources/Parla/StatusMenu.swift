@@ -81,7 +81,8 @@ extension AppDelegate: NSMenuDelegate {
         }
 
         Self.addClipboardRestoreStatus(to: menu, failed: Inserter.clipboardRestoreFailed)
-        Self.addOriginalCopy(to: menu, status: originalCopy.refresh(), target: originalCopyMenu)
+        Self.addOriginalCopy(to: menu, status: originalCopy.refresh(), target: originalCopyMenu,
+                             receipt: guardedEdits.refresh())
         Self.addPendingOperation(to: menu, operation: session.pendingOperation, target: self)
         addHistoryItems(to: menu)
 
@@ -111,10 +112,16 @@ extension AppDelegate: NSMenuDelegate {
         showIdle() // menu open is a free moment to reconcile the icon too
     }
 
-    static func addOriginalCopy(to menu: NSMenu, status: OriginalCopyStatus, target: OriginalCopyMenuActions) {
-        let information = NSMenuItem(title: status.message, action: nil, keyEquivalent: "")
-        information.isEnabled = false
-        menu.addItem(information)
+    static func addOriginalCopy(to menu: NSMenu, status: OriginalCopyStatus, target: OriginalCopyMenuActions, receipt: UUID? = nil) {
+        for (title, action) in [("Undo Last Dictation", #selector(OriginalCopyMenuActions.undoLastDictation(_:))),
+                                ("Restore Raw Text", #selector(OriginalCopyMenuActions.restoreRawText(_:)))] {
+            let item = NSMenuItem(title: title, action: receipt == nil ? nil : action, keyEquivalent: "")
+            item.target = target; item.representedObject = receipt; item.isEnabled = receipt != nil
+            menu.addItem(item)
+        }
+        // No permanent grey status row. A legacy explicit Copy opt-out hides
+        // that item; guarded edits remain enabled independently of the setting.
+        guard status != .disabled else { menu.addItem(.separator()); return }
         let item = NSMenuItem(title: "Copy Original", action: status.token == nil ? nil : #selector(OriginalCopyMenuActions.copyOriginal(_:)), keyEquivalent: "")
         item.target = target
         item.representedObject = status.token

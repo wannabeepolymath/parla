@@ -543,6 +543,50 @@ public enum Inserter {
         return (text as NSString, range.location, range.length)
     }
 
+    public struct FieldIdentity: Equatable {
+        fileprivate let element: AXUIElement
+        public static func == (lhs: Self, rhs: Self) -> Bool { CFEqual(lhs.element, rhs.element) }
+    }
+
+    /// Strict, nonprompting receipt adapter. Opaque/read-only/secure fields and
+    /// missing security evidence cannot authorize an edit. Never wakes AX.
+    public static func dictationField() -> DictationField<FieldIdentity>? {
+        guard AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier,
+              let element = focusedElement() else { return nil }
+        AXUIElementSetMessagingTimeout(element, 1)
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid == app.processIdentifier else { return nil }
+        var roleRef: CFTypeRef?, subroleRef: CFTypeRef?
+        let roleRead = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let subroleRead = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+        guard roleRead == .success, let role = roleRef as? String,
+              ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"].contains(role),
+              subroleRef as? String != "AXSecureTextField",
+              (subroleRead == .success && subroleRef as? String != nil)
+                || subroleRead == .attributeUnsupported || subroleRead == .noValue else { return nil }
+        for attribute in [kAXValueAttribute, kAXSelectedTextRangeAttribute] {
+            var settable = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success,
+                  settable.boolValue else { return nil }
+        }
+        guard let state = fieldState(of: element), state.cursor >= 0, state.selLength >= 0,
+              state.cursor <= state.text.length, state.selLength <= state.text.length - state.cursor else { return nil }
+        return DictationField(process: pid, bundleID: bundleID, identity: FieldIdentity(element: element),
+            value: state.text as String, selection: NSRange(location: state.cursor, length: state.selLength))
+    }
+
+    /// Called only after GuardedDictationEdits' fresh exact comparison. One value
+    /// assignment and one selection assignment, then the owner reads back both.
+    /// Even a failed AX return is unverified; never retry or synthesize keys.
+    public static func writeDictationField(_ field: DictationField<FieldIdentity>) -> Bool {
+        var selection = CFRange(location: field.selection.location, length: field.selection.length)
+        guard let range = AXValueCreate(.cfRange, &selection) else { return false }
+        let element = field.identity.element
+        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, field.value as CFString) == .success else { return false }
+        return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, range) == .success
+    }
+
     /// The focused element's current selection via AX. nil when there's no
     /// selection, it's empty, or the field is AX-opaque — the caller treats all
     /// three the same (refuse to transform). Read once at command fn-down.
@@ -585,7 +629,7 @@ public enum Inserter {
         return text.substring(with: NSRange(location: cursor - len, length: len)) == typed
     }
 
-    /// Swap the tail of the focused field in ONE atomic AX write: verify the
+    /// Swap the tail of the focused field in one AX value assignment: verify the
     /// field still ends with `current`, set the whole value to
     /// prefix + `replacement` + whatever followed the cursor, and put the caret
     /// back after the replacement.
@@ -598,7 +642,8 @@ public enum Inserter {
     /// canEraseTyped is a single point-in-time check, so a character the user
     /// physically typed during that burst was eaten by the remaining
     /// backspaces, breaking the "Parla cannot delete text it didn't write"
-    /// guarantee. One atomic write has no window to race and nothing to watch.
+    /// guarantee. AX has no conditional write: a small cross-process window
+    /// between checking and setting remains, and readback cannot undo that race.
     ///
     /// Outcome of `replaceTypedTail`. Three cases because the caller's safe
     /// follow-up differs: done; hands off the field; or fall back to keystrokes.
