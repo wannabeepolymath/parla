@@ -5,27 +5,55 @@ import XCTest
 @testable import Parla
 @testable import ParlaCore
 
-/// The same creation-result ownership classifier as HAL, with no native operation or fallback.
-private final class B43RefusingTap: ApplicationAudioBottom {
-    let refused = XCTestExpectation(description:"zero-handle tap creation actually returned")
+/// Shares HAL's result classification; all native calls and identity checks are injected.
+private final class B43RefusingCreation: ApplicationAudioBottom {
+    enum Step { case tap, aggregate, io }
+    let step: Step
+    let refused = XCTestExpectation(description:"no-handle creation actually returned")
+    private(set) var destroyed: [String] = []
+    init(_ step: Step) { self.step = step }
     @MainActor func bindIdentity(_ b: SelectedApplicationBinding,owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws {}
-    @MainActor func revalidateIdentity(_ b: SelectedApplicationBinding,owned: ApplicationAudioResources) throws { XCTFail("Refusal must precede readback") }
+    @MainActor func revalidateIdentity(_ b: SelectedApplicationBinding,owned: ApplicationAudioResources) throws {}
     @MainActor func removeObserver(_ owned: ApplicationAudioResources) {}
     func resolve(_ b: SelectedApplicationBinding) throws -> ResolvedApplicationAudio { .init(binding:b,process:101,routes:[.init(id:201,uid:"fake-output")]) }
     func createTap(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources) throws {
-        defer { refused.fulfill() }
-        try owned.recordTapCreation(status:-1,id:kAudioObjectUnknown)
+        if step == .tap {
+            defer { refused.fulfill() }
+            try owned.recordTapCreation(status:-1,id:kAudioObjectUnknown)
+        } else {
+            try owned.recordTapCreation(status:noErr,id:301); owned.tapUID = "review-tap"
+            owned.format = try .init(rate:16_000,channels:1,interleaved:false)
+        }
     }
-    func createAggregate(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources) throws { XCTFail("No aggregate after refusal") }
-    func installListeners(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws { XCTFail("No listeners after refusal") }
-    func revalidateInput(_ owned: ApplicationAudioResources) throws { XCTFail("No input after refusal") }
-    func installIOProc(_ owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws { XCTFail("No IO after refusal") }
+    func createAggregate(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources) throws {
+        if step == .aggregate {
+            defer { refused.fulfill() }
+            try owned.recordAggregateCreation(status:-1,id:kAudioObjectUnknown)
+        } else { try owned.recordAggregateCreation(status:noErr,id:401) }
+    }
+    func installListeners(_ plan: ResolvedApplicationAudio,owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws {
+        for id in UInt32(601)...604 {
+            try owned.ownListener(object:id,address:.init(mSelector:kAudioObjectPropertySelectorWildcard,mScope:kAudioObjectPropertyScopeGlobal,mElement:0),queue:queues.listener,block:{ _,_ in })
+        }
+    }
+    func revalidateInput(_ owned: ApplicationAudioResources) throws {}
+    func installIOProc(_ owned: ApplicationAudioResources,gate: ApplicationAudioGate,queues: ApplicationAudioQueues) throws {
+        defer { refused.fulfill() }
+        try owned.recordIOProcCreation(status:-1,raw:nil)
+    }
     func start(_ owned: ApplicationAudioResources) throws { XCTFail("No start after refusal") }
     func stop(_ owned: ApplicationAudioResources) throws { XCTFail("No IO to stop") }
     func removeIOProc(_ owned: ApplicationAudioResources) throws { XCTFail("No IO to remove") }
-    func removeListeners(_ owned: ApplicationAudioResources) -> Bool { true }
-    func destroyAggregate(_ owned: ApplicationAudioResources) throws { XCTFail("No aggregate owned") }
-    func destroyTap(_ owned: ApplicationAudioResources) throws { XCTFail("No tap owned") }
+    func removeListeners(_ owned: ApplicationAudioResources) -> Bool {
+        if !owned.listeners.isEmpty { destroyed.append("listeners") }; owned.listeners.removeAll(); return true
+    }
+    func destroyAggregate(_ owned: ApplicationAudioResources) throws {
+        XCTAssertNil(owned.io); XCTAssertTrue(owned.listeners.isEmpty)
+        destroyed.append("aggregate"); owned.aggregate = nil
+    }
+    func destroyTap(_ owned: ApplicationAudioResources) throws {
+        XCTAssertNil(owned.aggregate); destroyed.append("tap"); owned.tap = nil
+    }
 }
 
 final class B43MeetingReleaseBlockerTests: XCTestCase {
@@ -34,8 +62,33 @@ final class B43MeetingReleaseBlockerTests: XCTestCase {
         let possible = ApplicationAudioResources()
         XCTAssertThrowsError(try possible.recordTapCreation(status:-1,id:301))
         XCTAssertTrue(possible.uncertain); XCTAssertNotNil(possible.tap)
-        let bottom = B43RefusingTap()
-        let core = MeetingApplicationAudioCapture(makeBottom:{bottom},makeConverter:{ _ in XCTFail("No converter after tap refusal"); return nil })
+        try await noHandleRefusal(.tap,expected:[])
+    }
+    @MainActor func testZeroHandleAggregateRefusalCompletesStopAndTermination() async throws {
+        // Adapted from the independent native probe: the known tap must remain destroyable.
+        let possible = ApplicationAudioResources()
+        try possible.ownTap(301)
+        XCTAssertThrowsError(try possible.recordAggregateCreation(status:-1,id:401))
+        XCTAssertTrue(possible.uncertain); XCTAssertNotNil(possible.aggregate)
+        let refused = ApplicationAudioResources()
+        try refused.ownTap(301)
+        XCTAssertThrowsError(try refused.recordAggregateCreation(status:-1,id:0))
+        XCTAssertNil(refused.aggregate); XCTAssertFalse(refused.uncertain); XCTAssertNotNil(refused.tap)
+        try await noHandleRefusal(.aggregate,expected:["tap"])
+    }
+    @MainActor func testNilHandleIOProcRefusalCompletesStopAndTermination() async throws {
+        let possible = ApplicationAudioResources()
+        let raw: AudioDeviceIOProcID = { _,_,_,_,_,_,_ in noErr }
+        XCTAssertThrowsError(try possible.recordIOProcCreation(status:-1,raw:raw))
+        XCTAssertTrue(possible.uncertain); XCTAssertNotNil(possible.io)
+        let refused = ApplicationAudioResources()
+        XCTAssertThrowsError(try refused.recordIOProcCreation(status:-1,raw:nil))
+        XCTAssertNil(refused.io); XCTAssertFalse(refused.uncertain)
+        try await noHandleRefusal(.io,expected:["listeners","aggregate","tap"])
+    }
+    @MainActor private func noHandleRefusal(_ step: B43RefusingCreation.Step, expected: [String]) async throws {
+        let bottom = B43RefusingCreation(step)
+        let core = MeetingApplicationAudioCapture(makeBottom:{bottom},makeConverter:{ _ in XCTFail("No PCM after creation refusal"); return nil })
         let r = try MeetingHubRig(applicationCapability:.production,application:{ attempt in
             .injected(MeetingSelectedApplicationCapture(binding:attempt.binding,core:.live(core),enabled:true).port)
         })
@@ -47,6 +100,7 @@ final class B43MeetingReleaseBlockerTests: XCTestCase {
         r.controller.stopAndSave()
         guard await hubComplete({ await r.controller.drainActions() }) else { return }
         XCTAssertFalse(core.hasActualTask); XCTAssertFalse(r.controller.model.stoppingAvailable)
+        XCTAssertEqual(bottom.destroyed,expected)
         XCTAssertTrue(r.admission.isAvailable); XCTAssertFalse(r.engine.isRunning)
         XCTAssertTrue(r.controller.model.status.contains("Couldn't capture that app's audio"))
         let terminated = expectation(description:"termination participant replied after actual drain")

@@ -322,9 +322,13 @@ public final class MeetingSessionStore: @unchecked Sendable {
             guard ledger == nil, !issue else { throw Failure.unavailable }
             let b = try lease.begin(cold:true)
             do {
-                guard try lease.acquire(create:false,b) else { _ = try lease.finish(b); return .idle }
+                guard try lease.acquire(create:false,recoveringEmpty:true,b) else { _ = try lease.finish(b); return .idle }
                 // Acquisition already performed the entry V; omit the duplicate warm-entry charge/validation.
                 let names = try lease.names(b)
+                if names == ["lock"] {
+                    try lease.unlinkLock(b); try lease.syncDirectory(b); try lease.finalClose(b)
+                    _ = try lease.finish(b); return .idle
+                }
                 guard names.contains("owner.json"),names.contains("manifest.json") else { throw Failure.unavailable }
                 let owner = try lease.read("owner.json",expected:nil,cap:4096,hash:nil,collect:true,authorized:{},b)
                 let current = try lease.read("manifest.json",expected:nil,cap:Int64(MeetingSession.deletionBytes),hash:nil,collect:true,authorized:{},b)
@@ -358,10 +362,15 @@ public final class MeetingSessionStore: @unchecked Sendable {
             lease = Lease(root:lease.root,profile:lease.profile,bottom:lease.bottom)
             var work = try lease.begin(cold:true)
             do {
-                guard try lease.acquire(create:false,work) else {
+                guard try lease.acquire(create:false,recoveringEmpty:true,work) else {
                     _ = try lease.finish(work); issue = false; recoveryAvailable = false; return
                 }
                 let names = try lease.names(work)
+                if names == ["lock"] {
+                    guard authorized() else { throw Failure.stale }
+                    try lease.unlinkLock(work); try lease.syncDirectory(work); try lease.finalClose(work)
+                    _ = try lease.finish(work); issue = false; recoveryAvailable = false; return
+                }
                 guard names.contains("owner.json") else { throw Failure.unavailable }
                 let owner = try lease.read("owner.json",expected:nil,cap:4096,hash:nil,collect:true,authorized:{ guard authorized() else { throw Failure.stale } },work)
                 let f = try J.parse(owner.1,cap:4096).fields(["d","v","owner","session","root","created","expires"])

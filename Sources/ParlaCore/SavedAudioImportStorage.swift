@@ -909,8 +909,9 @@ extension SavedAudioImportStorage {
             guard let token = lockToken, let lockMember, try fileInfo(token.fd,cap:0,budget:b) == lockMember else { throw Failure.changed }
             try namedMatch("lock",lockMember); try b.checkTime()
         }
-        /// Returns false only for an absent noncreating bootstrap. Existing empty roots are never adopted.
-        func acquire(create: Bool, _ b: Work) throws -> Bool {
+        /// Noncreating recovery may retire a verified empty root left after lock unlink.
+        /// Admission still never adopts an existing root.
+        func acquire(create: Bool, recoveringEmpty: Bool = false, _ b: Work) throws -> Bool {
             registryDomain = bottom.registryDomain
             b.path = 3072; try b.charge(v:1,f:33); try bottom.checkpoint("cold-acquire",name:nil)
             guard root.isFileURL, root.host == nil || root.host == "" || root.host == "localhost", root.query == nil, root.fragment == nil,
@@ -944,6 +945,12 @@ extension SavedAudioImportStorage {
             guard SelfRegistry.insert(key,domain:registryDomain!) else { throw Failure.contended }; registered = key; try bottom.checkpoint("root-registered",name:nil)
             if create { guard rootCreated else { throw Failure.unknown }; holdLock.withLock { revoked = false; quit = false; outputRevoked = false } }
             if rootCreated { b.mutated = true }
+            if !create,recoveringEmpty,try bottom.named(parent:directory,name:"lock") == nil {
+                // No payload or lock may be inferred from missing authority. rmdir also
+                // refuses any content appearing after this bounded, no-follow audit.
+                guard try names(b).isEmpty else { throw Failure.unknown }
+                try finalClose(b); return false
+            }
             let fd = try bottom.open(parent:directory,name:"lock",mode:rootCreated ? .exclusive : .write)
             _ = try acquired(fd,base:false,isLock:true,b)
             try bottom.checkpoint("lock-open-before-classification",name:"lock"); lockMember = try fileInfo(fd,cap:0,budget:b)

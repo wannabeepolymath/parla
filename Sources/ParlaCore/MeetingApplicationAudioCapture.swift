@@ -401,8 +401,19 @@ final class ApplicationAudioResources: @unchecked Sendable {
     /// A refusal with no returned object owns nothing; only a possible handle needs an uncertainty hold.
     func recordTapCreation(status: OSStatus, id: AudioObjectID) throws {
         if id != kAudioObjectUnknown { try ownTap(id) }
-        guard status == noErr,id != kAudioObjectUnknown else {
-            uncertain = id != kAudioObjectUnknown
+        try recordCreation(status:status,hasHandle:id != kAudioObjectUnknown)
+    }
+    func recordAggregateCreation(status: OSStatus, id: AudioObjectID) throws {
+        if id != kAudioObjectUnknown { try ownAggregate(id) }
+        try recordCreation(status:status,hasHandle:id != kAudioObjectUnknown)
+    }
+    func recordIOProcCreation(status: OSStatus, raw: AudioDeviceIOProcID?) throws {
+        if let raw { try ownIOProc(raw) }
+        try recordCreation(status:status,hasHandle:raw != nil)
+    }
+    private func recordCreation(status: OSStatus, hasHandle: Bool) throws {
+        guard status == noErr,hasHandle else {
+            if hasHandle { uncertain = true }
             throw MeetingSession.Failure.unavailable
         }
     }
@@ -712,8 +723,7 @@ private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
         ]
         var id = AudioObjectID(0)
         let status = AudioHardwareCreateAggregateDevice(spec as CFDictionary,&id)
-        if id != kAudioObjectUnknown { try owned.ownAggregate(id) }
-        guard status == noErr,id != kAudioObjectUnknown else { owned.uncertain = true; throw MeetingSession.Failure.unavailable }
+        try owned.recordAggregateCreation(status:status,id:id)
         do {
             guard id != tap.id,id != plan.process,!plan.routes.contains(where:{ $0.id == id }),
                   try read(id,kAudioObjectPropertyClass,AudioClassID(0)) == kAudioAggregateDeviceClassID else { throw MeetingSession.Failure.bounds }
@@ -833,8 +843,7 @@ private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
         let status = AudioDeviceCreateIOProcIDWithBlock(&raw,aggregate.id,queues.pcm) { [gate] _,input,_,_,_ in
             gate.receive { .init(list:input) } // borrowed list never escapes this synchronous body
         }
-        try owned.ownIOProc(raw)
-        guard status == noErr,raw != nil else { owned.uncertain = true; throw MeetingSession.Failure.unavailable }
+        try owned.recordIOProcCreation(status:status,raw:raw)
     }
     func start(_ owned: ApplicationAudioResources) throws {
         guard let aggregate = owned.aggregate,owned.owns(aggregate),let io = owned.io,owned.owns(io),let raw = io.raw,!io.startAttempted else { throw MeetingSession.Failure.stale }

@@ -3,6 +3,59 @@
 Base: `054cd2e`; lane: `lane/b43-meetings`. This is source/test evidence, not release acceptance or native hardware qualification. The proposed policy still requires final user sign-off. The existing single retained meeting slot remains; optional meeting AI cleanup/summary has no action and no provider is called.
 
 
+## B43 v3 remaining release-blocker corrections — 2026-11-07
+
+Base: `dd275b4b78d48b0bd1cee5c5bfc68f6781494628`; branch: `lane/b43-meetings-v3`. This section supersedes v2 only for the two independently reproduced remaining defects. B43 remains **needs qualification**; policy sign-off and native hardware/crash qualification remain open.
+
+| Finding | Fix and files | Regression evidence |
+|---|---|---|
+| P1 aggregate error + ID 0 / IO-proc error + nil permanently holds Stop/Quit | `MeetingApplicationAudioCapture.swift`: tap, aggregate and IO-proc results share a classifier. No returned handle creates no new receipt or uncertainty; known listeners/aggregate/tap retire in dependency order. Error + possible handle preserves uncertainty. The standard fake in `MeetingApplicationAudioCaptureTests.swift` now injects zero/nil results separately from its existing partial-handle failures. | `B43MeetingReleaseBlockerTests.testZeroHandleAggregateRefusalCompletesStopAndTermination` adapts the independent native probe to the production classifier; `testNilHandleIOProcRefusalCompletesStopAndTermination` covers nil IO. Both assert known-resource destruction, actual producer/writer exit, visible app-audio refusal, released admission and termination reply. The existing tap regression now uses the same configurable fake. `MeetingApplicationAudioCaptureTests.testNoHandleCreationFailuresRetireBothCaptureModes` covers all three creation steps in retained and access modes. Nonzero/nonnil error controls preserve uncertainty. |
+| P2 confirmed recovery interrupted after owner/lock removal strands the slot | `MeetingSessionStore.swift` recognizes exactly a lock-only private namespace at bootstrap or confirmed recovery; `SavedAudioImportStorage.swift` adds opt-in retirement of an empty root after lock unlink. Existing no-follow descriptor/path binding, UID/mode, volume, alias/ACL, registry and lock checks precede deletion. Admission still requires a freshly created root. Ownerless payload and unsafe/unknown contents remain refused. | `B43MeetingRecoveryTests` imports/adapts the reviewer owner-removal probe, tests same-store confirmed retry and cold bootstrap, cuts all **111** checkpoints of a full payload/metadata/lock/root recovery, and proves new admission afterward. A fresh virtual process preserves filesystem identities/bytes while retiring descriptors/flocks and process-local registry state; it never resets a poisoned live lease. The trace includes **11 lock-only** and **5 empty-root** cuts. Positive lock/empty controls and unknown/ownerless payload, symlink, UID, mode, links, nonempty lock and lock-contention controls verify refusal without payload deletion. |
+
+Reviewer inputs: `/tmp/parla-b43r2-independent.log`, `/tmp/parla-b43r2-independent-probe.swift`, `/tmp/parla-b43r2-independent-native-probe.swift`. The original native probe duplicated the native bottom and replaced aggregate creation; the regression instead calls the exact classifier now shared by HAL and injected bottoms, avoiding a stale native implementation copy. No HAL operation or permission API runs in these tests.
+
+### V3 native create/start audit
+
+- `AudioHardwareCreateProcessTap`: shared `recordTapCreation`; zero ID refuses with no new ownership, possible ID on error remains uncertain.
+- `AudioHardwareCreateAggregateDevice`: shared `recordAggregateCreation`; zero ID now permits destruction of the known tap, possible ID on error remains uncertain.
+- `AudioDeviceCreateIOProcIDWithBlock`: shared `recordIOProcCreation`; nil now creates no IO receipt, allowing listener/aggregate/tap cleanup; possible proc on error remains uncertain.
+- `AudioDeviceStart`: requires the known aggregate/proc and marks `startAttempted` before calling HAL. Either return path runs `AudioDeviceStop`; stop failure preserves the dependency/uncertainty hold. Existing injected start-failure tests cover retirement.
+- `AudioObjectAddPropertyListenerBlock`: receipt precedes registration; an error may still have installed the block, so registration uncertainty remains deliberate.
+- `NSWorkspace` termination observer: a nonoptional observer receipt is retained immediately and removed during retirement. No status/no-handle creation pair exists.
+- `CATapDescription`, `AVAudioFormat` and `AVAudioPCMBuffer` create local objects only. Optional format/buffer refusal adds no native ownership or permanent uncertainty; scratch/converter retirement uses the existing actual-body drain. No other native create/start calls exist in this file.
+
+### V3 checks and fail-without-fix proof
+
+All eight selected methods passed initially after fixing a test callback arity and an XCTest autoclosure catch in the first compile. Initial compile diagnostics are retained at `/tmp/b43v3-first.log`; the first green run is `/tmp/b43v3-fixed-first.log`. Six methods are new; the existing tap and invalid-manifest Hub regressions also ran. Every reversal compiled and failed at runtime, with zero selected methods passing. Source API seams were retained for the native classifiers so failure came from behavior, not compilation. Recovery restored both affected production files to the exact base revision. All original fixed-source SHA-256 values were restored before the final checks.
+
+| Temporary reversal | Selected methods failing at runtime |
+|---|---:|
+| Aggregate error + no ID sets uncertainty again | 2/2 (Hub Stop/Quit and both-mode Core regression) |
+| IO-proc error + nil creates a receipt/sets uncertainty again | 2/2 (Hub Stop/Quit and both-mode Core regression) |
+| Tap error + no ID sets uncertainty again (existing tap guard) | 1/1 |
+| Restore pre-v3 store and lease acquisition/recovery | 3/3 (all new recovery methods) |
+
+This is **six distinct new methods**, all failing without their fix, plus the existing tap guard. The Core method fails under each independent aggregate and IO reversal; it is not counted twice as distinct coverage. Receipts: `/tmp/b43v3-proof/results.jsonl`, `/tmp/b43v3-proof/restoration.jsonl`; individual runtime logs and fixed-source snapshots: `/tmp/b43v3-proof/{aggregate,io,tap,recovery}*`. No independent review agent was launched by this implementation sub-agent. Final command results and task-resource cleanup follow below.
+
+### V3 final command results and resources
+
+After all reversals were restored, one fresh full Meeting invocation passed **251 methods, zero failures** (472.372 seconds of test execution). The 240-source/240-result capacity method passed in 373.915 seconds. The related selection passed **68 methods** and the final B43/Core regression selection passed **13 methods**. These selections overlap; their counts must not be summed as distinct coverage.
+
+| Command / scope | Result |
+|---|---|
+| `swift test --scratch-path .build-b43v3 --filter Meeting` | **251 passed, 0 failures**, exit 0; includes capacity and owned-real-file admission/reopen |
+| `swift test --scratch-path .build-b43v3 --filter 'SavedAudioImportStorageTests\|SavedAudioImportStoreTests\|HubHistoryExportTests'` | **68 passed, 0 failures**, exit 0 |
+| `swift test --scratch-path .build-b43v3 --filter 'B43Review\|B43Meeting\|testNoHandleCreationFailuresRetireBothCaptureModes'` | **13 passed, 0 failures**, exit 0 |
+| `swift build --scratch-path .build-b43v3` | exit 0 |
+| `bash -n scripts/make-app.sh` | exit 0 |
+| `git diff --check`; final staged `git diff --cached --check` | clean, exit 0 |
+
+Logs: `/tmp/b43v3-final-{meeting,related,regressions,build,shell,diff}.log`; all command receipts, including the first compile and expected failing reversals: `/tmp/b43v3-results.jsonl`. Final documentation/staged diff checks are recorded separately at `/tmp/b43v3-final-{doc-diff,staged-diff}.log`. Existing unrelated Swift compiler warnings remain; the new test compile correction is recorded above.
+
+The runner created a new canonical 0700 fixture root, 0600 journals and 0700 `fixtures/` directory, using the same four fixture variables documented in the v2 fixture environment. The exact fresh values are recorded in `/tmp/b43v3-env.json`; `/tmp/b43v3-run.py` applied only those fixture variables. No historical fixture root, dependency install, model/provider download, real capture, native permission request, browser/device, packaging/signing, push or tag was used.
+
+After every test/build process exited, cleanup verified recorded root/member identities, descendant ownership and an empty matching open-file inventory. It removed **290** task-owned paths, found **17** already absent and preserved **0** leftovers, including removal of `.build-b43v3` and the new fixture root. It removed one exact test-authored `everyone deny delete` ACL from its verified fixture parent before deletion. Journals were archived first to `/tmp/b43v3-proof/fixtures/`. Ownership receipts: `/tmp/b43v3-owned-resources.json`; cleanup plan/result: `/tmp/b43v3-cleanup-plan.json`, `/tmp/b43v3-cleanup.json`; matching open files: `/tmp/b43v3-open-files.json` (empty). Diagnostic scripts, logs, receipts and fixed-source proof snapshots remain under `/tmp/b43v3-*` and `/tmp/b43v3-proof/`. No task database, test process, server, browser or device remains. No user namespace, shared cache or other checkout was cleaned.
+
 ## B43 v2 release-blocker corrections — 2026-11-07
 
 Base: `53b447ad7070b6e039b20cb9d3f64f192ac3ccb4`; branch: `lane/b43-meetings-v2`. This section supersedes the earlier source candidate for the four reproduced release blockers only. Native qualification and policy sign-off remain open; B43 is not complete.
