@@ -398,6 +398,25 @@ final class ApplicationAudioResources: @unchecked Sendable {
     var listeners: [ApplicationOwnedListener] = []
     var uncertain = false
     // Receipts are minted by the per-run ownership ledger, including partial creations.
+    /// A refusal with no returned object owns nothing; only a possible handle needs an uncertainty hold.
+    func recordTapCreation(status: OSStatus, id: AudioObjectID) throws {
+        if id != kAudioObjectUnknown { try ownTap(id) }
+        try recordCreation(status:status,hasHandle:id != kAudioObjectUnknown)
+    }
+    func recordAggregateCreation(status: OSStatus, id: AudioObjectID) throws {
+        if id != kAudioObjectUnknown { try ownAggregate(id) }
+        try recordCreation(status:status,hasHandle:id != kAudioObjectUnknown)
+    }
+    func recordIOProcCreation(status: OSStatus, raw: AudioDeviceIOProcID?) throws {
+        if let raw { try ownIOProc(raw) }
+        try recordCreation(status:status,hasHandle:raw != nil)
+    }
+    private func recordCreation(status: OSStatus, hasHandle: Bool) throws {
+        guard status == noErr,hasHandle else {
+            if hasHandle { uncertain = true }
+            throw MeetingSession.Failure.unavailable
+        }
+    }
     func ownTap(_ id: AudioObjectID) throws {
         guard tap == nil,id != kAudioObjectUnknown else { throw MeetingSession.Failure.stale }; tap = .init(id,owner:nonce)
     }
@@ -563,8 +582,28 @@ final class ApplicationAudioDriver: @unchecked Sendable {
     }
 }
 
+/// Inject raw native results below the production ownership/classification call sites.
 @available(macOS 14.2, *)
-private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
+struct ApplicationAudioCreationAPI {
+    let aggregate: (CFDictionary) -> (status: OSStatus, id: AudioObjectID)
+    let ioProc: (AudioObjectID, DispatchQueue, @escaping AudioDeviceIOBlock) -> (status: OSStatus, raw: AudioDeviceIOProcID?)
+    static var native: Self {
+        .init(aggregate: { spec in
+            var id = AudioObjectID(0)
+            let status = AudioHardwareCreateAggregateDevice(spec,&id)
+            return (status,id)
+        },ioProc: { aggregate,queue,block in
+            var raw: AudioDeviceIOProcID?
+            let status = AudioDeviceCreateIOProcIDWithBlock(&raw,aggregate,queue,block)
+            return (status,raw)
+        })
+    }
+}
+
+@available(macOS 14.2, *)
+final class NativeApplicationAudioBottom: ApplicationAudioBottom {
+    private let creation: ApplicationAudioCreationAPI
+    init(creation: ApplicationAudioCreationAPI = .native) { self.creation = creation }
     private func check(_ status: OSStatus) throws { guard status == noErr else { throw MeetingSession.Failure.unavailable } }
     private func address(_ selector: AudioObjectPropertySelector,
                          _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
@@ -680,10 +719,7 @@ private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
               description.muteBehavior == .unmuted else { throw MeetingSession.Failure.bounds }
         var id = AudioObjectID(0)
         let status = AudioHardwareCreateProcessTap(description,&id)
-        if id != kAudioObjectUnknown { try owned.ownTap(id) }
-        guard status == noErr,id != kAudioObjectUnknown else {
-            owned.uncertain = true; throw MeetingSession.Failure.unavailable
-        }
+        try owned.recordTapCreation(status:status,id:id)
         do {
             guard id != plan.process,!plan.routes.contains(where:{ $0.id == id }),
                   try read(id,kAudioObjectPropertyClass,AudioClassID(0)) == kAudioTapClassID else { throw MeetingSession.Failure.bounds }
@@ -705,10 +741,8 @@ private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
             kAudioAggregateDeviceSubDeviceListKey:NSArray(),
             kAudioAggregateDeviceTapListKey:NSArray(object:[kAudioSubTapUIDKey:uid] as NSDictionary)
         ]
-        var id = AudioObjectID(0)
-        let status = AudioHardwareCreateAggregateDevice(spec as CFDictionary,&id)
-        if id != kAudioObjectUnknown { try owned.ownAggregate(id) }
-        guard status == noErr,id != kAudioObjectUnknown else { owned.uncertain = true; throw MeetingSession.Failure.unavailable }
+        let (status,id) = creation.aggregate(spec as CFDictionary)
+        try owned.recordAggregateCreation(status:status,id:id)
         do {
             guard id != tap.id,id != plan.process,!plan.routes.contains(where:{ $0.id == id }),
                   try read(id,kAudioObjectPropertyClass,AudioClassID(0)) == kAudioAggregateDeviceClassID else { throw MeetingSession.Failure.bounds }
@@ -824,12 +858,10 @@ private final class NativeApplicationAudioBottom: ApplicationAudioBottom {
 
     func installIOProc(_ owned: ApplicationAudioResources, gate: ApplicationAudioGate, queues: ApplicationAudioQueues) throws {
         guard let aggregate = owned.aggregate,owned.owns(aggregate),owned.io == nil else { throw MeetingSession.Failure.stale }
-        var raw: AudioDeviceIOProcID?
-        let status = AudioDeviceCreateIOProcIDWithBlock(&raw,aggregate.id,queues.pcm) { [gate] _,input,_,_,_ in
+        let (status,raw) = creation.ioProc(aggregate.id,queues.pcm) { [gate] _,input,_,_,_ in
             gate.receive { .init(list:input) } // borrowed list never escapes this synchronous body
         }
-        try owned.ownIOProc(raw)
-        guard status == noErr,raw != nil else { owned.uncertain = true; throw MeetingSession.Failure.unavailable }
+        try owned.recordIOProcCreation(status:status,raw:raw)
     }
     func start(_ owned: ApplicationAudioResources) throws {
         guard let aggregate = owned.aggregate,owned.owns(aggregate),let io = owned.io,owned.owns(io),let raw = io.raw,!io.startAttempted else { throw MeetingSession.Failure.stale }

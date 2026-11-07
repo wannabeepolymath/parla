@@ -55,7 +55,7 @@ final class MeetingRecognitionExecutionTests: XCTestCase {
     @MainActor func testExplicitRawTranscriptionAndVerifiedCopyViaProductionController() async throws {
         let r = try MeetingHubRig(); defer { r.release() }
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else { return }
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else { return }
         guard await hubEntered([r.engine.started]) else { return }
         r.engine.emit([Float](repeating:0.5,count:8000)); r.controller.stopAndSave()
         guard await hubComplete({await r.controller.drainActions()}) else { return }
@@ -70,7 +70,7 @@ final class MeetingRecognitionExecutionTests: XCTestCase {
         let entered = XCTestExpectation(description:"actual recognizer entered before settings event")
         r.consumerEntered = entered
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else { return }
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else { return }
         guard await hubEntered([r.engine.started]) else { return }
         r.engine.emit([Float](repeating:0.5,count:8000)); r.controller.stopAndSave()
         guard await hubComplete({await r.controller.drainActions()}) else { return }

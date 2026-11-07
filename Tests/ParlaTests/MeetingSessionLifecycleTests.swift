@@ -345,7 +345,7 @@ final class MeetingSessionLifecycleTests: XCTestCase {
             if operation == "exclusive-create",name?.hasSuffix(".delete") == true { seen = true }
             if seen,!delivered,operation == "before-outward-receipt" { delivered = true; intent.fulfill() }
         }
-        rig.clockBox.value += MeetingSession.lifetime
+        rig.clockBox.value += MeetingSession.RecordingPolicy.transcriptRetention
         let expiring = Task { try await rig.owner.evaluateExpiry(deleteID:lifecycleID(90_000)) }
         await fulfillment(of:[intent],timeout:5); XCTAssertFalse(rig.store.actualHoldsDrained)
         await rig.consumerExit.open(); _ = try? await transcribing.value; try await expiring.value
@@ -716,7 +716,7 @@ final class MeetingStreamingIngressLifecycleTests: XCTestCase {
     @MainActor func testDeleteAndExpiryRevokeUnsubmittedPositiveTailBeforePublication() async throws {
         for expiry in [false,true] {
             let rig = StreamingMeetingRig(); try await rig.start(); XCTAssertEqual(try rig.input([0.5]),1)
-            if expiry { rig.clock.value += MeetingSession.lifetime }
+            if expiry { rig.clock.value += MeetingSession.RecordingPolicy.transcriptRetention }
             let deleting = StreamOperation {
                 if expiry { try await rig.owner.evaluateExpiry(deleteID:lifecycleID(90_000)) }
                 else { try await rig.owner.delete(id:lifecycleID(90_000)) }
@@ -873,7 +873,7 @@ extension MeetingSessionLifecycleTests {
         let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16000,epoch:epoch,mapping:.unknown)
         _ = try store.admit(owner:lifecycleID(1),session:session,selections:[selection],segments:[.init(id:lifecycleID(100),track:0,generation:7,timing:timing,canonicalStart:0)],authorized:{true})
         let before = bottom.calls,clockBefore = clocks,metadata = try XCTUnwrap(store.metadata())
-        XCTAssertEqual(metadata.created,1_000_000_000_000); XCTAssertEqual(metadata.expires,605_800_000_000_000)
+        XCTAssertEqual(metadata.created,1_000_000_000_000); XCTAssertEqual(metadata.expires,2_593_000_000_000_000)
         XCTAssertEqual(metadata.selections,[selection]); XCTAssertTrue(metadata.chunks.isEmpty); XCTAssertTrue(metadata.provenance.isEmpty)
         XCTAssertEqual(bottom.calls,before); XCTAssertEqual(clocks,clockBefore)
         _ = try store.terminal(reason:.normalStop,unknownMask:0,generation:1,holdEpoch:1,flags:127,authorized:{true}); store.reserveQuit(); try store.detach()
@@ -1028,10 +1028,10 @@ extension MeetingStreamingIngressLifecycleTests {
 extension MeetingSessionLifecycleTests {
     @MainActor func testSeventeenDurableAcceptedPartsReopenAndReprimeExactTwoRows() async throws {
         let r = MeetingSequenceRig()
-        guard await hubComplete({do {
-            try await r.seed(17)
-            for index in 0..<17 {try await r.transcribe(index)}
-        } catch {XCTFail("durable sequence failed: \(error)")}}) else {return}
+        guard await hubComplete({do {try await r.seed(17)} catch {XCTFail("durable seed failed: \(error)")}}) else {return}
+        for index in 0..<17 {
+            guard await hubComplete({do {try await r.transcribe(index)} catch {XCTFail("durable part failed: \(error)")}}) else {return}
+        }
         let original = try XCTUnwrap(r.owner.metadata),rows = original.provenance
         XCTAssertEqual(original.chunks.compactMap(\.accepted).count,17);XCTAssertEqual(rows.count,2)
         let requested = try XCTUnwrap(rows.first {$0.role == .requested}),observed = try XCTUnwrap(rows.first {$0.role == .observed})
@@ -1088,7 +1088,10 @@ extension MeetingSessionLifecycleTests {
         // Sixteen actual 64 KiB UTF-8 results hit the inherited 1 MiB cap exactly.
         let part = String(repeating:"é",count:32_768),partBytes = Data(part.utf8)
         r.raw = {_ in partBytes}
-        guard await hubComplete({do {try await r.seed(17);for i in 0..<16 {try await r.transcribe(i)}} catch {XCTFail("bounded raw aggregate failed")}}) else {return}
+        guard await hubComplete({do {try await r.seed(17)} catch {XCTFail("bounded raw seed failed: \(error)")}}) else {return}
+        for i in 0..<16 {
+            guard await hubComplete({do {try await r.transcribe(i)} catch {XCTFail("bounded raw part failed: \(error)")}}) else {return}
+        }
         guard await hubComplete({do {
             let text = try await r.owner.openAcceptedText(authorized:{true})
             XCTAssertEqual(text.text.utf8.count,1_048_606)

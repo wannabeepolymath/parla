@@ -43,7 +43,7 @@ final class MeetingHubCompositionTests: XCTestCase {
     }
     @MainActor func testPermissionActualCallbackVetoesRestartUntilReturnAndNeverCaptures() async throws {
         let r = try MeetingHubRig(); defer { r.release() }; r.permission = .undetermined
-        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startAndSave()
+        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startConsentedRecording()
         guard await hubComplete({await r.controller.drainActions()}) else { return }
         XCTAssertTrue(r.controller.reserveRestart()); XCTAssertFalse(r.controller.restartReady())
         let callback = r.pendingPermission; r.pendingPermission = nil; callback?(true)
@@ -53,7 +53,7 @@ final class MeetingHubCompositionTests: XCTestCase {
     }
     @MainActor func testKnownDetachOtherParticipantRejectAndExplicitReentryPreserveOccupancy() async throws {
         let r = try MeetingHubRig(); defer { r.release() }
-        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startAndSave()
+        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startConsentedRecording()
         guard await hubComplete({await r.controller.drainActions()}) else { return }
         guard await hubEntered([r.engine.started]) else { return }
         r.engine.emit([Float](repeating:0.5,count:8000)); r.controller.stopAndSave(); guard await hubComplete({await r.controller.drainActions()}) else { return }
@@ -61,7 +61,7 @@ final class MeetingHubCompositionTests: XCTestCase {
         guard await hubComplete({let ready = await r.controller.drainRestart(); XCTAssertTrue(ready)}) else { return }
         r.controller.releaseRestart() // a later updater/participant refusal releases intent only
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }
-        XCTAssertEqual(r.controller.model.metadata?.session,session); r.controller.startAndSave(); XCTAssertEqual(r.engine.starts.value,1); XCTAssertEqual(r.enqueues,0)
+        XCTAssertEqual(r.controller.model.metadata?.session,session); r.controller.startConsentedRecording(); XCTAssertEqual(r.engine.starts.value,1); XCTAssertEqual(r.enqueues,0)
     }
     @MainActor func testEmittedPreparationFactsIgnoreTokensProgressAndRevokeOnRealChange() throws {
         let r = try MeetingHubRig(capability:false); defer { r.release() }
@@ -83,7 +83,7 @@ extension MeetingHubCompositionTests {
             let entered = expectation(description:"\(kind) entered actual bottom")
             let held = HubCheckpointHold(entered:entered,match:{ op,name in kind == "metadata" ? op == "cold-acquire" : op == "write" && name == "owner.json" })
             defer {held.latch.open()};r.bottom.observe = held.observe
-            if kind == "metadata" {r.controller.openPage()} else {r.controller.startAndSave()}
+            if kind == "metadata" {r.controller.openPage()} else {r.controller.startConsentedRecording()}
             guard await hubEntered([entered]) else {return}
             XCTAssertTrue(r.controller.reserveRestart()); XCTAssertFalse(r.controller.restartReady())
             let drain = HubRestartDrain(r.controller); guard await hubEntered([drain.entered]) else {return}
@@ -97,7 +97,7 @@ extension MeetingHubCompositionTests {
     @MainActor func testHeldAcceptedReadRevokesClipboardThenJoinsThroughQuit() async throws {
         let r = try MeetingHubRig();defer {r.release()}
         r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording();guard await hubComplete({await r.controller.drainActions()}) else {return}
         guard await hubEntered([r.engine.started]) else {return}
         r.engine.emit([Float](repeating:0.5,count:8000));r.controller.stopAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
         r.controller.transcribeRemaining();guard await hubComplete({await r.controller.drainActions()}) else {return}
@@ -113,7 +113,7 @@ extension MeetingHubCompositionTests {
         for expiry in [false,true] {
             let r = try MeetingHubRig();defer {r.release()}
             r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
-            r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+            r.controller.startConsentedRecording();guard await hubComplete({await r.controller.drainActions()}) else {return}
             guard await hubEntered([r.engine.started]) else {return}
             r.engine.emit([Float](repeating:0.5,count:8000));r.controller.stopAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
             let entered = expectation(description:"bounded unlink actually entered")
@@ -174,7 +174,7 @@ extension MeetingHubCompositionTests {
         var writes = 0
         try r.controller.withExportProtection(validateDestination:{_ in},perform:{writes += 1})
         XCTAssertEqual(writes,1); XCTAssertEqual(r.engine.starts.value,1); XCTAssertEqual(r.enqueues,0)
-        r.controller.startAndSave(); XCTAssertEqual(r.engine.starts.value,1)
+        r.controller.startConsentedRecording(); XCTAssertEqual(r.engine.starts.value,1)
     }
     @MainActor func testR1RawReserveReleaseWithoutAnyDrainCallerObservesKnownClose() async throws {
         let r = try MeetingHubRig(); defer {r.release()}
@@ -214,7 +214,7 @@ extension MeetingHubCompositionTests {
     @MainActor func testPermissionDrainIsActuallyPendingUntilTrackedDeliveryReturns() async throws {
         let r = try MeetingHubRig(); defer {r.release()}; r.permission = .undetermined
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else {return}
         let callback = try XCTUnwrap(r.pendingPermission); r.pendingPermission = nil
         // Independent fail-safe for the callback lifetime as well as defer on every branch.
         let gate = HubOwnedLatch(); defer {gate.open();callback(false)}
@@ -535,6 +535,9 @@ extension MeetingHubCompositionTests {
             let r = try MeetingHubRig();defer {r.release()}
             guard await hubSaved(r) else {return}
             r.controller.transcribeRemaining();guard await hubComplete({await r.controller.drainActions()}) else {return}
+            r.clock = try XCTUnwrap(r.controller.model.metadata?.rawExpires)
+            r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
+            XCTAssertTrue(r.controller.model.metadata?.chunks.allSatisfy(\.audioRemoved) == true)
             let saved = try XCTUnwrap(r.controller.model.metadata),expiry = saved.expires
             XCTAssertNotNil(saved.chunks.first?.accepted)
             XCTAssertTrue(r.controller.reserveRestart());let retirement = HubRestartDrain(r.controller)
@@ -861,7 +864,7 @@ extension MeetingHubCompositionTests {
     @MainActor func testHeldActualControllerStreamWriterKeepsEnteredDrainPendingAndCancellationCannotRevive() async throws {
         let r = try MeetingHubRig();defer {r.release()}
         r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave();guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording();guard await hubComplete({await r.controller.drainActions()}) else {return}
         guard await hubEntered([r.engine.started]) else {return}
         let entered = XCTestExpectation(description:"production-bound controller stream writer actually entered")
         let held = HubCheckpointHold(entered:entered,match:{$0 == "write" && $1?.hasSuffix(".source.pending") == true})
@@ -936,7 +939,7 @@ extension MeetingHubCompositionTests {
         r.permission = .undetermined
         r.controller.openPage()
         guard await hubComplete({ await r.controller.drainActions() }) else { return }
-        r.controller.startAndSave()
+        r.controller.startConsentedRecording()
         guard await hubComplete({ await r.controller.drainActions() }) else { return }
         let callback = try XCTUnwrap(r.pendingPermission); r.pendingPermission = nil
         defer { callback(false) }
@@ -1173,7 +1176,7 @@ extension MeetingHubCompositionTests {
             let intent = HubCheckpointHold(entered:durable,match:{ operation,_ in operation == "intent-durable" })
             defer {intent.latch.open();r.bottom.observe = nil};r.heldGates.append(intent.latch);r.bottom.observe = intent.observe
             if expiry {
-                let expires = r.clock + MeetingSession.lifetime
+                let expires = r.clock + MeetingSession.RecordingPolicy.transcriptRetention
                 var reads = 0
                 r.wallOverride = {
                     reads += 1
@@ -1258,7 +1261,7 @@ extension MeetingHubCompositionTests {
             r.observationContext = "access lifecycle \(trigger)"
             guard let backend = await r.accessBegin(self,afterOpen: {
                 if trigger == .expiry {
-                    let expires = r.clock + MeetingSession.lifetime
+                    let expires = r.clock + MeetingSession.RecordingPolicy.transcriptRetention
                     var reads = 0
                     r.wallOverride = {
                         reads += 1

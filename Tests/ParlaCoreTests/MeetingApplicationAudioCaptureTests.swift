@@ -88,6 +88,7 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [AppPhase:Int] = [:], gateValue: ApplicationAudioGate?
     private var pcmQueue: DispatchQueue?, listenerQueue: DispatchQueue?
+    var noHandleFailure: AppPhase?
     var fail: AppPhase?, held: [AppPhase:AppBodyHold] = [:]
     var unknownObject = false, missingFacts = false, incarnation: Int64 = 42
     var format: ApplicationPCMFormat
@@ -123,10 +124,12 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
         return .init(binding:b,process:unknownObject ? kAudioObjectUnknown : 101,routes:[.init(id:201,uid:"literal-output")])
     }
     func createTap(_ plan: ResolvedApplicationAudio, owned: ApplicationAudioResources) throws {
+        if noHandleFailure == .tap { try phase(.tap); try owned.recordTapCreation(status:-1,id:0); return }
         observedPlan = plan; included.add(); try owned.ownTap(301); owned.tapUID = "literal-tap"
         owned.format = format; try phase(.tap)
     }
     func createAggregate(_ plan: ResolvedApplicationAudio, owned: ApplicationAudioResources) throws {
+        if noHandleFailure == .aggregate { try phase(.aggregate); try owned.recordAggregateCreation(status:-1,id:0); return }
         try owned.ownAggregate(401); owned.inputStream = 501
         // Typed fake bottom has no physical-subdevice operation to call.
         observedInputOnly = true; try phase(.aggregate)
@@ -149,6 +152,7 @@ private final class AppBottom: ApplicationAudioBottom, @unchecked Sendable {
         guard let frozen = owned.format,format == frozen else { throw MeetingSession.Failure.bounds }
     }
     func installIOProc(_ owned: ApplicationAudioResources, gate: ApplicationAudioGate, queues: ApplicationAudioQueues) throws {
+        if noHandleFailure == .io { try phase(.io); try owned.recordIOProcCreation(status:-1,raw:nil); return }
         try owned.ownIOProc(nil); lock.withLock { gateValue = gate; pcmQueue = queues.pcm }
         onInstall?(gate) // synchronous first PCM, including a throw after it, is inside the actual task
         try phase(.io)
@@ -320,6 +324,27 @@ final class MeetingApplicationAudioCaptureTests: XCTestCase {
         recording.requestStop(); guard await complete(recording) else { return }
         XCTAssertEqual(r.bottom.count(.destroyAggregate),1); XCTAssertEqual(r.bottom.count(.destroyTap),1)
         XCTAssertFalse(r.capture.hasActualTask); XCTAssertFalse(r.ingress.facts.unknown)
+    }
+
+    @MainActor func testNoHandleCreationFailuresRetireBothCaptureModes() async throws {
+        for mode in [ApplicationAudioMode.retainedRecording,.accessAttempt] {
+            for phase in [AppPhase.tap,.aggregate,.io] {
+                let r = try AppRig(), receipt = AppAccessReceipt()
+                r.bottom.noHandleFailure = phase
+                guard case .actual(let recording) = r.capture.startSelectedApplication(binding:r.binding,ingress:r.ingress,enabled:true,mode:mode,outcome:{ receipt.accept($0) }) else {
+                    return XCTFail("Expected injected actual producer")
+                }
+                guard await complete(recording) else { return }
+                XCTAssertFalse(r.capture.hasActualTask); XCTAssertTrue(r.ingress.facts.ended)
+                XCTAssertEqual(r.bottom.count(.destroyTap),phase == .tap ? 0 : 1)
+                XCTAssertEqual(r.bottom.count(.destroyAggregate),phase == .io ? 1 : 0)
+                XCTAssertEqual(r.bottom.count(.stop),0); XCTAssertEqual(r.bottom.count(.removeIO),0)
+                if mode == .accessAttempt {
+                    XCTAssertEqual(receipt.value?.disposition,.appOwnedRetired)
+                    XCTAssertEqual(receipt.value?.progress,.failed(phase == .tap ? .tap : phase == .aggregate ? .aggregate : .io))
+                }
+            }
+        }
     }
 
     @MainActor func testEveryPartialStartReturnsActualJoinUntilOwnedCleanupExits() async throws {

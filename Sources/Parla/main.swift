@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let audioImport = AudioImportOwner()
     let savedImports = SavedAudioImportOwner(root: SavedAudioImportOwner.defaultRoot)
     let meetingHub = MainActor.assumeIsolated { MeetingHubController() }
+    private var meetingIndicatorObserver: AnyCancellable?
+    private var meetingRecording = false
     private var meetingAppleObserver: AnyCancellable?, meetingParakeetObserver: AnyCancellable?
     override init() {
         super.init()
@@ -43,8 +45,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The callable production binder receives all authority as inert closures.
     /// Production capture stays OFF pending separately scoped native qualification.
     @MainActor private func configureMeetingHub() {
+        meetingHub.discoverApplications = {
+            NSWorkspace.shared.runningApplications.compactMap { app in
+                guard app.processIdentifier != ProcessInfo.processInfo.processIdentifier,!app.isTerminated,
+                      let bundle = app.bundleIdentifier,let path = app.bundleURL?.path,let executable = app.executableURL?.path,
+                      let launched = app.launchDate,let stamp = try? MeetingSession.nanoseconds(seconds:launched.timeIntervalSince1970),
+                      let label = app.localizedName else { return nil }
+                return MeetingHubController.ApplicationSnapshot(selectionID:UUID(),revision:UUID(),pid:app.processIdentifier,
+                    launchNanoseconds:stamp,bundleID:bundle,bundlePath:path,executablePath:executable,label:label)
+            }.sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
+        }
+        meetingHub.openApplicationPrivacy = {
+            if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture") { NSWorkspace.shared.open(url) }
+        }
         let wall = { try MeetingSession.nanoseconds(seconds:Date().timeIntervalSince1970) }
-        meetingHub.bind(.init(captureCapability:false,makeStore:{
+        meetingHub.bind(.init(captureCapability:true,makeStore:{
             let support = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
             return MeetingSessionStore(root:support.appendingPathComponent("Parla/meeting-session",isDirectory:true),profile:.init(),
                 bottom:MeetingDarwinBottom(uptime:{ProcessInfo.processInfo.systemUptime},checkpoint:{_,_ in}),wallClock:wall)
@@ -73,7 +88,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         selectionEpoch:job.context.selectionEpoch,preparationEpoch:job.context.preparationEpoch)
                 })
             if let next { self.processTask = next }; return next
-        },diagnostics:.shared,security:{ OriginalCopyController.currentSecurity() == .safe },copy:HubModel.writeExplicitCopy,wall:wall,applicationCapability:.unavailable,application:{ _ in .unavailable }))
+        },diagnostics:.shared,security:{ OriginalCopyController.currentSecurity() == .safe },copy:HubModel.writeExplicitCopy,wall:wall,applicationCapability:.production,application:{ attempt in
+            .injected(MeetingSelectedApplicationCapture(binding:attempt.binding,enabled:true).port)
+        }))
+        meetingIndicatorObserver = meetingHub.$model.sink { [weak self] model in
+            guard let self else { return }
+            let active = model.stoppingAvailable
+            guard active != self.meetingRecording else { return }
+            self.meetingRecording = active
+            if active { self.showMeetingIndicator() } else { self.showIdle() }
+        }
+        meetingHub.maintainSavedMeeting()
     }
     /// Resource-free owner is created eagerly; all execution uses this app's existing owners.
     private func configureGuidedTemplates() {
@@ -1125,7 +1150,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// user's attention (no model, broken settings.json, missing permission).
     /// store.lastError reflects the most recent load() — refreshed at launch, and on
     /// any dictation or menu open that finds settings.json changed.
+    private func showMeetingIndicator() {
+        statusItem.button?.image = NSImage(systemSymbolName:"record.circle.fill",accessibilityDescription:"Meeting recording active")
+        statusItem.button?.contentTintColor = .systemRed
+        statusItem.button?.title = " Recording"
+        statusItem.button?.toolTip = "Parla is recording a meeting. Open Meetings to stop."
+    }
     func showIdle() {
+        if meetingRecording { showMeetingIndicator(); return }
+        statusItem.button?.contentTintColor = nil
+        statusItem.button?.toolTip = nil
         // modelReady, not `transcriber != nil`: an idle unload is not a problem
         // the user needs to see a ⚠️ about.
         let request = RecognitionRequest(settings: store.load())
@@ -1148,6 +1182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Recording state: keep the logo glyph (the HUD pill already shows the live
     /// recording state); 🔴 only as the unbundled `swift run` fallback.
     func showRecording() {
+        if meetingRecording { showMeetingIndicator(); return }
         if let icon = Self.menuBarIcon {
             statusItem.button?.title = ""
             statusItem.button?.image = icon
@@ -1159,6 +1194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Text/emoji states (… transcribing, ⚠️ error) clear any logo image
     // first so they don't render side by side.
     func setStatus(_ s: String) {
+        if meetingRecording { showMeetingIndicator(); return }
         statusItem.button?.image = nil
         statusItem.button?.title = s
     }

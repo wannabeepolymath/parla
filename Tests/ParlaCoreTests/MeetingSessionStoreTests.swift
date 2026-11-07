@@ -41,6 +41,10 @@ final class MeetingVirtualBottom: MeetingStorageBottom {
     let uid: uid_t = 501, rootURL: URL, top: Node
     private var nextInode: UInt64, nextFD: Int32 = 100
     var descriptors: [Int32:Descriptor] = [:], rootNode: Node?
+    var backupExclusions = 0
+    func excludeFromBackup(_ fd: Int32) throws {
+        guard descriptors[fd] != nil else { throw MeetingStorageFault.io }; backupExclusions += 1
+    }
     var tick: TimeInterval = 0, space = Int64.max, ancestorACL = 0, writeLimit = Int.max, interruptWrites = false
     var closeFailureAt: Int?, closeCount = 0, closes: [Int32] = [], payloadReads = 0, writes = 0, calls = 0
     var events: [(String,String?)] = [], cut: Int?, advanceAtWrite = false
@@ -273,7 +277,7 @@ final class MeetingSessionStoreTests: XCTestCase {
         try rig.store.detach(); rig.bottom.payloadReads = 0
         let reopened = MeetingSessionStore(root:rig.bottom.rootURL,profile:.init(),bottom:rig.bottom,wallClock:{rig.testClock.value})
         XCTAssertEqual(try reopened.bootstrap().acknowledgedChunks,1); XCTAssertEqual(rig.bottom.payloadReads,0)
-        rig.testClock.value += MeetingSession.lifetime; try reopened.evaluate(); XCTAssertTrue(reopened.projection.expired)
+        rig.testClock.value += MeetingSession.RecordingPolicy.transcriptRetention; try reopened.evaluate(); XCTAssertTrue(reopened.projection.expired)
         XCTAssertThrowsError(try reopened.readAccepted(session:rig.session,chunk:meetingID(1000),result:first.object!,authorized:{true}))
         try reopened.detach()
     }

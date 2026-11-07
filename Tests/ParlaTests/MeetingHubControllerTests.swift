@@ -136,14 +136,14 @@ final class MeetingHubControllerTests: XCTestCase {
     @MainActor func testConstructorBinderAndCapabilityGateQueryNothing() async throws {
         let r = try MeetingHubRig(capability:false); defer { r.release() }
         XCTAssertEqual(r.bottom.calls,0); XCTAssertEqual(r.permissions,0); XCTAssertEqual(r.resolutions,0); XCTAssertEqual(r.engine.queries.value,0)
-        r.controller.startAndSave(); XCTAssertEqual(r.permissions,0); XCTAssertEqual(r.resolutions,0)
+        r.controller.startConsentedRecording(); XCTAssertEqual(r.permissions,0); XCTAssertEqual(r.resolutions,0)
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }
         XCTAssertEqual(r.engine.starts.value,0); XCTAssertEqual(r.enqueues,0); XCTAssertEqual(r.permissions,0); XCTAssertNil(r.controller.model.metadata)
     }
     @MainActor func testLatePermissionAfterPageLeaveIsEvidenceOnly() async throws {
         let r = try MeetingHubRig(); defer { r.release() }; r.permission = .undetermined
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else { return }
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else { return }
         XCTAssertNotNil(r.pendingPermission); r.controller.leavePage(); r.pendingPermission?(true); r.pendingPermission = nil
         guard await hubComplete({await r.controller.drainActions()}) else { return }
         XCTAssertEqual(r.engine.starts.value,0); XCTAssertEqual(r.resolutions,0)
@@ -152,7 +152,7 @@ final class MeetingHubControllerTests: XCTestCase {
     @MainActor func testFrozenUIDFocusAndPageStopUseSameBinder() async throws {
         let r = try MeetingHubRig(); defer { r.release() }
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else { return }
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else { return }
         guard await hubEntered([r.engine.started]) else { return }
         XCTAssertEqual(r.engine.requestedUID,"first"); var saved = r.settings.current; saved.inputDeviceUID = "later"; r.settings.current = saved; r.changedSettings()
         r.controller.focusChanged(); XCTAssertEqual(r.controller.model.state,.recording)
@@ -166,12 +166,12 @@ final class MeetingHubControllerTests: XCTestCase {
     @MainActor func testSharedCaptureContentionNeverFallsBack() async throws {
         let r = try MeetingHubRig(); defer { r.release() }
         let held = r.admission.acquire(.guidedTemplate)!; defer { r.admission.release(held) }
-        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startAndSave()
+        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startConsentedRecording()
         guard await hubComplete({await r.controller.drainActions()}) else { return }; XCTAssertEqual(r.engine.starts.value,0); XCTAssertEqual(r.enqueues,0)
     }
     @MainActor func testMissingSourceRefusesBeforeRecorderFactory() async throws {
         let r = try MeetingHubRig(); defer { r.release() }; var s = r.settings.current; s.inputDeviceUID = "missing"; r.settings.current = s
-        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startAndSave()
+        r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else { return }; r.controller.startConsentedRecording()
         guard await hubComplete({await r.controller.drainActions()}) else { return }; XCTAssertEqual(r.microphoneFactories,0); XCTAssertEqual(r.engine.starts.value,0)
     }
 }
@@ -193,7 +193,7 @@ extension MeetingHubControllerTests {
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else {return}
         let entered = expectation(description:"durable admission actually entered")
         let held = HubCheckpointHold(entered:entered,match:{$0 == "write" && $1 == "owner.json"}); defer {held.latch.open()}
-        r.bottom.observe = held.observe; r.controller.startAndSave()
+        r.bottom.observe = held.observe; r.controller.startConsentedRecording()
         guard await hubEntered([entered]) else {return}
         var settings = r.settings.current; settings.inputDeviceUID = "later"; r.settings.current = settings; r.changedSettings()
         XCTAssertEqual(r.engine.starts.value,0); held.latch.open()
@@ -205,7 +205,7 @@ extension MeetingHubControllerTests {
     @MainActor func testFiniteSourceEndSchedulesExternalStopWithoutObserverSelfJoin() async throws {
         let r = try MeetingHubRig(); defer {r.release()}
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else {return}
         guard await hubEntered([r.engine.started]) else {return}
         r.engine.emit([Float](repeating:0.5,count:8000)); r.engine.changeRoute()
         // Observe the event-driven terminal publication. No Stop action is issued here.
@@ -238,7 +238,7 @@ extension XCTestCase {
     }
     @MainActor func hubSaved(_ r: MeetingHubRig, frames: Int = 8000, sample: Float = 0.5) async -> Bool {
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else {return false}
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else {return false}
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else {return false}
         guard await hubEntered([r.engine.started]) else {return false}
         if frames > 0 { r.engine.emit(Array(repeating:sample,count:frames)) }
         r.controller.stopAndSave(); return await hubComplete({await r.controller.drainActions()})
@@ -264,16 +264,16 @@ extension MeetingHubControllerTests {
         let r = try MeetingHubRig(); defer {r.release()}
         r.permission = .denied; r.controller.openPage()
         guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else {return}
         XCTAssertEqual(r.engine.starts.value,0); XCTAssertEqual(r.resolutions,0)
         XCTAssertEqual(r.controller.model.message,"Microphone access is off. Allow it in System Settings, then press Start.")
-        r.permission = .undetermined; r.controller.openMicrophoneSettings(); r.controller.startAndSave()
+        r.permission = .undetermined; r.controller.openMicrophoneSettings(); r.controller.startConsentedRecording()
         guard await hubComplete({await r.controller.drainActions()}) else {return}
         let callback = try XCTUnwrap(r.pendingPermission); r.pendingPermission = nil
         r.permission = .authorized; callback(true); callback(false)
-        guard await hubModel(r.controller, {$0.message == "Microphone access is ready. Press Start to record and save." && !$0.busy}) else {return}
+        guard await hubModel(r.controller, {$0.message == "Microphone access is ready. Press Start and confirm consent to record." && !$0.busy}) else {return}
         XCTAssertEqual(r.engine.starts.value,0); XCTAssertEqual(r.resolutions,0)
-        r.controller.startAndSave(); guard await hubComplete({await r.controller.drainActions()}) else {return}
+        r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else {return}
         guard await hubEntered([r.engine.started]) else {return}
         callback(true) // old callback cannot affect this run
         r.controller.stopAndSave(); guard await hubComplete({await r.controller.drainActions()}) else {return}
@@ -284,7 +284,7 @@ extension MeetingHubControllerTests {
         let entered = XCTestExpectation(description:"actual adapter validation entered")
         r.validationGate = gate; r.validationEntered = entered
         r.controller.openPage(); guard await hubComplete({await r.controller.drainActions()}) else {return}
-        r.controller.startAndSave(); guard await hubEntered([entered]) else {return}
+        r.controller.startConsentedRecording(); guard await hubEntered([entered]) else {return}
         XCTAssertTrue(r.controller.reserveRestart()); let drain = HubRestartDrain(r.controller)
         guard await hubEntered([drain.entered]) else {return}
         XCTAssertFalse(drain.returned); XCTAssertFalse(r.controller.restartReady()); XCTAssertEqual(r.engine.starts.value,0)
@@ -319,14 +319,14 @@ extension MeetingHubControllerTests {
         r.controller.openPage();guard await hubComplete({await r.controller.drainActions()}) else {return}
         let entered = XCTestExpectation(description:"controller durable admission held before recorder lease")
         let held = HubCheckpointHold(entered:entered,match:{$0 == "write" && $1 == "owner.json"});defer {held.latch.open()}
-        r.bottom.observe = held.observe;r.controller.startAndSave();guard await hubEntered([entered]) else {return}
+        r.bottom.observe = held.observe;r.controller.startConsentedRecording();guard await hubEntered([entered]) else {return}
         let competing = try XCTUnwrap(r.admission.acquire(.guidedTemplate));defer {r.admission.release(competing)}
         var saved = r.settings.current;saved.inputDeviceUID = "later";r.settings.current = saved;r.changedSettings()
         held.latch.open();guard await hubComplete({await r.controller.drainActions()}) else {return}
         XCTAssertEqual(r.engine.starts.value,0);XCTAssertEqual(r.enqueues,0)
         XCTAssertEqual(r.controller.model.metadata?.selections.first?.label,"Literal microphone")
         let confirmation = try XCTUnwrap(r.controller.deleteConfirmation)
-        r.controller.startAndSave();XCTAssertEqual(r.engine.starts.value,0)
+        r.controller.startConsentedRecording();XCTAssertEqual(r.engine.starts.value,0)
         r.controller.deleteConfirmed(session:confirmation.session,intent:confirmation.intent)
         guard await hubComplete({await r.controller.drainActions()}) else {return}
         XCTAssertNil(r.controller.model.metadata);XCTAssertTrue(r.bottom.descriptors.isEmpty);XCTAssertFalse(held.latch.timedOut)
@@ -591,7 +591,7 @@ extension MeetingHubControllerTests {
             XCTAssertTrue(r.controller.acceptSourceChoice(.selectedApplication(snapshot)))
             XCTAssertNil(r.controller.prepareApplicationStart());r.controller.confirmApplicationStart(challengeID:UUID(),affirmed:true)
             _ = r.controller.model;_ = r.controller.sourceChoice;_ = r.controller.applicationState
-            r.controller.startAndSave()
+            r.controller.startConsentedRecording()
             XCTAssertEqual(r.stores,0);XCTAssertEqual(r.bottom.calls,0);XCTAssertEqual(r.clockReads,0)
             guard await r.open(self) else { return }
             let calls = r.bottom.calls,clocks = r.clockReads
@@ -899,5 +899,12 @@ extension MeetingHubControllerTests {
         XCTAssertNil(r.controller.applicationAccessOutcome); XCTAssertEqual(r.controller.applicationState,.refusedBeforeStart)
         XCTAssertNil(r.backends.first?.task); XCTAssertEqual(r.factories,1)
         guard await r.accessDetach(self) else { return }
+    }
+}
+
+@MainActor extension MeetingHubController {
+    func startConsentedRecording() {
+        startAndSave()
+        if let pending = recordingChallenge { confirmRecordingStart(id:pending.id,affirmed:true) }
     }
 }

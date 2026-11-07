@@ -481,6 +481,7 @@ public protocol MeetingStorageBottom: AnyObject {
     func checkpoint(_ operation: String, name: String?) throws
     func open(parent: Int32?, name: String, mode: MeetingOpenMode) throws -> Int32
     func mkdir(parent: Int32, name: String) throws
+    func excludeFromBackup(_ fd: Int32) throws
     func inspect(_ fd: Int32) throws -> stat
     func named(parent: Int32, name: String) throws -> stat?
     func volume(_ fd: Int32) throws -> MeetingVolume
@@ -499,6 +500,13 @@ public protocol MeetingStorageBottom: AnyObject {
     func unlink(parent: Int32, name: String, directory: Bool) throws
     /// Must consume the raw descriptor once even when the close result is unknown.
     func close(_ fd: Int32) throws
+}
+
+public extension MeetingStorageBottom {
+    /// Virtual bottoms have no OS backup service. Physical bottoms must implement the exclusion.
+    func excludeFromBackup(_ fd: Int32) throws {
+        guard case .virtual = registryDomain else { throw MeetingStorageFault.io }
+    }
 }
 
 private func meetingExclusiveLock(_ fd: Int32) -> Int32 { flock(fd,LOCK_EX | LOCK_NB) }
@@ -522,6 +530,11 @@ public final class MeetingDarwinBottom: MeetingStorageBottom {
         guard fd >= 0 else { throw error() }; return fd
     }
     public func mkdir(parent: Int32, name: String) throws { guard mkdirat(parent,name,0o700) == 0 else { throw error() } }
+    public func excludeFromBackup(_ fd: Int32) throws {
+        let value = try PropertyListSerialization.data(fromPropertyList:"com.apple.backupd",format:.binary,options:0)
+        let result = value.withUnsafeBytes { fsetxattr(fd,"com.apple.metadata:com_apple_backup_excludeItem",$0.baseAddress,$0.count,0,0) }
+        guard result == 0 else { throw error() }
+    }
     public func inspect(_ fd: Int32) throws -> stat { var s = stat(); guard fstat(fd,&s) == 0 else { throw error() }; return s }
     public func named(parent: Int32, name: String) throws -> stat? { var s = stat(); if fstatat(parent,name,&s,AT_SYMLINK_NOFOLLOW) == 0 { return s }; guard errno == ENOENT else { throw error() }; return nil }
     public func volume(_ fd: Int32) throws -> MeetingVolume {
@@ -896,8 +909,9 @@ extension SavedAudioImportStorage {
             guard let token = lockToken, let lockMember, try fileInfo(token.fd,cap:0,budget:b) == lockMember else { throw Failure.changed }
             try namedMatch("lock",lockMember); try b.checkTime()
         }
-        /// Returns false only for an absent noncreating bootstrap. Existing empty roots are never adopted.
-        func acquire(create: Bool, _ b: Work) throws -> Bool {
+        /// Noncreating recovery may retire a verified empty root left after lock unlink.
+        /// Admission still never adopts an existing root.
+        func acquire(create: Bool, recoveringEmpty: Bool = false, _ b: Work) throws -> Bool {
             registryDomain = bottom.registryDomain
             b.path = 3072; try b.charge(v:1,f:33); try bottom.checkpoint("cold-acquire",name:nil)
             guard root.isFileURL, root.host == nil || root.host == "" || root.host == "localhost", root.query == nil, root.fragment == nil,
@@ -926,10 +940,17 @@ extension SavedAudioImportStorage {
                 let s = try directoryInfo(child,privateRoot:i == parts.count-1,strictParent:i == parts.count-2,budget:b)
                 bindings.append(.init(parent:parent,fd:child,name:name,identity:Identity(s))); parent = child
             }
+            try bottom.excludeFromBackup(directory)
             let key = Identity(try directoryInfo(directory,privateRoot:true,strictParent:false,budget:b))
             guard SelfRegistry.insert(key,domain:registryDomain!) else { throw Failure.contended }; registered = key; try bottom.checkpoint("root-registered",name:nil)
             if create { guard rootCreated else { throw Failure.unknown }; holdLock.withLock { revoked = false; quit = false; outputRevoked = false } }
             if rootCreated { b.mutated = true }
+            if !create,recoveringEmpty,try bottom.named(parent:directory,name:"lock") == nil {
+                // No payload or lock may be inferred from missing authority. rmdir also
+                // refuses any content appearing after this bounded, no-follow audit.
+                guard try names(b).isEmpty else { throw Failure.unknown }
+                try finalClose(b); return false
+            }
             let fd = try bottom.open(parent:directory,name:"lock",mode:rootCreated ? .exclusive : .write)
             _ = try acquired(fd,base:false,isLock:true,b)
             try bottom.checkpoint("lock-open-before-classification",name:"lock"); lockMember = try fileInfo(fd,cap:0,budget:b)
@@ -1027,6 +1048,13 @@ extension SavedAudioImportStorage {
             try b.checkTime(); b.mutated = true; try bottom.rename(parent:directory,from:from,to:to)
             let changed = try fileInfo(source.fd,cap:member.bytes,budget:b); guard changed.renamedFrom(member) else { throw Failure.changed }; try namedMatch(to,changed)
             b.syncAttempts += 1; try bottom.sync(directory); if to == "manifest.json" { b.publications += 1 }; try consume(source,b); return changed
+        }
+        func inspect(_ name: String, cap: Int64, _ b: Work) throws -> Member {
+            try checkpoint("inspect-member",name:name,fixed:29,b); try validate(b)
+            guard SavedAudioImportStorage.validName(name) else { throw Failure.unknown }
+            let token = try acquired(bottom.open(parent:directory,name:name,mode:.read),base:false,b)
+            let member = try fileInfo(token.fd,cap:cap,budget:b)
+            try namedMatch(name,member); try consume(token,b); return member
         }
         func unlink(_ name: String, member: Member, cap: Int64, exact: Bool, missingAllowed: Bool, _ b: Work) throws {
             try checkpoint("unlink",name:name,fixed:32,b); try validate(b)

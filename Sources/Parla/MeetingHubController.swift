@@ -29,7 +29,7 @@ import ParlaCore
             lhs.label.utf8.elementsEqual(rhs.label.utf8)
         }
     }
-    enum ApplicationCapability: Equatable { case unavailable, injectedContractOnly }
+    enum ApplicationCapability: Equatable { case unavailable, injectedContractOnly, production }
     enum ApplicationPurpose: Equatable {
         case injectedRecordingContract, audioAccessAttemptContract
         var mode: ApplicationAudioMode {
@@ -103,7 +103,20 @@ import ParlaCore
             self.applicationCapability = applicationCapability; self.application = application
         }
     }
-    private enum Kind: Hashable { case metadata, start, stop, transcription, text, delete, expiry }
+    struct RecordingChallenge: Identifiable {
+        let id = UUID(), page: UUID, epoch: UUID, revision: UUID
+        let source: SourceChoice
+    }
+    @Published private(set) var recordingChallenge: RecordingChallenge?
+    @Published private(set) var applications: [ApplicationSnapshot] = []
+    var discoverApplications: () -> [ApplicationSnapshot] = { [] }
+    var openApplicationPrivacy: () -> Void = {}
+    func refreshApplications() {
+        guard admits,idle,activeCapture == nil else { return }
+        applications = discoverApplications().filter(\.valid)
+        if case .selectedApplication(let selected) = sourceChoice,!applications.contains(selected) { _ = acceptSourceChoice(.microphone) }
+    }
+    private enum Kind: Hashable { case metadata, start, stop, transcription, text, delete, expiry, keep }
     private struct Work { let id: UUID, task: Task<Void,Never> }
     private struct Retirement: Equatable { let reservation: UUID, epoch: UUID, success: Bool }
     @Published private(set) var model = HubMeetingModel()
@@ -121,6 +134,7 @@ import ParlaCore
         let intent: UUID, ownerEpoch: UUID, pageLifetime: UUID, sourceRevision: UUID
         let session: UUID, segment: UUID, epoch: UUID, selection: MeetingSession.Selection
         let consent: ApplicationStartConsent?, port: MeetingSessionOwner.SingleSourceStreamPort
+        var microphone: (selection: MeetingSession.Selection,segment: UUID,port: MeetingSessionOwner.SingleSourceStreamPort)?
         var actual: Task<Void,Never>?
         var accessKey: ApplicationAudioAccessKey?, pendingAccessOutcome: ApplicationAudioAccessOutcome?
         var acceptedAccessOutcome = false
@@ -165,6 +179,7 @@ import ParlaCore
             await task.value
             guard let self,self.work[kind]?.id == id else { return }
             self.work.removeValue(forKey:kind); self.publish()
+            if kind == .expiry || kind == .transcription { self.armExpiry() }
         }
     }
     private func ensureOwner(explicitReentry: Bool = false) throws -> MeetingSessionOwner {
@@ -175,14 +190,22 @@ import ParlaCore
             self.owner = nil; ownerEpoch = UUID(); retirement = nil; applicationAccessOutcome = nil
         }
         let stream = MeetingSessionOwner.SingleSourceStreamPort(validate:{ [weak self] selection in
-            guard let self,let active = self.activeCapture,self.captureCurrent(active),active.matches(selection) else { return false }
-            let valid = await active.port.validate(selection)
+            guard let self,let active = self.activeCapture,self.captureCurrent(active) else { return false }
+            let port: MeetingSessionOwner.SingleSourceStreamPort
+            if active.matches(selection) { port = active.port }
+            else if let mic = active.microphone,mic.selection == selection { port = mic.port }
+            else { return false }
+            let valid = await port.validate(selection)
             return valid && self.activeCapture === active && self.captureCurrent(active)
         },start:{ [weak self] selection,ingress in
-            guard let self,let active = self.activeCapture,self.captureCurrent(active),active.matches(selection),
+            guard let self,let active = self.activeCapture,self.captureCurrent(active),
                   ingress.context.session == active.session,ingress.context.source == selection.instance,
-                  ingress.context.sourceGeneration == selection.generation,ingress.context.segment == active.segment,
-                  ingress.context.epoch == active.epoch,ingress.context.ownerGeneration > 0 else { return .init(source:selection.instance,exit:.notStarted) }
+                  ingress.context.sourceGeneration == selection.generation,ingress.context.epoch == active.epoch,
+                  ingress.context.ownerGeneration > 0 else { return .init(source:selection.instance,exit:.notStarted) }
+            if let mic = active.microphone,mic.selection == selection,ingress.context.segment == mic.segment {
+                return mic.port.start(selection,ingress)
+            }
+            guard active.matches(selection),ingress.context.segment == active.segment else { return .init(source:selection.instance,exit:.notStarted) }
             // Register the exact context BEFORE an injected start may synchronously deliver evidence.
             if let consent = active.consent,consent.challenge.purpose == .audioAccessAttemptContract {
                 let s = consent.challenge.snapshot
@@ -208,7 +231,7 @@ import ParlaCore
             return producer
         },requestStop:{ [weak self] in
             // Stop uses the exact retained port even after consent/start authority has been consumed.
-            guard let active = self?.activeCapture else { return }; await active.port.requestStop()
+            guard let active = self?.activeCapture else { return }; await active.port.requestStop(); await active.microphone?.port.requestStop()
         })
         let value = MeetingSessionOwner(store:d.makeStore(),singleSource:stream,recognition:recognition.port,wallClock:d.wall,holdEpoch:1)
         value.onChange = { [weak self,weak value] snapshot in
@@ -226,16 +249,16 @@ import ParlaCore
         guard activeCapture === active,startCurrent(active.intent),ownerEpoch == active.ownerEpoch,
               pageLifetime == active.pageLifetime,sourceRevision == active.sourceRevision,let d = dependencies,d.captureCapability else { return false }
         if let consent = active.consent {
-            return d.applicationCapability == .injectedContractOnly && applicationCurrent(consent.challenge)
+            return d.applicationCapability != .unavailable && applicationCurrent(consent.challenge) && (d.applicationCapability != .production || d.authorization() == .authorized)
         }
         return sourceChoice == .microphone && d.authorization() == .authorized
     }
     private func applicationCurrent(_ value: StartChallenge) -> Bool {
         admits && value.pageLifetime == pageLifetime && value.ownerEpoch == ownerEpoch && value.sourceRevision == sourceRevision &&
-        sourceChoice == .selectedApplication(value.snapshot)
+        sourceChoice == .selectedApplication(value.snapshot) && (dependencies?.applicationCapability != .production || value.purpose == .injectedRecordingContract)
     }
     private func revokeCaptureAuthority(newPage: Bool = false) {
-        challenge = nil; startIntent = nil
+        challenge = nil; recordingChallenge = nil; startIntent = nil
         if newPage { pageLifetime = UUID(); sourceRevision = UUID(); applicationAccessOutcome = nil }
         if activeCapture?.consent != nil,applicationState != .heldOrUnavailable { applicationState = .retiring }
     }
@@ -251,14 +274,14 @@ import ParlaCore
         if case .selectedApplication(let snapshot) = choice, !snapshot.valid { return false }
         guard choice != sourceChoice else { return true }
         revokeCaptureAuthority(); sourceRevision = UUID(); applicationAccessOutcome = nil; sourceChoice = choice
-        if case .selectedApplication = choice,dependencies?.captureCapability == true,dependencies?.applicationCapability == .injectedContractOnly {
+        if case .selectedApplication = choice,dependencies?.captureCapability == true,dependencies?.applicationCapability != .unavailable {
             applicationState = .needsConsent
         } else { applicationState = .unavailable }
         return true
     }
     func prepareApplicationStart(purpose: ApplicationPurpose = .injectedRecordingContract) -> StartChallenge? {
         challenge = nil
-        guard admits,idle,activeCapture == nil,let d = dependencies,d.captureCapability,d.applicationCapability == .injectedContractOnly,
+        guard admits,idle,activeCapture == nil,let d = dependencies,d.captureCapability,d.applicationCapability != .unavailable,
               let owner,owner.state == .idle,owner.metadata == nil,!owner.snapshot.pendingStart,!owner.snapshot.phaseActive,
               case .selectedApplication(let snapshot) = sourceChoice,snapshot.valid else { return nil }
         let value = StartChallenge(pageLifetime:pageLifetime,ownerEpoch:ownerEpoch,sourceRevision:sourceRevision,snapshot:snapshot,purpose:purpose)
@@ -268,7 +291,7 @@ import ParlaCore
         let pending = challenge; challenge = nil // every reply is single use, including denial and a wrong ID
         guard let pending else { return }
         guard affirmed,pending.id == challengeID,pending.purpose == purpose,applicationCurrent(pending),admits,idle,activeCapture == nil,
-              let d = dependencies,d.captureCapability,d.applicationCapability == .injectedContractOnly,
+              let d = dependencies,d.captureCapability,d.applicationCapability != .unavailable,
               let value = owner,value.state == .idle,value.metadata == nil else { applicationState = .refusedBeforeStart; return }
         let intent = UUID(), frozen = ApplicationStartConsent(challenge:pending,intent:intent)
         let nonce = UUID()
@@ -289,7 +312,8 @@ import ParlaCore
                 guard self.startCurrent(intent),self.applicationCurrent(pending),self.owner === value else { return }
                 try await value.openMetadata()
                 guard self.startCurrent(intent),self.applicationCurrent(pending),self.owner === value,value.metadata == nil,
-                      d.captureCapability,d.applicationCapability == .injectedContractOnly else { return }
+                      d.captureCapability,d.applicationCapability != .unavailable else { return }
+                if d.applicationCapability == .production,!self.microphoneAuthorized(d,intent:intent) { return }
                 let result = d.application(attempt)
                 guard self.startCurrent(intent),self.applicationCurrent(pending),self.owner === value else { return }
                 guard case .injected(let port) = result else { self.applicationState = .unavailable; return }
@@ -297,14 +321,25 @@ import ParlaCore
                 let selection = MeetingSession.Selection(instance:binding.source,kind:.selectedApplication,label:binding.label,generation:binding.sourceGeneration)
                 let active = ActiveCapture(intent:intent,ownerEpoch:self.ownerEpoch,pageLifetime:self.pageLifetime,sourceRevision:self.sourceRevision,
                     session:frozen.session,segment:attempt.segment,epoch:binding.captureEpoch,selection:selection,consent:frozen,port:port,nonce:nonce)
+                if d.applicationCapability == .production {
+                    let input = try d.resolveInput(try d.settings().inputDeviceUID)
+                    active.microphone = (.init(instance:UUID(),kind:.microphone,label:input.label,generation:1),UUID(),d.microphone(input))
+                }
                 self.activeCapture = active
                 guard self.captureCurrent(active) else { self.captureRetired(value); return }
                 let timing = MeetingSession.Timing(pts:0,denominator:1,sample:0,rate:16_000,epoch:binding.captureEpoch,mapping:.unknown)
-                try await value.startSingleSource(owner:attempt.owner,session:frozen.session,selection:selection,
-                    segment:.init(id:attempt.segment,track:0,generation:binding.sourceGeneration,timing:timing,canonicalStart:0))
+                if let mic = active.microphone {
+                    try await value.startSources(owner:attempt.owner,session:frozen.session,selections:[mic.selection,selection],segments:[
+                        .init(id:mic.segment,track:0,generation:1,timing:timing,canonicalStart:0),
+                        .init(id:attempt.segment,track:1,generation:binding.sourceGeneration,timing:timing,canonicalStart:0)])
+                } else {
+                    try await value.startSingleSource(owner:attempt.owner,session:frozen.session,selection:selection,
+                        segment:.init(id:attempt.segment,track:0,generation:binding.sourceGeneration,timing:timing,canonicalStart:0))
+                }
                 guard self.captureCurrent(active) else { value.requestStopSaving(); self.stopAndSave(); return }
                 self.armExpiry()
             } catch {
+                self.model.message = "Recording could not start. Check Microphone and System Audio Recording access in System Settings, and select an app that is playing audio. Any saved prefix is kept."
                 self.applicationState = self.activeCapture?.actual == nil && value.state == .idle ? .refusedBeforeStart : .heldOrUnavailable
                 self.captureRetired(value)
                 if self.activeCapture != nil { self.stopAndSave() }
@@ -349,6 +384,17 @@ import ParlaCore
             }
         } catch { storageFailure() }
     }
+    /// Startup maintenance loads only saved metadata; it never grants capture authority.
+    func maintainSavedMeeting() {
+        guard work[.metadata] == nil,reservation == nil else { return }
+        do {
+            let value = try ensureOwner()
+            launch(.metadata) { [weak self,value] in
+                do { try await value.openMetadata(); try await value.evaluateExpiry(deleteID:UUID()); self?.armExpiry() }
+                catch { self?.storageFailure() }
+            }
+        } catch { storageFailure() }
+    }
     func retryOpen() { openPage() }
     func leavePage() { page = false; pageIntent = UUID(); revokeCaptureAuthority(newPage:true); verifiedText = nil; owner?.revokeTextReads(); cancelTranscription(); stopAndSave() }
     func windowClosed() { leavePage() }
@@ -357,6 +403,43 @@ import ParlaCore
     func chooseMicrophone() { model.message = "Choose a microphone in Settings. Changes apply to the next recording." }
     func openMicrophoneSettings() { dependencies?.openPrivacy() }
     func startAndSave() {
+        guard admits,idle,activeCapture == nil,dependencies?.captureCapability == true,owner?.metadata == nil else { return }
+        recordingChallenge = .init(page:pageLifetime,epoch:ownerEpoch,revision:sourceRevision,source:sourceChoice)
+    }
+    func confirmRecordingStart(id: UUID,affirmed: Bool) {
+        let pending = recordingChallenge; recordingChallenge = nil
+        guard let pending,affirmed,pending.id == id,pending.page == pageLifetime,pending.epoch == ownerEpoch,
+              pending.revision == sourceRevision,pending.source == sourceChoice,admits,idle else { return }
+        switch sourceChoice {
+        case .microphone: startMicrophoneConsented()
+        case .selectedApplication:
+            guard let challenge = prepareApplicationStart() else { return }
+            confirmApplicationStart(challengeID:challenge.id,affirmed:true)
+        }
+    }
+    /// Permission grants never resume recording; a fresh explicit Start and acknowledgment are required.
+    private func microphoneAuthorized(_ d: Dependencies,intent: UUID) -> Bool {
+        switch d.authorization() {
+        case .authorized: return true
+        case .denied:
+            model.message = "Microphone access is off. Allow it in System Settings, then press Start."; return false
+        case .undetermined:
+            let id = UUID(), lifetime = pageLifetime
+            permission = (id,intent,lifetime)
+            d.requestAccess { [weak self] granted in
+                Task { @MainActor [weak self] in
+                    guard let self,self.permission?.id == id else { return }
+                    if self.pageLifetime == lifetime,self.page,self.reservation == nil {
+                        self.model.message = granted ? "Microphone access is ready. Press Start and confirm consent to record." : "Microphone access is off. Allow it in System Settings, then press Start."
+                    }
+                    self.permission = nil
+                    let pending = self.permissionWaiters; self.permissionWaiters.removeAll(); pending.forEach { $0.resume() }; self.publish()
+                }
+            }
+            return false
+        }
+    }
+    private func startMicrophoneConsented() {
         guard sourceChoice == .microphone,activeCapture == nil,admits,idle,let d = dependencies else { return }
         // Milestone gate precedes authorization, settings and source resolution.
         guard d.captureCapability else { model.message = "Microphone recording is unavailable in this version. Saved meetings remain available."; return }
@@ -372,26 +455,7 @@ import ParlaCore
                 guard self.startCurrent(intent) else { return }
                 try await value.openMetadata()
                 guard self.startCurrent(intent),value.metadata == nil else { return }
-                switch d.authorization() {
-                case .undetermined:
-                    let id = UUID(); self.permission = (id,intent,self.pageIntent)
-                    self.model.message = "Waiting for microphone access. Recording has not started."
-                    d.requestAccess { [weak self] granted in
-                        // Always enqueue evidence delivery, including synchronous fake callbacks.
-                        // This enqueue is the delivery wrapper's last resource action.
-                        // The reply handoff below stays registered through evidence publication.
-                        DispatchQueue.main.async {
-                            guard let self,self.permission?.id == id else { return }
-                            if self.page,self.pageIntent == self.permission?.page,self.reservation == nil {
-                                self.model.message = granted ? "Microphone access is ready. Press Start to record and save." : "Microphone access is off. Allow it in System Settings, then press Start."
-                            }
-                            self.permission = nil; let pending = self.permissionWaiters; self.permissionWaiters.removeAll(); pending.forEach { $0.resume() }; self.publish()
-                        }
-                    }
-                    return // permission never resumes this Start
-                case .denied: self.model.message = "Microphone access is off. Allow it in System Settings, then press Start."; return
-                case .authorized: break
-                }
+                guard self.microphoneAuthorized(d,intent:intent) else { return }
                 let saved = try d.settings(), input = try d.resolveInput(saved.inputDeviceUID)
                 guard self.startCurrent(intent),d.authorization() == .authorized else { return }
                 self.frozenInput = input; let port = d.microphone(input)
@@ -421,6 +485,7 @@ import ParlaCore
             if let start { await start.value }
             do {
                 if let value = self?.owner { try await value.finishStopSaving(); self?.captureRetired(value) }
+                await self?.settleOldDeadline(session:nil)
                 self?.armExpiry()
             } catch { if self?.activeCapture?.consent != nil { self?.applicationState = .heldOrUnavailable }; self?.storageFailure() }
         }
@@ -437,7 +502,7 @@ import ParlaCore
                 try await value.evaluateExpiry(deleteID:UUID())
                 let config = AudioImportOwner.Configuration(try d.settings()); self.adoptConfiguration(config); self.frozenConfiguration = config
                 let selection = d.selectionEpoch(), preparation = try self.preparationEpoch(config.request)
-                let remaining = metadata.chunks.filter { $0.stage == .sealed && $0.accepted == nil }
+                let remaining = metadata.chunks.filter { $0.stage == .sealed && !$0.audioRemoved && $0.accepted == nil }
                 guard !remaining.isEmpty else { self.model.message = "There is not enough saved audio to transcribe."; return }
                 for chunk in remaining {
                     guard self.admits,authority.current,self.ownerEpoch == epoch else { throw CancellationError() }
@@ -455,6 +520,7 @@ import ParlaCore
                 }
             } catch { self.model.message = "Some saved audio has no text yet. Previously saved text is kept." }
             if self.batch === authority { self.batch = nil; self.frozenConfiguration = nil }
+            await self.settleOldDeadline(session:nil); self.armExpiry()
         }
     }
     func cancelTranscription() { batch?.revoke(); recognition.requestCancel(); owner?.cancelTranscription() }
@@ -533,6 +599,25 @@ import ParlaCore
             catch { self?.model.message = "Deletion is not finished. Saved files may remain." }
         }
     }
+    var recoveryDeleteConfirmation: UUID? { owner?.canDeleteUnavailableMeetingData == true ? pageIntent : nil }
+    func deleteAllMeetingDataConfirmed(intent: UUID) {
+        guard admits,idle,pageIntent == intent,let value = owner,value.canDeleteUnavailableMeetingData else { return }
+        launch(.delete) { [weak self,value] in
+            do { try await value.deleteAllUnavailableMeetingData(); self?.model.message = "Saved meeting deleted." }
+            catch { self?.model.message = "Deletion is not finished. Saved files may remain." }
+        }
+    }
+    func keepMeeting(_ keep: Bool) {
+        guard admits,idle,let value = owner else { return }
+        verifiedText = nil
+        launch(.keep) { [weak self,value] in
+            do {
+                try await value.setKeep(keep)
+                await self?.settleOldDeadline(session:nil)
+                try await value.evaluateExpiry(deleteID:UUID()); self?.armExpiry()
+            } catch { self?.storageFailure() }
+        }
+    }
     var deleteConfirmation: (session: UUID,intent: UUID)? { owner?.metadata.map { ($0.session,pageIntent) } }
     private func cancelDeadline() { deadline?.task.cancel() }
     private func settleOldDeadline(session: UUID?) async {
@@ -541,12 +626,12 @@ import ParlaCore
         if deadline?.id == old.id { deadline = nil }
     }
     private func armExpiry() {
-        guard let metadata = owner?.metadata,!metadata.deleting,let d = dependencies,reservation == nil,lifecycleDriver == nil else { return }
+        guard let metadata = owner?.metadata,!metadata.deleting,!metadata.kept,work[.transcription] == nil,let d = dependencies,reservation == nil,lifecycleDriver == nil else { return }
         if deadline?.session == metadata.session { return }
         // Never replace a live deadline. Its actual exit is joined first by the metadata/stop action.
         guard deadline == nil else { return }
         do {
-            let now = try d.wall(), delta = metadata.expires.subtractingReportingOverflow(now), id = UUID()
+            let now = try d.wall(), delta = min(metadata.expires,metadata.rawExpires ?? metadata.expires).subtractingReportingOverflow(now), id = UUID()
             guard now >= metadata.created,!delta.overflow else { throw MeetingSession.Failure.clock }
             let remaining = max(0,delta.partialValue)
             let task = Task { [weak self] in
@@ -561,7 +646,11 @@ import ParlaCore
         guard work[.expiry] == nil,let value = owner else { return }
         revokeCaptureAuthority(); cancelTranscription(); value.revokeTextReads()
         launch(.expiry) { [weak self,value] in
-            do { try await value.evaluateExpiry(deleteID:UUID()); if value.metadata == nil { self?.captureRetired(value) } } catch { self?.storageFailure() }
+            do {
+                try await value.evaluateExpiry(deleteID:UUID())
+                if value.metadata == nil { self?.captureRetired(value) }
+                self?.deadline = nil
+            } catch { self?.storageFailure() }
         }
     }
     func withExportProtection<T>(validateDestination: (MeetingSessionStore.Protection) throws -> Void,perform: () throws -> T) throws -> T {
@@ -657,8 +746,12 @@ import ParlaCore
     private func storageFailure() { model.message = "Saved meeting unavailable. Parla could not safely finish storage work."; if owner?.protectionQuarantined == true { quarantine = true } }
     private func publish(_ snapshot: MeetingSessionOwner.Snapshot? = nil) {
         let snapshot = snapshot ?? owner?.snapshot
+        model.captureOwned = activeCapture != nil
+        model.recoveryDeleteAvailable = owner?.canDeleteUnavailableMeetingData == true
         model.state = snapshot?.state ?? .idle; model.metadata = snapshot?.metadata; model.busy = !work.isEmpty || permission != nil || reservation != nil || lifecycleDriver != nil
-        model.source = activeCapture?.selection.label ?? snapshot?.metadata?.selections.first?.label ?? frozenInput?.label ?? "Saved microphone"
+        if let active = activeCapture {
+            model.source = active.microphone == nil ? active.selection.label : "Microphone + " + active.selection.label
+        } else { model.source = snapshot?.metadata?.selections.map(\.label).joined(separator:" + ") ?? frozenInput?.label ?? "Saved microphone" }
         if let verifiedText,verifiedText.metadata == snapshot?.metadata { model.text = verifiedText.text } else { model.text = nil }
     }
 }
