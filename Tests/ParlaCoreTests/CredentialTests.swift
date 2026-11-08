@@ -318,5 +318,9 @@ final class CredentialTests: XCTestCase {
             XCTAssertEqual(q[kSecAttrSynchronizable as String] as? Bool, false)
             XCTAssertNil(q[kSecAttrAccessGroup as String]); XCTAssertNil(q[kSecAttrAccess as String])
         }
+        // Keychain dialogs are never shown: inaccessible items come back .denied instead.
+        var allowed: DarwinBoolean = true
+        XCTAssertEqual(SecKeychainGetUserInteractionAllowed(&allowed), errSecSuccess)
+        XCTAssertFalse(allowed.boolValue)
     }
 }

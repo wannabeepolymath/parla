@@ -45,7 +45,7 @@ public enum CredentialStatus: String, Equatable, Sendable {
         switch self {
         case .present: return "Key stored in Keychain."
         case .missing: return "No stored key. Compatible local servers may be keyless."
-        case .denied: return "Keychain access denied or locked. Unlock it and retry explicitly."
+        case .denied: return "Keychain access denied (locked, or the key was saved by another copy of Parla). Delete \"com.parla.provider-credentials.v1\" in Keychain Access, then paste the key again."
         case .canceled: return "Keychain access canceled. Retry explicitly."
         case .error: return "Credential unavailable. Retry or replace it explicitly."
         }
@@ -150,7 +150,12 @@ public final class SecurityCredentialBackend: CredentialBackend {
     }
     private let functions: Functions
     public init(functions: Functions = .system) { self.functions = functions }
+    /// LAContext/kSecUseAuthenticationUIFail do not stop the login-keychain
+    /// "wants to access key" dialog (an item saved by a differently signed build).
+    /// This process-wide switch does: such reads fail as .denied instead of prompting.
+    static let keychainUIDisabled: Void = { _ = SecKeychainSetUserInteractionAllowed(false) }()
     private func query(_ scope: CredentialScope, interactive: Bool) -> [String: Any] {
+        Self.keychainUIDisabled
         let context = LAContext(); context.interactionNotAllowed = !interactive
         return [kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: "com.parla.provider-credentials.v1",
