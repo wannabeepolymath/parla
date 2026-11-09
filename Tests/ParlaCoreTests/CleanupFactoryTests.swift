@@ -187,7 +187,7 @@ final class CleanupFactoryTests: XCTestCase {
         s.cleanup.provider = "openai-compatible"
         s.cleanup.model = "m"
         XCTAssertThrowsError(try makeCleanupClient(settings: s, env: [:])) { error in
-            XCTAssertTrue("\(error)".lowercased().contains("baseurl"))
+            XCTAssertTrue("\(error)".lowercased().contains("base url"))
         }
     }
 
@@ -203,7 +203,7 @@ final class CleanupFactoryTests: XCTestCase {
         ] {
             s.cleanup.baseURL = bad
             XCTAssertThrowsError(try makeCleanupClient(settings: s, env: [:]), bad) { error in
-                XCTAssertTrue("\(error)".lowercased().contains("baseurl"))
+                XCTAssertTrue("\(error)".lowercased().contains("base url"))
             }
             XCTAssertNil(cleanupWarmURL(settings: s, env: [:]), bad)
         }

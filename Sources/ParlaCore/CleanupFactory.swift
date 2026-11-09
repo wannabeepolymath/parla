@@ -105,7 +105,7 @@ public func cleanupConfigurationIssue(settings: Settings, env: @autoclosure () -
 }
 
 public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> String {
-    if settings.usesAppleIntelligence { return "No API key needed." }
+    if settings.usesAppleIntelligence { return "Runs on this Mac. No API key needed." }
     if environmentKey(settings: settings, env: env()) != nil {
         return "Using the API key from an environment variable."
     }
@@ -170,7 +170,7 @@ private struct CredentialSafeProvider: CleanupProviding, DiagnosticModelObservin
         catch let error as SegmentedRetryFailure { throw error }
         catch let error as CleanupFailoverFailure { throw error }
         catch is CancellationError { throw CancellationError() }
-        catch { throw CredentialFailure("Provider request failed.") }
+        catch { throw CredentialFailure("Cleanup request failed.") }
     }
 }
 

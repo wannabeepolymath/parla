@@ -200,7 +200,7 @@ final class HubHistoryRetryTests: XCTestCase {
         let old = TransformPreset(name: "Old", instruction: "OLD instruction")
         let entry = row(operation: .init(origin: .spoken, preset: old, outcome: .completed))
         hub.prepareHistoryRetry(entry.id)
-        XCTAssertNil(hub.historyRetries[entry.id]); XCTAssertTrue(hub.historyRetryMessage!.contains("unknown"))
+        XCTAssertNil(hub.historyRetries[entry.id]); XCTAssertTrue(hub.historyRetryMessage!.contains("wasn’t saved"))
         try edit { s in
             let preset = TransformPreset(name: "Current", instruction: "Rewrite as bullets")
             s.transformPresets = [preset]; s.selectedPresetID = preset.id
@@ -757,7 +757,7 @@ extension HubHistoryRetryTests {
         let entry = HistoryEntry(raw: segmentedOriginal); XCTAssertTrue(history.append(entry))
         model.prepareSegmentedHistoryRetry(entry.id)
         XCTAssertNil(model.historyRetries[entry.id]); XCTAssertTrue(model.hasPendingSettingsSave)
-        XCTAssertTrue(model.historyRetryMessage?.contains("saving") == true)
+        XCTAssertTrue(model.historyRetryMessage?.contains("settings to save") == true)
         XCTAssertEqual(try Data(contentsOf: store.url), original)
         XCTAssertEqual(general + beforeSave + saved + environment, 0)
         XCTAssertEqual(backend.reads + backend.statuses + backend.adds + backend.updates + backend.deletes, 0)

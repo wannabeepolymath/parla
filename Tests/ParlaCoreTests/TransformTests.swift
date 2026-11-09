@@ -308,7 +308,7 @@ final class TransformTests: XCTestCase {
         let (session, landed) = try pending(m, s, target: .init(focus: .editable, bundleID: "off"))
         var calls = 0
         let result = await Pipeline(outputSettings: session.effectiveSettings, bundleID: "off") { _ in calls += 1; return Client() }.clean(transcript: landed.raw)
-        XCTAssertNotNil(result.failure); XCTAssertTrue(result.failure!.contains("Cleanup off")); XCTAssertEqual(calls, 0)
+        XCTAssertNotNil(result.failure); XCTAssertTrue(result.failure!.contains("Turn on cleanup")); XCTAssertEqual(calls, 0)
         XCTAssertNil(cleanupWarmURL(settings: session.effectiveSettings, env: [:]))
         let spoken = DictationSession.Session(gen: 8, mode: .command(selection: "cat"), settings: s, cleanupConfigured: true).resolvingOutput(at: .init(bundleID: "off"))
         do { _ = try await spoken.transform(instruction: "Translate into Hindi") { _ in calls += 1; return Client() }; XCTFail("must refuse") }

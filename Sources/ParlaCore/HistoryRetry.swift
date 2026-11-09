@@ -172,7 +172,7 @@ public struct HistoryRetryRequest {
                 }) }
                 let provider = try diagnostics.map { diagnostic in try diagnostic.makeProvider(settings: settings, factory: create) } ?? create()
                 return RetryProvider(base: provider, local: settings.usesAppleIntelligence)
-            } catch { throw TransformError(description: "Provider configuration unavailable") }
+            } catch { throw TransformError(description: "Cleanup isn’t set up") }
         }
         let text: String
         if let preset {
@@ -221,7 +221,7 @@ private struct RetryProvider: CleanupProviding {
         do { return try await base.clean(transcript: transcript, context: context) }
         catch {
             if local, let reason = LocalCleanupReason.from(error) { throw reason.error }
-            throw TransformError(description: "Provider request failed")
+            throw TransformError(description: "Cleanup request failed")
         }
     }
 }

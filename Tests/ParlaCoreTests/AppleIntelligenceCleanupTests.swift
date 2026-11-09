@@ -68,7 +68,7 @@ final class AppleIntelligenceCleanupTests: XCTestCase {
         guard case .onDevice = access else { return XCTFail("typed local access required") }
         XCTAssertTrue(ParlaCore.cleanupIsConfigured(settings: settings, env: forbiddenEnv(), credentials: forbiddenCredentials()))
         XCTAssertNil(cleanupConfigurationIssue(settings: settings, env: forbiddenEnv(), credentials: forbiddenCredentials()))
-        XCTAssertTrue(cleanupCredentialSource(settings: settings, env: forbiddenEnv(), credentials: forbiddenCredentials()).contains("on-device"))
+        XCTAssertTrue(cleanupCredentialSource(settings: settings, env: forbiddenEnv(), credentials: forbiddenCredentials()).contains("on this Mac"))
         XCTAssertNil(ParlaCore.cleanupWarmURL(settings: settings, env: forbiddenEnv(), credentials: forbiddenCredentials()))
         _ = try client(settings, bottom)
         XCTAssertTrue(bottom.localeChecks.isEmpty); XCTAssertEqual(bottom.generations, 0)

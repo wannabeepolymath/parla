@@ -95,7 +95,7 @@ final class CredentialTests: XCTestCase {
     }
     func testConflictRetainsBothUntilExplicitReplacement() throws {
         try seed(); backend.values[.anthropic] = "different"
-        XCTAssertTrue(store.migrateCredentials()?.contains("conflict") == true)
+        XCTAssertTrue(store.migrateCredentials()?.contains("different key") == true)
         XCTAssertEqual(backend.values[.anthropic], "different"); XCTAssertEqual(try Data(contentsOf: store.url), original)
         try store.changeCredential(scope: .anthropic, replacement: "chosen")
         XCTAssertNil(store.migrateCredentials())
@@ -121,7 +121,7 @@ final class CredentialTests: XCTestCase {
                     if self.backend.values[.anthropic] != nil { self.backend.addResult = nil; self.backend.onAdd = nil }
                 }
                 XCTAssertNil(store.migrateCredentials())
-            } else { XCTAssertTrue(store.migrateCredentials()?.contains("conflict") == true); XCTAssertEqual(try Data(contentsOf: store.url), original) }
+            } else { XCTAssertTrue(store.migrateCredentials()?.contains("different key") == true); XCTAssertEqual(try Data(contentsOf: store.url), original) }
             backend.onRead = nil
         }
     }

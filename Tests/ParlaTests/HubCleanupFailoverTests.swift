@@ -72,11 +72,11 @@ extension HubCleanupFailoverTests {
                 let actual = try d.store.savedRetrySnapshot()
                 XCTAssertEqual(actual.outputMode, mode); XCTAssertEqual(actual.cleanupEnabled, enabled)
                 if eligible {
-                    XCTAssertTrue(h.failoverState.hasPrefix("Enabled"))
+                    XCTAssertTrue(h.failoverState.hasPrefix("On"))
                     XCTAssertNotNil(d.store.captureCleanupFailoverGrant(settings: actual, origin: .physicalOrdinary))
                 } else {
                     XCTAssertEqual(d.bytes, original)
-                    XCTAssertFalse(h.failoverMessage?.hasPrefix("Enabled") == true)
+                    XCTAssertFalse(h.failoverMessage?.hasPrefix("Backups are on") == true)
                     XCTAssertNil(d.store.captureCleanupFailoverGrant(settings: actual, origin: .physicalOrdinary))
                 }
                 XCTAssertEqual(d.backend.reads, 0); XCTAssertEqual(d.backend.statuses, 0)
@@ -89,7 +89,7 @@ extension HubCleanupFailoverTests {
         h.reviewFailover(); h.confirmFailover()
         let saved = try d.store.savedRetrySnapshot(), id = UUID()
         let grant = try XCTUnwrap(d.store.captureCleanupFailoverGrant(settings: saved, origin: .physicalOrdinary)).bound(to: id)
-        XCTAssertTrue(h.failoverMessage?.hasPrefix("Enabled") == true)
+        XCTAssertTrue(h.failoverMessage?.hasPrefix("Backups are on") == true)
         var callbacks = 0; h.onSaved = { callbacks += 1 }
         h.words = [.init(text: "owed-word")]
         h.settings.outputMode = .raw
@@ -106,7 +106,7 @@ extension HubCleanupFailoverTests {
         XCTAssertTrue(h.failoverState.hasPrefix("Paused"))
         XCTAssertThrowsError(try d.store.withCleanupFailoverGrant(grant, operationID: id, {}))
         h.reviewFailover(); h.confirmFailover()
-        XCTAssertTrue(h.failoverState.hasPrefix("Enabled"))
+        XCTAssertTrue(h.failoverState.hasPrefix("On"))
         XCTAssertThrowsError(try d.store.withCleanupFailoverGrant(grant, operationID: id, {}))
         h.settings.cleanupEnabled = false
         XCTAssertNil(h.failoverMessage)

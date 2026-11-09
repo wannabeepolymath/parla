@@ -250,7 +250,7 @@ public final class RecordingStore: @unchecked Sendable {
                 let target = lease?.url ?? url
                 if let lease { lease.revoked = true; lease.onRevoke?(); release(lease) }
                 do { try removeOwned(target); changed() }
-                catch { report("Couldn’t delete a recording. Delete it in Data & Privacy.") }
+                catch { report("Couldn’t delete a recording made in a password field. Delete it in Data & Privacy.") }
                 return
             }
             guard let lease = active[url.path], captures.contains(lease.token) else { return }

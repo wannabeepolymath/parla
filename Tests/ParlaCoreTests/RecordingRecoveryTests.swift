@@ -166,7 +166,7 @@ final class RecordingRecoveryTests: XCTestCase {
         XCTAssertFalse(s.delete(url, now: now))
         let outcome = s.clear(now: now); XCTAssertEqual(outcome.removed, 0); XCTAssertEqual(outcome.failed, 1)
         s.resolve(url, transcript: nil, secure: true)
-        XCTAssertTrue(s.lastError?.contains("Secure") == true)
+        XCTAssertTrue(s.lastError?.contains("password field") == true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
     }
     func testSecureRevokesRecoveryBeforeRemovingInBothCorpusModes() throws {

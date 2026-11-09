@@ -27,7 +27,7 @@ public struct CredentialScope: Hashable, Sendable {
         switch settings.cleanup.provider {
         case "", "anthropic": return .anthropic
         case "openai-compatible": return try compatible(settings.cleanup.baseURL)
-        default: throw CredentialFailure("Choose Anthropic or OpenAI-compatible as the cleanup service.")
+        default: throw CredentialFailure("Unknown cleanup provider in settings.json. Use \"anthropic\" or \"openai-compatible\".")
         }
     }
 }

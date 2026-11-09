@@ -325,7 +325,7 @@ final class SavedAudioImportOwner: ObservableObject {
         }
     }
     func reserveRestart() -> Bool {
-        guard !closedAdmission else { return false }; restartReserved = true; closedAdmission = true; invalidate("Transcript closed."); return true
+        guard !closedAdmission else { return false }; restartReserved = true; closedAdmission = true; invalidate("Transcript closed so Parla can restart."); return true
     }
     func releaseRestart() { restartReserved = false; if !shutdownReserved { closedAdmission = false } }
     func cancelShutdown() { shutdownReserved = false; if !restartReserved { closedAdmission = false } }
@@ -337,7 +337,7 @@ final class SavedAudioImportOwner: ObservableObject {
     }
     func restartReady() -> Bool { !busy && ioTasks.isEmpty && outputIO.isEmpty && storageConcern == nil && store.failure == nil }
     func beginShutdown(_ reply: @escaping (Bool) -> Void) {
-        shutdownReserved = true; closedAdmission = true; invalidate("Transcript closed.")
+        shutdownReserved = true; closedAdmission = true; invalidate("Transcript closed because Parla is quitting.")
         Task { @MainActor in await self.drain(); reply(self.restartReady()) }
     }
 }

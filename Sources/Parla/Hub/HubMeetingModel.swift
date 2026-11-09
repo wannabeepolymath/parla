@@ -20,7 +20,7 @@ struct HubMeetingModel {
         case .stopping: return "Finishing saved audio…"
         case .stopped:
             if metadata?.chunks.isEmpty == false,metadata?.chunks.allSatisfy(\.audioRemoved) == true {
-                return metadata?.chunks.contains(where: { $0.accepted != nil }) == true ? "Transcript saved. Raw audio deleted." : "Raw audio expired. Delete this meeting to start another."
+                return metadata?.chunks.contains(where: { $0.accepted != nil }) == true ? "Transcript saved. Audio deleted." : "Audio expired. Delete this meeting to record another."
             }
             if metadata?.unknownCoverage == true,metadata?.selections.contains(where: { $0.kind == .selectedApplication }) == true {
                 if let metadata,let track = metadata.selections.firstIndex(where: { $0.kind == .selectedApplication }),

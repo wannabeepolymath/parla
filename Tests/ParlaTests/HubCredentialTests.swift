@@ -110,7 +110,7 @@ final class HubCredentialTests: XCTestCase {
     func testConflictIsActionableAndExplicitRemoveDoesNotRemigrateLegacy() throws {
         let original = Data(#"{"anthropicApiKey":"legacy"}"#.utf8)
         try original.write(to: store.url); backend.values[.anthropic] = "existing"
-        hub.refresh(); XCTAssertTrue(hub.credentialMessage?.contains("conflict") == true)
+        hub.refresh(); XCTAssertTrue(hub.credentialMessage?.contains("different key") == true)
         hub.removeCredential(); hub.flushPendingSave()
         XCTAssertNil(backend.values[.anthropic]); XCTAssertNil(store.load().anthropicApiKey)
         hub.refresh(); XCTAssertNil(backend.values[.anthropic]); XCTAssertNil(hub.credentialMessage)

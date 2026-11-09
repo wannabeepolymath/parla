@@ -227,7 +227,7 @@ final class HubAudioRecoveryTests: XCTestCase {
         XCTAssertTrue(player.played.isEmpty)
         hub.playRecovery(url); XCTAssertEqual(player.played, [url]); XCTAssertEqual(recordings.clear().busy, 1)
         player.finish(true); XCTAssertNil(hub.playingRecordingID); XCTAssertEqual(recordings.descriptors().count, 1)
-        hub.playRecovery(url); player.finish(false); XCTAssertTrue(hub.recoveryMessage?.contains("failed") == true)
+        hub.playRecovery(url); player.finish(false); XCTAssertTrue(hub.recoveryMessage?.contains("Couldn’t play") == true)
         hub.playRecovery(url); hub.stopRecoveryPlayback(); XCTAssertNil(hub.playingRecordingID)
         hub.playRecovery(url)
         HubWindowController(model: hub).windowWillClose(Notification(name: Notification.Name("test")))
@@ -244,7 +244,7 @@ final class HubAudioRecoveryTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
         let active = try failed(), inactive = try failed()
         let lease = try recordings.acquire(active); hub.playRecovery(inactive); hub.clearRecovery()
-        XCTAssertTrue(hub.recoveryMessage?.contains("busy/skipped 1") == true)
+        XCTAssertTrue(hub.recoveryMessage?.contains("1 in use") == true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: active.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: inactive.path)); recordings.release(lease)
     }
