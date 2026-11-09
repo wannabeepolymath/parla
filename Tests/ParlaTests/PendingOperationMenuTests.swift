@@ -19,7 +19,7 @@ final class PendingOperationMenuTests: XCTestCase {
         op.revoke(); menu.removeAllItems()
         AppDelegate.addPendingOperation(to: menu, operation: op, target: nil)
         XCTAssertNil(menu.items.first?.action)
-        XCTAssertEqual(menu.items.first?.title, "Discarded — stopping work…")
+        XCTAssertEqual(menu.items.first?.title, "Discarding…")
         op.finish(); menu.removeAllItems()
         AppDelegate.addPendingOperation(to: menu, operation: op, target: nil)
         XCTAssertTrue(menu.items.isEmpty)

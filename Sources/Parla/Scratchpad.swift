@@ -90,7 +90,7 @@ struct ScratchpadEditCommand {
     private(set) var state: State = .disabled
     private(set) var request: Request?
     private(set) var enabled = false
-    private(set) var message = "Exact saved casing/Unicode spelling only; choose one word of 3–64 characters."
+    private(set) var message = "Choose a single word of 3 to 64 characters."
     private var storedFlag = false
     private var localDisabled = false
     private var exhausted = false
@@ -171,7 +171,7 @@ struct ScratchpadEditCommand {
             let configuration = try ports.configuration()
             storedFlag = configuration.enabled
             enabled = storedFlag && !localDisabled
-        } catch { enabled = false; localDisabled = true; message = "Dictionary spelling settings unavailable. Explicitly try the checkbox after repair." }
+        } catch { enabled = false; localDisabled = true; message = "Dictionary spelling isn’t available. Fix settings.json and try again." }
         settle()
     }
     func setDictionarySpellingEnabled(_ value: Bool) {
@@ -182,10 +182,10 @@ struct ScratchpadEditCommand {
             let current = try ports.configuration().enabled
             storedFlag = try ports.preference(value, current)
             enabled = storedFlag; localDisabled = !storedFlag
-            message = "Exact saved casing/Unicode spelling only; choose one word of 3–64 characters."
+            message = "Choose a single word of 3 to 64 characters."
         } catch {
             enabled = false; localDisabled = true
-            message = "Couldn’t save dictionary spelling preference. Repair settings and explicitly try again."
+            message = "Couldn’t save this setting. Fix settings.json and try again."
         }
         settle()
     }
@@ -253,14 +253,14 @@ struct ScratchpadEditCommand {
             guard configuration.enabled else { enabled = false; throw ScratchpadPreferenceFailure() }
             guard let editor, editor.focusedAndEditable, editor.undoEnabled, !editor.replayingUndo,
                   let snapshot = editor.state(), ScratchpadSpellingPolicy.snapshotFitsBudget(snapshot.length) else {
-                throw ScratchpadSpellingPolicy.Refusal(message: "Focus the Scratchpad editor; one editable word and native Undo are required (document limit 65,536 UTF-16 units).")
+                throw ScratchpadSpellingPolicy.Refusal(message: "Click into a word in the Scratchpad first.")
             }
             let edit = editRevision, selection = selectionRevision, config = configRevision, visibleSession = session
             let raw = editor.rawUTF16()
             guard raw.count == snapshot.length else { throw ScratchpadPreferenceFailure() }
             let token = try ScratchpadSpellingPolicy.token(raw, selection: snapshot.selection)
             let choices = try ScratchpadSpellingPolicy.candidates(original: token.units, words: configuration.words, now: ports.clock)
-            guard !choices.outputs.isEmpty else { message = "No matching saved dictionary spelling."; return nil }
+            guard !choices.outputs.isEmpty else { message = "No dictionary spelling matches this word."; return nil }
             let issued = ports.clock()
             guard issued.isFinite, issued >= 0, edit == editRevision, selection == selectionRevision,
                   config == configRevision, visibleSession == session, editor.focusedAndEditable,
@@ -271,12 +271,12 @@ struct ScratchpadEditCommand {
                 original: token.units, candidates: choices.outputs.map { Candidate(id: UUID(), literal: $0) },
                 issued: issued, deadline: issued + ScratchpadSpellingPolicy.lifetime, more: choices.more)
             request = pending; state = .presenting
-            message = choices.more ? "Saved dictionary spelling — first 5 shown. Choose explicitly." : "Saved dictionary spelling — choose explicitly."
+            message = choices.more ? "Dictionary spellings (first 5). Choose one." : "Choose a dictionary spelling."
             cancelExpiry = ports.schedule(ScratchpadSpellingPolicy.lifetime) { [weak self] in self?.expireDictionarySpelling() }
             projectionChanged()
             return pending
         } catch {
-            message = (error as? ScratchpadSpellingPolicy.Refusal)?.message ?? "Dictionary spelling settings unavailable or changed. Try again after repair."
+            message = (error as? ScratchpadSpellingPolicy.Refusal)?.message ?? "Your dictionary changed. Try again."
             return nil
         }
     }
@@ -370,26 +370,26 @@ struct ScratchpadEditCommand {
               let after = editor.state(), after.identity == command.identity,
               after.length == resultingLength.partialValue,
               after.selection == command.afterSelection, after.affinity == command.afterAffinity else {
-            message = "Dictionary spelling native qualification failed; request revoked."; return false
+            message = "Couldn’t change the spelling. Try again."; return false
         }
         let raw = editor.rawUTF16()
         let changedRange = NSRange(location: command.range.location, length: command.after.count)
         guard ScratchpadSpellingPolicy.fits(changedRange, in: raw.count),
               Array(raw[changedRange.location..<NSMaxRange(changedRange)]) == command.after else {
-            message = "Dictionary spelling native qualification failed; request revoked."; return false
+            message = "Couldn’t change the spelling. Try again."; return false
         }
         editor.didChange()
         guard editor.transactionOwnerStable, session == generation, configRevision == configuration, documentEpoch == epoch,
               let completed = editor.state(), completed.identity == command.identity,
               completed.selection == command.afterSelection, completed.affinity == command.afterAffinity,
               completed.length == after.length else {
-            message = "Dictionary spelling native qualification failed; request revoked."; return false
+            message = "Couldn’t change the spelling. Try again."; return false
         }
         let completedRaw = editor.rawUTF16()
         guard completedRaw.count == completed.length, ScratchpadSpellingPolicy.validUTF16(completedRaw),
               ScratchpadSpellingPolicy.fits(changedRange, in: completedRaw.count),
               Array(completedRaw[changedRange.location..<NSMaxRange(changedRange)]) == command.after else {
-            message = "Dictionary spelling native qualification failed; request revoked."; return false
+            message = "Couldn’t change the spelling. Try again."; return false
         }
         editor.restoreImplicitUndo(); suppressed = false
         editor.registerInverse(command.inverse)

@@ -14,8 +14,27 @@ enum AutomationIntentError: Error, Equatable, LocalizedError {
     case refused(AutomationFailure)
     var errorDescription: String? {
         switch self {
-        case .invalidSession: return "Parla automation: invalid session."
-        case .refused(let failure): return "Parla automation: \(failure.rawValue)."
+        case .invalidSession: return "This Parla session isn’t valid. Start a new dictation."
+        case .refused(let failure): return Self.message(failure)
+        }
+    }
+    private static func message(_ failure: AutomationFailure) -> String {
+        switch failure {
+        case .disabled: return "Turn on Allow Shortcuts to dictate in Parla."
+        case .timeout: return "The dictation took too long."
+        case .busy, .waiterLimit: return "Parla is busy. Try again in a moment."
+        case .microphoneUnavailable: return "The microphone isn’t available."
+        case .modelUnavailable: return "Parla’s speech model isn’t ready."
+        case .secure: return "Parla can’t dictate while a password field is active."
+        case .staleSession: return "This dictation has ended. Start a new one."
+        case .canceled: return "The dictation was canceled."
+        case .superseded: return "A newer dictation replaced this one."
+        case .unavailable: return "Dictation isn’t available right now."
+        case .unsupportedOutputMode: return "Set Dictation output to Cleaned up or Original text in Parla."
+        case .empty: return "No speech was recognized."
+        case .minimumDuration: return "The dictation was too short."
+        case .resultLimit: return "The dictation was too long."
+        case .shuttingDown: return "Parla is quitting."
         }
     }
 }
@@ -73,7 +92,7 @@ struct ParlaAutomationResultQuery: EntityQuery {
 
 struct StartParlaDictationIntent: AppIntent {
     static var title: LocalizedStringResource = "Start Parla Dictation"
-    static var description = IntentDescription("Start result-only dictation and return its control session. Requires enabled automation and a ready microphone and model.")
+    static var description = IntentDescription("Starts a dictation. Turn on Allow Shortcuts to dictate in Parla first.")
     static var openAppWhenRun = true
     static var authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
 
@@ -87,10 +106,10 @@ struct StartParlaDictationIntent: AppIntent {
 
 struct StopParlaDictationIntent: AppIntent {
     static var title: LocalizedStringResource = "Stop Parla Dictation"
-    static var description = IntentDescription("Stop the control session returned by Start Parla Dictation and return its final Text. Does not paste or copy.")
+    static var description = IntentDescription("Stops the dictation and returns its text. Nothing is pasted.")
     static var openAppWhenRun = true
     static var authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
-    @Parameter(title: "Control Session", description: "Use the control session returned by Start Parla Dictation.") var controlSession: String
+    @Parameter(title: "Session", description: "The session from Start Parla Dictation.") var controlSession: String
     init() {}
     init(controlSession: String) { self.controlSession = controlSession }
 
@@ -107,10 +126,10 @@ struct StopParlaDictationIntent: AppIntent {
 
 struct CancelParlaDictationIntent: AppIntent {
     static var title: LocalizedStringResource = "Cancel Parla Dictation"
-    static var description = IntentDescription("Cancel only the control session returned by Start Parla Dictation. Returns a fixed status without transcript text.")
+    static var description = IntentDescription("Cancels the dictation without returning any text.")
     static var openAppWhenRun = true
     static var authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
-    @Parameter(title: "Control Session", description: "Use the control session returned by Start Parla Dictation.") var controlSession: String
+    @Parameter(title: "Session", description: "The session from Start Parla Dictation.") var controlSession: String
     init() {}
     init(controlSession: String) { self.controlSession = controlSession }
 
@@ -129,7 +148,7 @@ struct CancelParlaDictationIntent: AppIntent {
 
 struct GetLastParlaResultIntent: AppIntent {
     static var title: LocalizedStringResource = "Get Last Parla Result"
-    static var description = IntentDescription("Return the eligible final Text held briefly in this Parla process. Never reads saved history.")
+    static var description = IntentDescription("Returns the text of the last Shortcuts dictation, if it’s still available.")
     static var openAppWhenRun = true
     static var authenticationPolicy: IntentAuthenticationPolicy = .requiresLocalDeviceAuthentication
 

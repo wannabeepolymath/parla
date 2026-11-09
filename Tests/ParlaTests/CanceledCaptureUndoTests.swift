@@ -353,7 +353,7 @@ private actor UndoGate {
         try r.armZero()
         r.offer(); let old = r.accepted.last!.operation
         XCTAssertTrue(old.shouldAbort); XCTAssertEqual(r.controller.retainedAudioCount, 8000)
-        let undo = r.button(.undo); XCTAssertEqual(undo.accessibilityLabel(), "Undo capture cancellation")
+        let undo = r.button(.undo); XCTAssertEqual(undo.accessibilityLabel(), "Undo canceled dictation")
         r.click(undo); let job = r.controller.activeJob!
         XCTAssertNotEqual(job.operation.id, old.id); XCTAssertNil(job.operation.diagnostics)
         r.click(undo); await r.settle()

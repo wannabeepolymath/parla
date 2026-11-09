@@ -39,7 +39,7 @@ final class HistoryPersistenceSink {
         deferredHUD = state
         guard let saved else { return nil }
         deferredHUD = nil
-        return saved ? state : .error("History not saved — Copy or Retry Save in History")
+        return saved ? state : .error("Not saved to history — open History to retry")
     }
 
     @discardableResult

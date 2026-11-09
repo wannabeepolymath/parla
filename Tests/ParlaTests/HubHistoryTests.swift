@@ -151,7 +151,7 @@ final class HubHistoryTests: XCTestCase {
         let recent = try XCTUnwrap(menu.items.first(where: { $0.title == "Recent" })?.submenu)
         XCTAssertEqual(recent.items.first?.representedObject as? UUID, entry.id)
         XCTAssertEqual(recent.items.first?.title, "result")
-        XCTAssertTrue(recent.items.last!.title.contains("1 unsaved"))
+        XCTAssertTrue(recent.items.last!.title.contains("1 not saved"))
         hub.clearHistory(); XCTAssertEqual(hub.historyEntries, [entry]); XCTAssertEqual(history.entries, [entry])
         failWrite = false; hub.clearHistory()
         let refreshed = NSMenu(); AppDelegate.addHistoryItems(to: refreshed, history: history, target: nil)

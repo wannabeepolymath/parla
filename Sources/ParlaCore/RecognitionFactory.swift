@@ -54,7 +54,7 @@ public struct RecognitionFactory {
                                       directory: URL = ModelCatalog.directory,
                                       catalog: [ModelCatalog.Model] = ModelCatalog.all,
                                       cache: VerifiedCache? = nil) throws {
-        guard FileManager.default.fileExists(atPath: path) else { throw TranscriberError(description: "Local model unavailable") }
+        guard FileManager.default.fileExists(atPath: path) else { throw TranscriberError(description: "Speech model unavailable") }
         switch policy {
         case .standard:
             if let bad = ModelCatalog.verifyInstalled(path: path) { throw bad }

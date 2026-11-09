@@ -81,35 +81,35 @@ final class AudioImportOwner: ObservableObject {
     }
     func observeSaved(_ store: SettingsStore) {
         guard let saved = try? store.savedRetrySnapshot(), !saved.recognitionConfigurationInvalid, RecognitionRequest(settings: saved).selection.engine != .invalid else {
-            invalidate("Repair saved settings before Start."); observed = nil; return
+            invalidate("Fix settings.json, then try again."); observed = nil; return
         }
         observe(saved)
     }
     func observe(_ settings: Settings) {
         savedImports?.observe(settings)
         guard !settings.recognitionConfigurationInvalid, RecognitionRequest(settings: settings).selection.engine != .invalid else {
-            invalidate("Repair saved recognition settings before Start."); observed = nil; return
+            invalidate("Choose a speech engine in General, then try again."); observed = nil; return
         }
         let current = Configuration(settings)
-        if let observed, observed != current { invalidate("Recognition settings changed. Choose the file again.") }
-        if let job, job.configuration != current { invalidate("Recognition settings changed. Choose the file again.") }
+        if let observed, observed != current { invalidate("Speech settings changed. Choose the file again.") }
+        if let job, job.configuration != current { invalidate("Speech settings changed. Choose the file again.") }
         observed = current
     }
     func select(_ url: URL) {
-        guard !busy else { message = "Previous import is still stopping or running."; return }
+        guard !busy else { message = "Wait for the current import to finish."; return }
         invalidate(nil)
-        do { source = try FileImportSource(url: url, access: sourceAccess); message = "Selected. Start reads this file and runs the saved global recognition settings." }
+        do { source = try FileImportSource(url: url, access: sourceAccess); message = "Ready to transcribe." }
         catch { message = Self.failure(error) }
     }
     func start(settings: Settings, selectionEpoch: UUID, preparationEpoch: UUID?, diagnostics: DiagnosticStore, mode: Mode = .raw) -> Job? {
-        guard !busy, let source else { message = "Choose one WAV or restricted MOV before Start."; return nil }
+        guard !busy, let source else { message = "Choose a WAV or MOV file first."; return nil }
         guard mode != .experimentalTimed || source.format == .wav else {
-            message = "Experimental timing requires an original mono 16 kHz PCM WAV. Use Start for raw MOV transcription."
+            message = "Timestamps need a 16 kHz mono WAV. Use Transcribe for this file."
             return nil // Keep the untouched selection available for explicit raw Start.
         }
         let job = Job(source: source, settings: settings, selectionEpoch: selectionEpoch, preparationEpoch: preparationEpoch, diagnostics: diagnostics, mode: mode)
         self.source = nil; self.job = job; review = nil; busy = true
-        message = "Import queued. Cancellation waits for the active reader or recognizer to exit."
+        message = "Transcribing…"
         return job
     }
     func complete(_ job: Job, result: Result<Completed, Error>) {
@@ -125,8 +125,8 @@ final class AudioImportOwner: ObservableObject {
                     && completed.segments?.sourceSampleCount == completed.sourceInfo.sourceFrames ? completed.segments : nil
                 self.review = Review(job: job, entry: HistoryEntry(id: job.resultID, date: completedAt, raw: completed.raw, metrics: metrics), sourceInfo: completed.sourceInfo, segments: timing)
                 self.message = job.mode == .experimentalTimed && timing == nil
-                    ? "Raw transcript ready. Native timing is unavailable; Copy and text Save remain available. No timing repair was run."
-                    : "Raw transcript ready for review. Nothing has been copied or saved."
+                    ? "Transcript ready. Timestamps aren’t available for this file."
+                    : "Transcript ready."
             case .failure(let error): self.message = Self.failure(error)
             }
         }
@@ -135,7 +135,7 @@ final class AudioImportOwner: ObservableObject {
         guard !busy, let selected = source else { return nil }
         source = nil; invalidate(nil); return selected
     }
-    func invalidate(_ message: String? = "Import discarded. Choose a file for a fresh job.") {
+    func invalidate(_ message: String? = "Discarded.") {
         savedImports?.invalidate(message)
         let previous = job
         review = nil; source?.cancel(); source = nil
@@ -146,23 +146,23 @@ final class AudioImportOwner: ObservableObject {
     func preparationChanged(_ epoch: UUID?) {
         savedImports?.preparationChanged(epoch)
         if let job, job.configuration.request.selection.engine == .whisper, job.preparationEpoch != epoch {
-            invalidate("Preparation authority changed. Choose the file again.")
+            invalidate("Speech settings changed. Choose the file again.")
         }
     }
     /// Existing probes only, before the interpreter rejects stale operations.
     func observe(_ event: DictationSession.Event) {
         switch event {
         case .focusSampled(_, .secure), .cleanReady(_, _, _, _, .secure, _), .resultUnavailable(_, .secure):
-            invalidate("Import discarded after secure-input evidence.")
+            invalidate("Import canceled because a password field was active.")
         case .transcribed(_, _, let probe) where probe.focus == .secure:
-            invalidate("Import discarded after secure-input evidence.")
+            invalidate("Import canceled because a password field was active.")
         case .transformReady(_, _, let probe, _, _) where probe.focus == .secure:
-            invalidate("Import discarded after secure-input evidence.")
+            invalidate("Import canceled because a password field was active.")
         default: break
         }
     }
     func boundaryIsSafe() -> Bool {
-        if security() { invalidate("Import discarded after secure-input evidence."); return false }
+        if security() { invalidate("Import canceled because a password field was active."); return false }
         return true
     }
     func copy(using write: (String) -> Void) {
@@ -170,22 +170,22 @@ final class AudioImportOwner: ObservableObject {
     }
     func save(settings: Settings, history: HistoryStore) {
         guard var review, review.job.current, !review.saved else { return }
-        guard settings.historyEnabled else { message = "History is off. Enable it and explicitly Save this current result."; return }
+        guard settings.historyEnabled else { message = "History is off. Turn it on to save."; return }
         guard history.reload(countLimit: settings.historyTextCount), !history.loadBlocked else {
-            review.saveFailed = true; self.review = review; message = "Retry Load history, then Retry Save this same result."; return
+            review.saveFailed = true; self.review = review; message = "History couldn’t load. Try again from History."; return
         }
         review.saved = history.appendReviewed(review.entry); review.saveFailed = !review.saved
         self.review = review
-        message = review.saved ? "Raw transcript saved." : "Couldn’t save. Retry Save stores this same result without recognition."
+        message = review.saved ? "Saved to history." : "Couldn’t save to history. Try again."
     }
     static func failure(_ error: Error) -> String {
         if let error = error as? ImportedAudio.Failure { return error.message }
         if let error = error as? ImportedWAV.Failure { return error.message }
         if let error = error as? ImportedPCMMOV.Failure {
             switch error {
-            case .canceled: return "Import canceled. Choose the file again to retry."
-            case .encodedLimit, .duration: return "Restricted MOV must be 0.4–600 seconds and the whole file must fit within 20 MiB."
-            default: return "Use a qtPCM16kV1 MOV with one video track and mono 16 kHz signed 16-bit little-endian PCM. Convert AAC, MP4 and other MOV variants outside Parla."
+            case .canceled: return "Import canceled."
+            case .encodedLimit, .duration: return "MOV files must be under 10 minutes and 20 MB."
+            default: return "This MOV’s audio format isn’t supported. Convert it to a WAV first."
             }
         }
         if let error = error as? FileImportSource.Failure { return error.message }
@@ -194,7 +194,7 @@ final class AudioImportOwner: ObservableObject {
         if let error = error as? AppleSpeechRefusal { return error.message }
         // RecordingStore.Failure is used by the shared batch, never raw OS errors.
         if let error = error as? RecordingStore.Failure { return error.message }
-        return "Import could not finish. Choose the file again to retry."
+        return "Couldn’t finish. Choose the file again to retry."
     }
     deinit { if let observer { NotificationCenter.default.removeObserver(observer) }; source?.cancel(); job?.revoke() }
 }
@@ -207,7 +207,7 @@ final class AudioImportOwner: ObservableObject {
     }
     nonisolated static func validateSource(_ info: ImportedAudio.SourceFacts, mode: AudioImportOwner.Mode) throws {
         guard mode != .experimentalTimed || (info.profile == .wavPCM && info.origin == .strictPCM16k) else {
-            throw RecordingStore.Failure("Experimental timing requires an original mono 16 kHz PCM WAV. Converted input was not sent to recognition.")
+            throw RecordingStore.Failure("Timestamps need a 16 kHz mono WAV. Use Transcribe for this file.")
         }
     }
     static func enqueue(previous: Task<Void, Never>?, admission: LocalCleanupAdmission,
@@ -223,7 +223,7 @@ final class AudioImportOwner: ObservableObject {
             let result: Result<AudioImportOwner.Completed, Error>
             do {
                 guard job.mode != .experimentalTimed || job.source.format == .wav else {
-                    throw RecordingStore.Failure("Experimental timing requires an original mono 16 kHz PCM WAV. MOV was not decoded.")
+                    throw RecordingStore.Failure("Timestamps need a 16 kHz mono WAV. Use Transcribe for this file.")
                 }
                 var sourceInfo: ImportedAudio.SourceFacts?
                 let recognition = try await FileRecognitionBatch.runResult(request: job.configuration.request, operation: job.operation,

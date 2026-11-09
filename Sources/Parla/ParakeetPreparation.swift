@@ -53,12 +53,18 @@ struct ParakeetSnapshot: Equatable {
     var message: String {
         if let refusal { return refusal.message }
         switch phase {
-        case .ready: return "Prepared for a fresh local helper per pass; no model is resident."
-        case .installed: return "Parakeet installed, not prepared. Installation does not change selection."
-        case .downloading: return "Downloading pinned files. Retry keeps completed files and re-fetches the interrupted file."
-        case .loadChecking: return "Checking local load and cleanup with empty PCM; waiting for helper and all IO."
-        case .stopping: return "Stopping Parakeet; actual worker and IO remain owned."
-        default: return "Parakeet: " + phase.rawValue
+        case .ready: return "Parakeet is ready."
+        case .installed: return "Parakeet is installed. Click Prepare to finish setup."
+        case .downloading: return "Downloading Parakeet…"
+        case .loadChecking: return "Preparing Parakeet…"
+        case .stopping: return "Stopping…"
+        case .blocked: return "Parakeet isn’t available."
+        case .absent: return "Parakeet isn’t installed."
+        case .waiting: return "Waiting…"
+        case .verifying, .committing: return "Installing Parakeet…"
+        case .interrupted: return "Parakeet setup was interrupted. Click Retry."
+        case .failed: return "Parakeet setup failed. Click Retry."
+        case .deleting: return "Deleting Parakeet…"
         }
     }
 }

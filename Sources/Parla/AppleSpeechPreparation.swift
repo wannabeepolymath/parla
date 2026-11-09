@@ -9,7 +9,17 @@ struct AppleSpeechSnapshot: Equatable {
     var progress: AppleSpeechProgress?
     var refusal: AppleSpeechRefusal?
     var token = UUID()
-    var message: String { refusal?.message ?? (phase == .ready ? "Apple Speech assets ready. Recognition rechecks installed state at use." : "Apple Speech: " + phase.rawValue) }
+    var message: String {
+        if let refusal { return refusal.message }
+        switch phase {
+        case .idle: return "Apple Speech: language not set up yet."
+        case .checking, .waiting: return "Checking Apple Speech…"
+        case .reserving, .downloading, .verifying: return "Setting up the language…"
+        case .ready: return "Apple Speech is ready."
+        case .stopping: return "Stopping…"
+        case .unavailable: return "Apple Speech isn’t available on this Mac."
+        }
+    }
 }
 /// One app-only preparation and lease owner. Init/render never performs IO or native queries.
 @MainActor final class AppleSpeechPreparation: ObservableObject {

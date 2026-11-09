@@ -145,7 +145,7 @@ extension AppDelegate {
             }
             // The reducer has revoked both delivery and the native mirror already.
             if let ownership = operationAudio.removeValue(forKey: operation.id), !recordings.discard(ownership) {
-                send(.operationDisposalFailed(operation, message: recordings.lastError ?? "Audio disposal failed"))
+                send(.operationDisposalFailed(operation, message: recordings.lastError ?? "Couldn’t delete the recording"))
             }
             operation.requestAbort()
 
@@ -252,7 +252,7 @@ extension AppDelegate {
                     }
                 } catch {
                     guard !s.operation.shouldAbort else { return }
-                    let message = (error as? ParakeetInstallationRefusal)?.message ?? (error as? AppleSpeechRefusal)?.message ?? (error as? PreparationRefusal)?.description ?? "Local model unavailable — check the selected model"
+                    let message = (error as? ParakeetInstallationRefusal)?.message ?? (error as? AppleSpeechRefusal)?.message ?? (error as? PreparationRefusal)?.description ?? "Speech model unavailable — check General"
                     self.recognitionErrors[s.gen] = message
                     await MainActor.run {
                         if s.recognition.selection.engine == .whisper { self.nativePreparation.refresh() }
@@ -267,7 +267,7 @@ extension AppDelegate {
         case let .transcribeFinal(s, ledger):
             admitLocalCleanup(s)
             if MainActor.assumeIsolated({ localCleanupAdmission.hasOrdinaryFailover }), s.gen == session.gen {
-                hud.show(.notice("Recording saved for processing. Waiting for prior cleanup to stop; you can discard it."))
+                hud.show(.notice("Recording saved. It'll be processed when the last dictation finishes."))
             }
             let samples = takeCaptured()
             processTask = executionDispatcher.enqueue(.ordinary(s, samples: samples, ledger: ledger), previous: processTask,
@@ -322,7 +322,7 @@ extension AppDelegate {
                 insertionFailure = nil
             } else {
                 insertionFailure = (historyEnabled ?? store.load().historyEnabled)
-                    ? "Paste failed — copy the transcript from History" : "Paste failed"
+                    ? "Couldn’t paste — copy it from History" : "Paste failed"
             }
 
         case let .eraseTypedIfOurs(expect):
@@ -474,7 +474,7 @@ extension AppDelegate {
             let proceed = await MainActor.run { () -> Bool in
                 guard !s.operation.shouldAbort else {
                     if let ownership, !recordings.discard(ownership) {
-                        self.send(.operationDisposalFailed(s.operation, message: recordings.lastError ?? "Audio disposal failed"))
+                        self.send(.operationDisposalFailed(s.operation, message: recordings.lastError ?? "Couldn’t delete the recording"))
                     }
                     return false
                 }
@@ -499,14 +499,14 @@ extension AppDelegate {
                         self.hubModel.observedRecognition = (handle.request.selection, handle.client.capabilities)
                     }
                 } catch {
-                    recognitionErrors[s.gen] = (error as? PreparationRefusal)?.description ?? "Local model unavailable — check the selected model"
+                    recognitionErrors[s.gen] = (error as? PreparationRefusal)?.description ?? "Speech model unavailable — check General"
                 }
             }
             guard let handle = recognitionHandles[s.gen] else {
                 NSLog("Parla: requested local model unavailable")
                 await MainActor.run {
                     guard !s.operation.shouldAbort else { return }
-                    self.send(.legUnavailable(s, message: self.recognitionErrors[s.gen] ?? "Local model unavailable"))
+                    self.send(.legUnavailable(s, message: self.recognitionErrors[s.gen] ?? "Speech model unavailable"))
                     // Behind the HUD for the same reason the landing path is behind
                     // the keystrokes. transcript: nil keeps the file (Handy #1332);
                     // the probe is what stops audio captured into a password field
@@ -612,14 +612,14 @@ extension AppDelegate {
         guard !s.operation.shouldAbort else { return }
         guard let handle = recognitionHandles[s.gen] else {
             NSLog("Parla transform: no whisper model loaded")
-            let message = recognitionErrors[s.gen] ?? "No whisper model"
+            let message = recognitionErrors[s.gen] ?? "No speech model — download one in General"
             await MainActor.run { self.send(.legUnavailable(s, message: message)) }
             return
         }
         // No profile can supply a missing global provider or credential.
         guard s.cleanupConfigured else {
             s.operation.diagnostics?.update { $0.providerOutcome = .refused }
-            await MainActor.run { self.send(.legUnavailable(s, message: "Cleanup not configured")) }
+            await MainActor.run { self.send(.legUnavailable(s, message: "Cleanup isn’t set up")) }
             return
         }
         guard let spoken = await DictationProcessing.command(operation: s.operation, handle: handle, samples: samples) else {
@@ -638,7 +638,7 @@ extension AppDelegate {
         }
         guard s.effectiveSettings.cleanupEnabled && s.cleanupConfigured else {
             s.operation.diagnostics?.update { $0.providerOutcome = .refused }
-            await MainActor.run { self.send(.legUnavailable(s, message: "Cleanup off or not configured")) }
+            await MainActor.run { self.send(.legUnavailable(s, message: "Cleanup is off or not set up")) }
             return
         }
         let instruction: String? = await MainActor.run {
@@ -694,14 +694,14 @@ extension AppDelegate {
     /// before queueing work. No Hub button and no ASR/model path.
     func runSelectedPreset() {
         guard !updater.committing, axGranted else {
-            hud.show(.error("Transforms unavailable — check Accessibility or finish updating")); return
+            hud.show(.error("Presets unavailable — check Accessibility access")); return
         }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-            hud.show(.error("Select text in the destination app first")); return
+            hud.show(.error("Select some text first")); return
         }
         _ = store.migrateSelectedCredentials()
         let settings = store.load()
-        guard store.lastError == nil else { hud.show(.error("Repair settings before running a preset")); return }
+        guard store.lastError == nil else { hud.show(.error("Fix settings.json before running a preset")); return }
         let focus = Inserter.focusTarget()
         let app = NSWorkspace.shared.frontmostApplication
         let source = focus == .secure ? nil : Inserter.selectedText()

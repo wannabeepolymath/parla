@@ -144,7 +144,7 @@ final class ShortcutLabelTests: XCTestCase {
         let scratch = try XCTUnwrap(menu.items.first { $0.action == #selector(AppDelegate.openScratchpad) })
         let paste = try XCTUnwrap(menu.items.first { $0.action == #selector(AppDelegate.pasteLastDictation) })
         XCTAssertEqual(scratch.title, "Open Scratchpad    ⌃ ⌘ a")
-        XCTAssertEqual(paste.title, "Paste Last Dictation    ⌃ ⌘ v")
+        XCTAssertEqual(paste.title, "Paste last dictation    ⌃ ⌘ v")
         var settings = store.load()
         settings.hotkeys.openScratchpad = KeyChord(12, [.opt, .cmd])
         settings.hotkeys.pasteLast = KeyChord(16, [.ctrl, .cmd])
@@ -152,7 +152,7 @@ final class ShortcutLabelTests: XCTestCase {
         let bytes = try Data(contentsOf: store.url)
         changeSource(to: [12: "a", 16: "z"])
         XCTAssertEqual(scratch.title, "Open Scratchpad    ⌥ ⌘ a")
-        XCTAssertEqual(paste.title, "Paste Last Dictation    ⌃ ⌘ z")
+        XCTAssertEqual(paste.title, "Paste last dictation    ⌃ ⌘ z")
         XCTAssertEqual(scratch.action, #selector(AppDelegate.openScratchpad))
         XCTAssertEqual(paste.action, #selector(AppDelegate.pasteLastDictation))
         for item in [scratch, paste] {
@@ -163,7 +163,7 @@ final class ShortcutLabelTests: XCTestCase {
         XCTAssertEqual(saves, 0)
         observer.cancel()
         changeSource(to: [:])
-        XCTAssertEqual(paste.title, "Paste Last Dictation    ⌃ ⌘ z") // subscription cleanup
+        XCTAssertEqual(paste.title, "Paste last dictation    ⌃ ⌘ z") // subscription cleanup
     }
 
     func testEmptyHistoryMenuHintRefreshKeepsPasteDisabled() throws {
@@ -174,7 +174,7 @@ final class ShortcutLabelTests: XCTestCase {
         XCTAssertNil(paste.action)
         changeSource(to: [:])
         AppDelegate.refreshShortcutHints(in: menu, bindings: store.load().hotkeys, formatter: labels.formatter)
-        XCTAssertEqual(paste.title, "Paste Last Dictation    ⌃ ⌘ V (physical key 9)")
+        XCTAssertEqual(paste.title, "Paste last dictation    ⌃ ⌘ V (physical key 9)")
         XCTAssertNil(paste.action); XCTAssertEqual(paste.keyEquivalent, "")
     }
 

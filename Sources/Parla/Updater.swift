@@ -64,7 +64,7 @@ final class UpdateController {
     var menuTitle: String? {
         switch state {
         case .idle: return nil
-        case .available(let update) where canInstall(update): return "Install Update \(update.version)"
+        case .available(let update) where canInstall(update): return "Install update \(update.version)"
         case .available(let update), .failed(let update): return "Update available (\(update.version))…"
         case .installing(let percent): return "Updating… \(percent)%"
         case .waiting: return "Waiting for dictation to finish…"
@@ -142,7 +142,7 @@ final class UpdateController {
                 let result = try await installer.install(dmg: dmg, currentVersion: version, at: Self.installURL)
                 installed = true
                 if result == .reopenToFinish {
-                    hud.show(.error("Installed — reopen Parla to finish"))
+                    hud.show(.error("Update installed — reopen Parla to finish"))
                     try? await Task.sleep(nanoseconds: 3_000_000_000) // long enough to read it
                 }
                 if quitPending { completeTermination() } else { NSApp.terminate(nil) }

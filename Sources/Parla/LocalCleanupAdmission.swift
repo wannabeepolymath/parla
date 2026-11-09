@@ -8,7 +8,7 @@ import ParlaCore
     private var operations: [UUID: PendingOperation] = [:]
     private var ordinaryOwner: UUID?
     var ordinaryBusyReason: String? {
-        ordinaryOwner != nil || quitting || restart ? "Prior cleanup is still stopping. New dictations wait for actual exit." : nil
+        ordinaryOwner != nil || quitting || restart ? "Finishing the last dictation…" : nil
     }
     var hasOrdinaryFailover: Bool { ordinaryOwner != nil }
     func admitOrdinaryFailover(_ operation: PendingOperation) -> Bool {

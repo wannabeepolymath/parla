@@ -156,7 +156,7 @@ extension AppDelegate {
                 await MainActor.run {
                     guard epoch == self.hubModel.modelSelectionEpoch else { return }
                     self.nativePreparation.refresh()
-                    self.hud.show(.error((error as? PreparationRefusal)?.description ?? "Local model preparation returned an error."))
+                    self.hud.show(.error((error as? PreparationRefusal)?.description ?? "The speech model couldn’t load."))
                 }
             }
         }, finished: { await MainActor.run { self.nativePreparation.refresh() } })

@@ -34,7 +34,7 @@ extension HubModel {
                     try self.store.save(current)
                     self.adoptModelPath(path)
                     setup()
-                } catch { self.downloadError = "Model installed. Couldn't save selection. Choose Use to retry." }
+                } catch { self.downloadError = "Model downloaded, but couldn't be selected. Click Use." }
             }
         }
         catalogDownloadObserver = owner.$rows.sink { [weak self, weak owner] rows in
@@ -44,7 +44,7 @@ extension HubModel {
             self.downloadProgress = self.downloadingModel.flatMap { rows[$0.id].map { Double($0.percent) / 100 } }
         }
         owner.onStart = { [weak self] in self?.downloadError = nil }
-        owner.onFailure = { [weak self] in self?.downloadError = "Model download failed. Retry or discard the download." }
+        owner.onFailure = { [weak self] in self?.downloadError = "Download failed. Retry or discard it." }
     }
 }
 

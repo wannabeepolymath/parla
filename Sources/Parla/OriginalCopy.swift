@@ -10,9 +10,9 @@ enum OriginalCopyStatus: Equatable {
     var token: UUID? { if case .postedUnverified(let id) = self { return id }; return nil }
     var message: String {
         switch self {
-        case .disabled: return "Original copy is off"
-        case .unavailable: return "No fresh Original available"
-        case .postedUnverified: return "Original available briefly — paste posted, acceptance unverified"
+        case .disabled: return "Turned off"
+        case .unavailable: return "Nothing to copy right now"
+        case .postedUnverified: return "Available for a few seconds"
         }
     }
 }

@@ -108,7 +108,7 @@ final class SavedAudioImportOwner: ObservableObject {
             self.ioTasks[id] = nil; self.ioBusy = !self.ioTasks.isEmpty || !self.outputIO.isEmpty
             self.rows = self.store.rows()
             if let review = self.review, !self.rows.contains(where:{$0.id == review.jobID && !$0.deleting && self.clock() < $0.expires}) {
-                self.invalidate("Saved review expired or became unavailable. Committed bytes await safe deletion.")
+                self.invalidate("This saved file has expired.")
             }
         }
         ioTasks[id] = task
@@ -134,14 +134,14 @@ final class SavedAudioImportOwner: ObservableObject {
     }
     func observe(_ settings: Settings) {
         let value = AudioImportOwner.Configuration(settings)
-        if let observed, observed != value { invalidate("Saved review closed after recognition settings changed.") }
-        if let job, job.authority.configuration != value { invalidate("Saved transcription canceled after settings changed.") }
+        if let observed, observed != value { invalidate("Speech settings changed, so the transcript was closed.") }
+        if let job, job.authority.configuration != value { invalidate("Transcription canceled because settings changed.") }
         observed = value
     }
     func preparationChanged(_ epoch: UUID?) {
         let authority = review?.authority ?? job?.authority ?? opening
         if let authority, authority.configuration.request.selection.engine == .whisper, authority.preparationEpoch != epoch {
-            invalidate("Saved review closed after preparation changed.")
+            invalidate("Speech settings changed, so the transcript was closed.")
         }
     }
     func invalidate(_ text: String? = nil) {
@@ -152,11 +152,11 @@ final class SavedAudioImportOwner: ObservableObject {
     }
     func notice(_ text: String) { message = text }
     func start(source: FileImportSource?, id: UUID? = nil, settings: Settings, epoch: UUID, preparation: UUID?, diagnostics: DiagnosticStore) {
-        guard metadataReadiness == .ready, !closedAdmission, !busy, !ioBusy, source != nil || id != nil else { message = "Wait for saved storage and the previous transcription to finish."; return }
+        guard metadataReadiness == .ready, !closedAdmission, !busy, !ioBusy, source != nil || id != nil else { message = "Wait for the current transcription to finish."; return }
         invalidate()
         let authority = Authority(settings: settings,selectionEpoch:epoch,preparationEpoch:preparation)
         let job = Job(id:id ?? UUID(),source:source,authority:authority,diagnostics:diagnostics)
-        self.job = job; busy = true; message = "Keeping the validated private copy before transcription. Cancel keeps committed files."
+        self.job = job; busy = true; message = "Saving a copy…"
         execution = enqueue(job) { [weak self] result in self?.complete(job,result) }
     }
     private func complete(_ job: Job, _ result: Result<Completed,Error>) {
@@ -167,8 +167,8 @@ final class SavedAudioImportOwner: ObservableObject {
             case .success(let result):
                 review = Review(jobID:job.id,resultID:job.resultID,authority:job.authority,bytes:result.raw,
                     date:result.resultDate, token:result.token,observed:result.observed,accepted:store.failure == nil ? result.accepted : nil)
-                if let error = result.saveFailure ?? store.failure { fail(error); message = "Result not saved. Retry Save result stores this same text. Closing this review loses its unsaved text." }
-                else { message = "Private copy and raw result saved. Copy, export and History Save are explicit." }
+                if let error = result.saveFailure ?? store.failure { fail(error); message = "Transcript not saved. Try again before closing it." }
+                else { message = "File and transcript saved." }
             case .failure(let error): fail(error)
             }
         }
@@ -186,18 +186,18 @@ final class SavedAudioImportOwner: ObservableObject {
         preparationChanged(preparation)
         guard self.review === review, review.authority.authorize(settings),
               rows.contains(where:{$0.id == review.jobID && !$0.deleting}) else {
-            invalidate("Saved review is no longer current. Open it explicitly after checking storage and settings."); return false
+            invalidate("This transcript is out of date. Open it again."); return false
         }
         do {
             if review.accepted == nil, let token = review.token {try store.validateRAMReview(token,now:clock())}
             else {try store.validateReview(review.jobID,resultID:review.resultID,token:review.token,now:clock())}
         }
-        catch { fail(error); invalidate("Saved review cannot be validated. Open it again after storage is available."); return false }
+        catch { fail(error); invalidate("Couldn’t open this transcript. Try again in a moment."); return false }
         return true
     }
     func open(_ id: UUID, settings: Settings, epoch: UUID, preparation: UUID?) {
         invalidate()
-        guard metadataReadiness == .ready, !closedAdmission, !busy, !ioBusy else { message = "Wait for the previous saved action to exit, then Open again."; return }
+        guard metadataReadiness == .ready, !closedAdmission, !busy, !ioBusy else { message = "Wait a moment, then open it again."; return }
         let authority = Authority(settings:settings,selectionEpoch:epoch,preparationEpoch:preparation), store = store, now = clock()
         opening = authority
         perform({ try store.openResult(id,now:now,authorized:{authority.current}) },done:{ [weak self] result in
@@ -207,7 +207,7 @@ final class SavedAudioImportOwner: ObservableObject {
             case .success(let (accepted,bytes)):
                 self.review = Review(jobID:id,resultID:accepted.id,authority:authority,bytes:bytes,date:Date(timeIntervalSince1970:accepted.date),token:nil,observed:accepted.observed,accepted:accepted)
                 if store.failure == nil {self.storageConcern = nil}
-                self.message = "Verified raw review. Opening saved text performs no transcription."
+                self.message = "Saved transcript."
             case .failure(let error): self.fail(error)
             }
         })
@@ -218,23 +218,23 @@ final class SavedAudioImportOwner: ObservableObject {
         perform({ try store.saveResult(token,resultID:review.resultID,bytes:review.bytes,observed:review.observed,now:now,resultDate:review.date,authorized:{ review.authority.current }) },done:{ [weak self] result in
             guard let self, self.review === review, review.authority.current else { return }
             switch result {
-            case .success(let accepted): review.accepted = accepted; if store.failure == nil {self.storageConcern = nil}; self.message = "Raw result saved. No transcription ran."; self.objectWillChange.send()
+            case .success(let accepted): review.accepted = accepted; if store.failure == nil {self.storageConcern = nil}; self.message = "Transcript saved."; self.objectWillChange.send()
             case .failure(let error): self.fail(error)
             }
         })
     }
     func saveHistory(_ review: Review, settings: Settings, history: HistoryStore, currentSettings: @escaping () -> Settings?, authorized: @escaping () -> Bool) {
         guard self.review === review, review.authority.current, review.accepted != nil, !ioBusy, !closedAdmission else { return }
-        guard settings.historyEnabled else { message = "History is off. The retained job is independent of History."; return }
+        guard settings.historyEnabled else { message = "History is off."; return }
         let store = store, now = clock()
         if review.historySaved {
             if review.recordFailed { recordHistorySaved(review,authorized:authorized) }; return
         }
-        guard history.reload(countLimit:settings.historyTextCount), !history.loadBlocked else { review.historyFailed = true; message = "Retry Load history, then Retry Save to History."; return }
+        guard history.reload(countLimit:settings.historyTextCount), !history.loadBlocked else { review.historyFailed = true; message = "History couldn’t load. Try again from History."; return }
         let entry = HistoryEntry(id:review.resultID,date:review.date,raw:review.text)
         if review.associationUnknown {
             guard history.entries.contains(where:{$0.id == entry.id && $0.raw == entry.raw && $0.cleaned == nil && $0.date == entry.date && $0.appName == nil}) else {
-                message = "History status is unknown. This result cannot be appended again; Copy and export remain available."; return
+                message = "Couldn’t tell whether this was saved to history. You can still copy or export it."; return
             }
             review.historySaved = true; recordHistorySaved(review,authorized:authorized); return
         }
@@ -246,13 +246,13 @@ final class SavedAudioImportOwner: ObservableObject {
                 guard let current = currentSettings(), current.historyEnabled, authorized(),
                       history.reload(countLimit:current.historyTextCount), !history.loadBlocked else {
                     review.associationUnknown = true
-                    self.message = "History changed before Save. Check its status explicitly; no append was attempted."; return
+                    self.message = "History changed. Click Check history."; return
                 }
                 review.historySaved = history.appendReviewed(entry) // latch before any suspension
                 review.historyFailed = !review.historySaved
                 if review.historySaved { self.recordHistorySaved(review,authorized:authorized) }
                 else {
-                    self.message = "Couldn’t save to History. Retry Save to History uses this same result."
+                    self.message = "Couldn’t save to history. Try again."
                     self.perform({ try store.association(review.jobID,resultID:review.resultID,state:.notSaved,now:now,authorized:{review.authority.current}) },done:{ [weak self] result in
                         if case .failure(let error) = result { review.associationUnknown = true; self?.fail(error) }
                     })
@@ -267,8 +267,8 @@ final class SavedAudioImportOwner: ObservableObject {
         perform({ try store.association(review.jobID,resultID:review.resultID,state:.saved,now:now,authorized:{ review.authority.current }) },done:{ [weak self] result in
             guard let self, self.review === review else { return }
             switch result {
-            case .success: review.recordFailed = false; review.associationUnknown = false; self.message = "Raw text saved to History."
-            case .failure(let error): self.fail(error); self.message = "History saved; Retry record status. This never appends again."
+            case .success: review.recordFailed = false; review.associationUnknown = false; self.message = "Saved to history."
+            case .failure(let error): self.fail(error); self.message = "Saved to history, but its status couldn’t be recorded. Try again."
             }
             self.objectWillChange.send()
         })
@@ -284,7 +284,7 @@ final class SavedAudioImportOwner: ObservableObject {
             switch result {
             case .failure(let error):
                 self.deletionRequests.remove(id); self.fail(error)
-                self.message = "Delete could not be recorded; private files remain. This request cannot guarantee deletion after a crash."
+                self.message = "Couldn’t delete the saved file. Try again."
                 // Execution remains registered and joins even after the first intent failed.
                 let wait = UUID()
                 self.ioTasks[wait] = Task { @MainActor [weak self] in
@@ -292,7 +292,7 @@ final class SavedAudioImportOwner: ObservableObject {
                     self?.ioTasks[wait] = nil
                 }
             case .success:
-                self.message = "Deleting private files after active readers and transcription exit."
+                self.message = "Deleting…"
                 let waitID = UUID()
                 self.ioTasks[waitID] = Task { @MainActor [weak self] in
                     await execution?.value
@@ -302,7 +302,7 @@ final class SavedAudioImportOwner: ObservableObject {
                     self.perform({ try store.finishDelete(id) },done:{ [weak self] result in
                         self?.deletionRequests.remove(id)
                         switch result {
-                        case .success: if self?.store.failure == nil {self?.storageConcern = nil}; self?.message = "Saved job deleted. Independent History text and exports remain."
+                        case .success: if self?.store.failure == nil {self?.storageConcern = nil}; self?.message = "Deleted. History and exported files aren’t affected."
                         case .failure(let error): self?.fail(error)
                         }
                     })
@@ -325,7 +325,7 @@ final class SavedAudioImportOwner: ObservableObject {
         }
     }
     func reserveRestart() -> Bool {
-        guard !closedAdmission else { return false }; restartReserved = true; closedAdmission = true; invalidate("Saved review closed for restart."); return true
+        guard !closedAdmission else { return false }; restartReserved = true; closedAdmission = true; invalidate("Transcript closed."); return true
     }
     func releaseRestart() { restartReserved = false; if !shutdownReserved { closedAdmission = false } }
     func cancelShutdown() { shutdownReserved = false; if !restartReserved { closedAdmission = false } }
@@ -337,7 +337,7 @@ final class SavedAudioImportOwner: ObservableObject {
     }
     func restartReady() -> Bool { !busy && ioTasks.isEmpty && outputIO.isEmpty && storageConcern == nil && store.failure == nil }
     func beginShutdown(_ reply: @escaping (Bool) -> Void) {
-        shutdownReserved = true; closedAdmission = true; invalidate("Saved review closed for quit.")
+        shutdownReserved = true; closedAdmission = true; invalidate("Transcript closed.")
         Task { @MainActor in await self.drain(); reply(self.restartReady()) }
     }
 }

@@ -24,8 +24,11 @@ extension AppDelegate: NSMenuDelegate {
             let speech = NSMenuItem(title: hubModel.appleSpeechSnapshot.message, action: #selector(openNativePreparation), keyEquivalent: "")
             speech.target = self; speech.toolTip = hubModel.recognitionCapabilityDetail; menu.addItem(speech)
         }
-        let safeStart = NSMenuItem(title: nativePreparation.snapshot.message, action: #selector(openNativePreparation), keyEquivalent: "")
-        safeStart.target = self; menu.addItem(safeStart)
+        // Only worth a line when Safe Start is on or holding something.
+        if nativePreparation.core.isEnabled || nativePreparation.snapshot.status != .off {
+            let safeStart = NSMenuItem(title: nativePreparation.snapshot.message, action: #selector(openNativePreparation), keyEquivalent: "")
+            safeStart.target = self; menu.addItem(safeStart)
+        }
         if nativePreparation.core.isEnabled {
             for action in NativePreparation.Action.allCases {
                 let item = NSMenuItem(title: action.rawValue, action: #selector(NativePreparationMenuActions.invoke(_:)), keyEquivalent: "")
@@ -34,8 +37,9 @@ extension AppDelegate: NSMenuDelegate {
                 menu.addItem(item)
             }
         }
-        if hubModel.settings.usesAppleIntelligence {
-            let local = NSMenuItem(title: "Apple Intelligence: " + (hubModel.localCleanupStatus?.message ?? "eligible; rechecked per request"), action: #selector(openHub), keyEquivalent: "")
+        // Silent when Apple Intelligence is usable; a line only for a problem.
+        if hubModel.settings.usesAppleIntelligence, let status = hubModel.localCleanupStatus, status != .unknown {
+            let local = NSMenuItem(title: "⚠️ " + status.message, action: #selector(openHub), keyEquivalent: "")
             local.target = self; menu.addItem(local)
         }
         Self.addScratchpadItem(to: menu, bindings: store.load().hotkeys,
@@ -67,12 +71,12 @@ extension AppDelegate: NSMenuDelegate {
         }
         if hubModel.settings.recognitionEngine == .whisper && !modelReady && !catalogDownloads.isActive && (hubModel.catalogDownloads[ModelCatalog.default.id] == nil || hubModel.catalogDownloads[ModelCatalog.default.id]?.phase == .installed) {
             let m = ModelCatalog.default
-            let item = NSMenuItem(title: "Download model (\(m.displayName), \(m.sizeLabel))", action: #selector(downloadModel), keyEquivalent: "")
+            let item = NSMenuItem(title: "Download speech model (\(m.displayName), \(m.sizeLabel))", action: #selector(downloadModel), keyEquivalent: "")
             item.target = self; menu.addItem(item); menu.addItem(.separator())
         }
 
         if let error = store.lastError {
-            let item = NSMenuItem(title: "⚠️ settings.json invalid — click to open",
+            let item = NSMenuItem(title: "⚠️ Settings file has an error — open it…",
                                    action: #selector(openSettings), keyEquivalent: "")
             item.target = self
             item.toolTip = error
@@ -93,16 +97,16 @@ extension AppDelegate: NSMenuDelegate {
 
         addMicrophoneItem(to: menu)
 
-        let launch = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        let launch = NSMenuItem(title: "Launch at login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         launch.target = self
         launch.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(launch)
         menu.addItem(.separator())
 
-        let check = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        let check = NSMenuItem(title: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         check.target = self
         menu.addItem(check)
-        let report = NSMenuItem(title: "Report a Bug or Feature…", action: #selector(reportIssue), keyEquivalent: "")
+        let report = NSMenuItem(title: "Send feedback…", action: #selector(reportIssue), keyEquivalent: "")
         report.target = self
         menu.addItem(report)
         menu.addItem(.separator())
@@ -113,8 +117,8 @@ extension AppDelegate: NSMenuDelegate {
     }
 
     static func addOriginalCopy(to menu: NSMenu, status: OriginalCopyStatus, target: OriginalCopyMenuActions, receipt: UUID? = nil) {
-        for (title, action) in [("Undo Last Dictation", #selector(OriginalCopyMenuActions.undoLastDictation(_:))),
-                                ("Restore Raw Text", #selector(OriginalCopyMenuActions.restoreRawText(_:)))] {
+        for (title, action) in [("Undo last dictation", #selector(OriginalCopyMenuActions.undoLastDictation(_:))),
+                                ("Restore original text", #selector(OriginalCopyMenuActions.restoreRawText(_:)))] {
             let item = NSMenuItem(title: title, action: receipt == nil ? nil : action, keyEquivalent: "")
             item.target = target; item.representedObject = receipt; item.isEnabled = receipt != nil
             menu.addItem(item)
@@ -122,7 +126,7 @@ extension AppDelegate: NSMenuDelegate {
         // No permanent grey status row. A legacy explicit Copy opt-out hides
         // that item; guarded edits remain enabled independently of the setting.
         guard status != .disabled else { menu.addItem(.separator()); return }
-        let item = NSMenuItem(title: "Copy Original", action: status.token == nil ? nil : #selector(OriginalCopyMenuActions.copyOriginal(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: "Copy original text", action: status.token == nil ? nil : #selector(OriginalCopyMenuActions.copyOriginal(_:)), keyEquivalent: "")
         item.target = target
         item.representedObject = status.token
         item.isEnabled = status.token != nil
@@ -133,11 +137,11 @@ extension AppDelegate: NSMenuDelegate {
     static func addPendingOperation(to menu: NSMenu, operation: PendingOperation?, target: AnyObject?) {
         guard let operation, !operation.hasExited else { return }
         let stopping = operation.shouldAbort
-        let item = NSMenuItem(title: stopping ? "Discarded — stopping work…"
-            : "Discard pending \(operation.name) (\(operation.stage.rawValue))", action: stopping ? nil : #selector(discardPending(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: stopping ? "Discarding…"
+            : "Discard current dictation", action: stopping ? nil : #selector(discardPending(_:)), keyEquivalent: "")
         item.target = target
         item.representedObject = operation.id
-        item.toolTip = "Drops uncommitted output and its recovery audio. Native/network work may take time to stop. Already dispatched text and saved history cannot be undone."
+        item.toolTip = "Stops this dictation before it’s typed. Text that was already typed stays."
         menu.addItem(item)
         menu.addItem(.separator())
     }
@@ -161,18 +165,18 @@ extension AppDelegate: NSMenuDelegate {
                                 bindings: HotkeyBindings = HotkeyBindings(),
                                 formatter: ShortcutDisplayFormatter = .current()) {
         if history.needsAttention {
-            let warning = NSMenuItem(title: "History needs attention — Open History…",
+            let warning = NSMenuItem(title: "⚠️ History needs attention — open History…",
                                      action: #selector(openHistory), keyEquivalent: "")
             warning.target = target
-            warning.toolTip = history.lastError ?? "Unsaved results: Copy, Retry Save or Discard in History."
+            warning.toolTip = history.lastError
             menu.addItem(warning)
         }
         let entries = history.entries
-        let pasteLast = NSMenuItem(title: "Paste Last Dictation",
+        let pasteLast = NSMenuItem(title: "Paste last dictation",
                                     action: entries.isEmpty ? nil : #selector(pasteLastDictation),
                                     keyEquivalent: "")
         pasteLast.identifier = NSUserInterfaceItemIdentifier("paste-last")
-        applyShortcutHint(to: pasteLast, title: "Paste Last Dictation", chord: bindings.pasteLast, formatter: formatter)
+        applyShortcutHint(to: pasteLast, title: "Paste last dictation", chord: bindings.pasteLast, formatter: formatter)
         pasteLast.target = target
         menu.addItem(pasteLast)
 
@@ -192,10 +196,10 @@ extension AppDelegate: NSMenuDelegate {
                 sub.addItem(item)
             }
             sub.addItem(.separator())
-            let clearTitle = history.pendingEntries.isEmpty ? "Clear Text History"
-                : "Clear Saved + Unsaved Text (\(history.pendingEntries.count) unsaved)"
+            let clearTitle = history.pendingEntries.isEmpty ? "Clear history"
+                : "Clear history (\(history.pendingEntries.count) not saved)"
             let clear = NSMenuItem(title: clearTitle, action: #selector(clearHistory), keyEquivalent: "")
-            clear.toolTip = "Removes text only. Recording files are managed separately."
+            clear.toolTip = "Saved audio isn’t affected."
             clear.target = target
             sub.addItem(clear)
         }
@@ -229,7 +233,7 @@ extension AppDelegate: NSMenuDelegate {
             case "open-scratchpad":
                 applyShortcutHint(to: item, title: "Open Scratchpad", chord: bindings.openScratchpad, formatter: formatter)
             case "paste-last":
-                applyShortcutHint(to: item, title: "Paste Last Dictation", chord: bindings.pasteLast, formatter: formatter)
+                applyShortcutHint(to: item, title: "Paste last dictation", chord: bindings.pasteLast, formatter: formatter)
             default: break
             }
         }
@@ -277,7 +281,7 @@ extension AppDelegate: NSMenuDelegate {
             }
         } catch {
             NSLog("%@", "Parla: launch-at-login toggle failed: \(error)")
-            hud.show(.error("Launch at Login failed"))
+            hud.show(.error("Couldn’t change Launch at login"))
         }
     }
 
@@ -295,7 +299,7 @@ extension AppDelegate: NSMenuDelegate {
         let mic = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
         let sub = NSMenu()
 
-        let def = NSMenuItem(title: "System Default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+        let def = NSMenuItem(title: "System default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
         def.target = self
         def.representedObject = ""
         def.state = selected == nil ? .on : .off
@@ -331,7 +335,7 @@ extension AppDelegate: NSMenuDelegate {
     }
 
     private func permissionItem(name: String, pane: String) -> NSMenuItem {
-        let item = NSMenuItem(title: "⚠️ \(name): not granted — click to open settings",
+        let item = NSMenuItem(title: "⚠️ Allow \(name) access…",
                                action: #selector(openPrivacyPane(_:)), keyEquivalent: "")
         item.target = self
         item.representedObject = pane
@@ -342,7 +346,7 @@ extension AppDelegate: NSMenuDelegate {
 extension AppDelegate {
     static func addClipboardRestoreStatus(to menu: NSMenu, failed: Bool) {
         guard failed else { return }
-        let item = NSMenuItem(title: "Clipboard restore unresolved — original retained; restart blocked", action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: "⚠️ Couldn’t restore your clipboard — Parla is keeping a copy", action: nil, keyEquivalent: "")
         item.isEnabled = false; menu.addItem(item)
     }
 }

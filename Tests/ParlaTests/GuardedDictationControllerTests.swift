@@ -92,7 +92,7 @@ final class GuardedDictationControllerTests: XCTestCase {
         var invoked: [(GuardedDictationEdits<Inserter.FieldIdentity>.Action, UUID)] = []
         actions.edit = { invoked.append(($0, $1)) }
         AppDelegate.addOriginalCopy(to: menu, status: .unavailable, target: actions, receipt: receipt)
-        XCTAssertEqual(menu.items.prefix(3).map(\.title), ["Undo Last Dictation", "Restore Raw Text", "Copy Original"])
+        XCTAssertEqual(menu.items.prefix(3).map(\.title), ["Undo last dictation", "Restore original text", "Copy original text"])
         XCTAssertTrue(menu.items[0].isEnabled); XCTAssertTrue(menu.items[1].isEnabled)
         XCTAssertFalse(menu.items[2].isEnabled)
         actions.undoLastDictation(menu.items[0]); actions.restoreRawText(menu.items[1])
@@ -102,6 +102,6 @@ final class GuardedDictationControllerTests: XCTestCase {
         AppDelegate.addOriginalCopy(to: menu, status: .disabled, target: actions)
         XCTAssertEqual(menu.items.count, 3) // two disabled actions and separator
         XCTAssertTrue(menu.items.prefix(2).allSatisfy { !$0.isEnabled && $0.action == nil })
-        XCTAssertFalse(menu.items.contains { $0.title == "Original copy is off" || $0.title == "Copy Original" })
+        XCTAssertFalse(menu.items.contains { $0.title == "Turned off" || $0.title == "Copy original text" })
     }
 }

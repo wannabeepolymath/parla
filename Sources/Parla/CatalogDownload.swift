@@ -3,7 +3,7 @@ import Foundation
 import ParlaCore
 
 struct CatalogDownloadRow: Equatable {
-    enum Phase: String { case downloading = "Downloading", pausing = "Pausing", verifying = "Verifying", installing = "Installing", paused = "Paused", failed = "Retry", installed = "Verified" }
+    enum Phase: String { case downloading = "Downloading", pausing = "Pausing", verifying = "Verifying", installing = "Installing", paused = "Paused", failed = "Download failed", installed = "Downloaded" }
     var phase: Phase
     var percent: Int = 0
     var active: Bool { [.downloading, .pausing, .verifying, .installing].contains(phase) }

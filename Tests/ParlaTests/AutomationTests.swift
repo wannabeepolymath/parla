@@ -766,8 +766,8 @@ extension AutomationTests {
             XCTAssertEqual(rig.entries, failure == .busy || failure == .unavailable ? 1 : 0)
             if failure == .busy { rig.send(.cancelRequested(silent: true)) }
         }
-        XCTAssertEqual(AutomationIntentError.invalidSession.errorDescription, "Parla automation: invalid session.")
-        XCTAssertEqual(AutomationIntentError.refused(.secure).errorDescription, "Parla automation: secure.")
+        XCTAssertEqual(AutomationIntentError.invalidSession.errorDescription, "This Parla session isn’t valid. Start a new dictation.")
+        XCTAssertEqual(AutomationIntentError.refused(.secure).errorDescription, "Parla can’t dictate while a password field is active.")
     }
     @MainActor func testNativeAbsentAndLateHostReadinessAndActiveWaitingJoin() async throws {
         for late in [false, true] {

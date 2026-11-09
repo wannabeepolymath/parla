@@ -45,7 +45,7 @@ private final class ScratchpadChoice: NSObject {
         let controls = NSStackView(views: [checkbox, button])
         controls.orientation = .vertical; controls.alignment = .leading; controls.spacing = 5
         status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
-        let disclosure = NSTextField(wrappingLabelWithString: "Scratchpad text, including these edits, is saved locally to Application Support/Parla/scratchpad.txt. Exact casing/Unicode only; short words and phrases excluded. Other apps unsupported. Choose a spelling to change one word; no automatic repair.")
+        let disclosure = NSTextField(wrappingLabelWithString: "Scratchpad text is saved on this Mac. Click a word to choose a spelling from your dictionary.")
         disclosure.font = .systemFont(ofSize: 11); disclosure.textColor = .secondaryLabelColor
         let container = NSView()
         for view in [controls, status, scroll, disclosure] {
@@ -89,9 +89,9 @@ private final class ScratchpadChoice: NSObject {
     @objc private func toggle(_ sender: NSButton) { owner?.setDictionarySpellingEnabled(sender.state == .on) }
     func present(_ request: ScratchpadController.Request) {
         guard owner?.request?.id == request.id else { return }
-        let picker = NSMenu(title: "Saved dictionary spelling")
+        let picker = NSMenu(title: "Dictionary spelling")
         picker.autoenablesItems = false
-        let label = NSMenuItem(title: request.more ? "Saved dictionary spelling — first 5 shown" : "Saved dictionary spelling — choose explicitly", action: nil, keyEquivalent: "")
+        let label = NSMenuItem(title: request.more ? "Dictionary spellings (first 5)" : "Dictionary spellings", action: nil, keyEquivalent: "")
         label.isEnabled = false; picker.addItem(label)
         for (index, candidate) in request.candidates.enumerated() {
             let item = NSMenuItem(title: "\(candidate.literal)  (\(index + 1))", action: #selector(choose(_:)), keyEquivalent: "")

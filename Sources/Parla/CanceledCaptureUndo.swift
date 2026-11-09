@@ -370,9 +370,9 @@ final class CanceledCaptureHUDActions: NSObject {
     func bind(_ button: CanceledCaptureButton, action: Action, token: UUID?) {
         button.captureToken = token; button.target = self
         switch action {
-        case .undo: button.action = #selector(undo(_:)); button.setAccessibilityLabel("Undo capture cancellation")
-        case .copy: button.action = #selector(copy(_:)); button.setAccessibilityLabel("Copy canceled capture transcript")
-        case .discard: button.action = #selector(discard(_:)); button.setAccessibilityLabel("Discard canceled capture")
+        case .undo: button.action = #selector(undo(_:)); button.setAccessibilityLabel("Undo canceled dictation")
+        case .copy: button.action = #selector(copy(_:)); button.setAccessibilityLabel("Copy canceled dictation text")
+        case .discard: button.action = #selector(discard(_:)); button.setAccessibilityLabel("Discard canceled dictation")
         }
     }
     @objc func undo(_ sender: CanceledCaptureButton) { if let token = sender.captureToken { controller.undo(token: token) } }

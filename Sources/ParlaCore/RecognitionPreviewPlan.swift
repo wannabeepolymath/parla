@@ -50,13 +50,13 @@ public enum RecognitionPreviewStatus: String, Codable, Sendable {
     case loading, ready, empty, unavailable, ineligibleFinal, languageUnavailable, limitReached
     public var message: String {
         switch self {
-        case .loading: return "Preparing speculative preview…"
-        case .ready: return "Speculative preview · listening…"
-        case .empty: return "Preview unavailable · no draft"
-        case .unavailable: return "Preview unavailable · final unchanged"
-        case .ineligibleFinal: return "Preview needs an installed catalog Whisper final"
-        case .languageUnavailable: return "English-only preview unavailable for this language"
-        case .limitReached: return "Preview limit reached · final unchanged"
+        case .loading: return "Listening…"
+        case .ready: return "Listening…"
+        case .empty: return "Listening…"
+        case .unavailable: return "Listening… (no preview)"
+        case .ineligibleFinal: return "Listening… (preview needs a Whisper model)"
+        case .languageUnavailable: return "Listening… (no preview for this language)"
+        case .limitReached: return "Listening… (preview paused)"
         }
     }
 }

@@ -104,7 +104,7 @@ enum ScratchpadSpellingPolicy {
     }
 
     static func token(_ units: [UInt16], selection: NSRange) throws -> Token {
-        func refuse() -> Refusal { Refusal(message: "Move inside a word or select one whole word (3–64 characters).") }
+        func refuse() -> Refusal { Refusal(message: "Click into a word or select one whole word.") }
         guard snapshotFitsBudget(units.count), !units.isEmpty, fits(selection, in: units.count), validUTF16(units) else { throw refuse() }
         // Raw validation precedes bridging; no replacement-character repair is accepted.
         let text = String(decoding: units, as: UTF16.self) as NSString
@@ -163,11 +163,11 @@ enum ScratchpadSpellingPolicy {
     }
 
     static func candidates(original: [UInt16], words: [String], now: () -> Double) throws -> Choices {
-        guard words.count <= rows else { throw Refusal(message: "Dictionary spelling limit: more than 10,000 saved rows.") }
+        guard words.count <= rows else { throw Refusal(message: "Your dictionary is too large for spelling suggestions.") }
         let started = now()
         func checkTime() throws {
             let current = now()
-            guard current.isFinite, current >= started, current - started < workSeconds else { throw Refusal(message: "Dictionary spelling work budget exceeded. Try a smaller saved dictionary.") }
+            guard current.isFinite, current >= started, current - started < workSeconds else { throw Refusal(message: "Your dictionary is too large for spelling suggestions.") }
         }
         let input = String(decoding: original, as: UTF16.self)
         let match = key(input)
@@ -177,7 +177,7 @@ enum ScratchpadSpellingPolicy {
             try checkTime()
             let prefix = Array(word.utf8.prefix(tokenBytes + 1))
             bytes += prefix.count
-            guard bytes <= rows * (tokenBytes + 1) else { throw Refusal(message: "Dictionary spelling scan limit exceeded.") }
+            guard bytes <= rows * (tokenBytes + 1) else { throw Refusal(message: "Your dictionary is too large for spelling suggestions.") }
             guard prefix.count <= tokenBytes else { continue }
             guard admitted(word) else { continue }
             let matching = key(word)

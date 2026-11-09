@@ -29,9 +29,9 @@ final class HUD: @unchecked Sendable {
             button.frame = NSRect(x: index == 2 ? 300 : 16, y: 10, width: 100, height: 30)
             pill.addSubview(button)
         }
-        undoButton.setAccessibilityLabel("Undo capture cancellation")
-        copyButton.setAccessibilityLabel("Copy canceled capture transcript")
-        discardButton.setAccessibilityLabel("Discard canceled capture")
+        undoButton.setAccessibilityLabel("Undo canceled dictation")
+        copyButton.setAccessibilityLabel("Copy canceled dictation text")
+        discardButton.setAccessibilityLabel("Discard canceled dictation")
     }
     private func clearCanceledCaptureUI(notify: Bool) {
         let hadOwner = canceledCaptureView != .empty
@@ -67,10 +67,10 @@ final class HUD: @unchecked Sendable {
         pill.frame = NSRect(x: 12, y: 12, width: 420, height: isPreview ? 220 : 88)
         label.frame = NSRect(x: 16, y: isPreview ? 188 : 56, width: 388, height: 20)
         switch state {
-        case .offer: label.stringValue = "Capture canceled"; undoButton.isHidden = false
-        case .processing: label.stringValue = "Preparing preview…"
+        case .offer: label.stringValue = "Dictation canceled"; undoButton.isHidden = false
+        case .processing: label.stringValue = "Transcribing…"
         case .preview(_, let text):
-            label.stringValue = "Canceled capture"
+            label.stringValue = "Canceled dictation"
             canceledPreview.stringValue = text; canceledPreview.isHidden = false
             canceledPreview.frame = NSRect(x: 16, y: 48, width: 388, height: 128)
             copyButton.isHidden = false
@@ -353,7 +353,7 @@ final class HUD: @unchecked Sendable {
             waveform.isHidden = true
             switch update {
             case .draft(let text, let englishOnly):
-                label.stringValue = (englishOnly ? "Draft · English only · " : "Draft · ") + text
+                label.stringValue = text
                 label.lineBreakMode = .byTruncatingHead
             case .status(let status): label.stringValue = status.message
             }
@@ -389,13 +389,13 @@ final class HUD: @unchecked Sendable {
         case .cleanedInHistory:
             dot.isHidden = true
             waveform.isHidden = true
-            label.stringValue = "✓ cleaned in history"
+            label.stringValue = "✓ Cleaned up in history"
             panel.orderFrontRegardless()
             scheduleHide()
         case .rawFallback(let reason):
             dot.isHidden = true
             waveform.isHidden = true
-            label.stringValue = "✓ raw (\(reason))"
+            label.stringValue = "✓ Pasted without cleanup (\(reason))"
             panel.orderFrontRegardless()
             scheduleHide()
         case .cancelled:

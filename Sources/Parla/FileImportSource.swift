@@ -9,10 +9,10 @@ final class FileImportSource: @unchecked Sendable {
         case unavailable, unsafe, changed, read
         var message: String {
             switch self {
-            case .unavailable: return "Choose a readable, locally resident WAV or restricted MOV file."
-            case .unsafe: return "Use a regular local WAV or restricted MOV without links, aliases or cloud placeholders."
-            case .changed: return "The selected file changed. Choose it again before Start."
-            case .read: return "The complete file could not be read. Choose it again to retry."
+            case .unavailable: return "Choose a WAV or MOV file on this Mac."
+            case .unsafe: return "Choose a file stored on this Mac, not an alias or iCloud placeholder."
+            case .changed: return "The file changed. Choose it again."
+            case .read: return "Couldn’t read the whole file. Choose it again."
             }
         }
     }

@@ -129,7 +129,7 @@ final class OriginalCopyTests: XCTestCase {
             rig.transcribe(rig.start(), raw, singleLine: true)
             XCTAssertEqual(rig.texts, [expected]); XCTAssertEqual(rig.corrections, [expected])
             XCTAssertTrue(rig.history.isEmpty); XCTAssertEqual(rig.results, [.text(expected, .final)])
-            XCTAssertEqual(rig.controller.status.message, "Original available briefly — paste posted, acceptance unverified")
+            XCTAssertEqual(rig.controller.status.message, "Available for a few seconds")
             XCTAssertTrue(rig.copies.isEmpty); XCTAssertTrue(rig.copy()); XCTAssertEqual(rig.copies, [raw])
             XCTAssertFalse(rig.controller.status.message.contains(raw))
         }
@@ -327,7 +327,7 @@ final class OriginalCopyTests: XCTestCase {
         let rig = OriginalCopyRig(); rig.land("menu secret canary")
         let actions = OriginalCopyMenuActions(controller: rig.controller); let menu = NSMenu()
         AppDelegate.addOriginalCopy(to: menu, status: rig.controller.refresh(), target: actions)
-        let item = try XCTUnwrap(menu.items.first(where: { $0.title == "Copy Original" }))
+        let item = try XCTUnwrap(menu.items.first(where: { $0.title == "Copy original text" }))
         XCTAssertTrue(item.isEnabled); XCTAssertEqual(item.keyEquivalent, ""); XCTAssertNil(item.toolTip)
         XCTAssertEqual(item.action, #selector(OriginalCopyMenuActions.copyOriginal(_:)))
         XCTAssertTrue(menu.items.allSatisfy { !$0.title.contains("secret canary") && $0.toolTip == nil })
@@ -338,7 +338,7 @@ final class OriginalCopyTests: XCTestCase {
         XCTAssertEqual(rig.copies.count, 1); XCTAssertEqual(rig.texts.count, textCount)
         XCTAssertEqual(rig.corrections.count, correctionCount); XCTAssertEqual(rig.effects.count, effectCount)
         menu.removeAllItems(); AppDelegate.addOriginalCopy(to: menu, status: rig.controller.refresh(), target: actions)
-        let unavailable = try XCTUnwrap(menu.items.first { $0.title == "Copy Original" })
+        let unavailable = try XCTUnwrap(menu.items.first { $0.title == "Copy original text" })
         XCTAssertFalse(unavailable.isEnabled); XCTAssertNil(unavailable.action)
     }
 }

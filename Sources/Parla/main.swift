@@ -157,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func cleanupFailoverIntent(_ store: SettingsStore) { store.revokeCleanupFailover(); store.revokeSurroundingTextContext() }
 
     static func guidedQuitIntent(_ templates: GuidedTemplateOwner, imports: AudioImportOwner) {
-        templates.cancel("Form canceled."); imports.invalidate("Import discarded for quit.")
+        templates.cancel("Form canceled."); imports.invalidate("Import canceled.")
     }
 
     lazy var history = HistoryStore(settings: store)
@@ -216,9 +216,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 CorrectionWatcher.shared.disarm()
                 switch self.guardedEdits.perform(action, token: token) {
-                case .replaced: self.hud.show(.notice(action == .undo ? "Last dictation undone" : "Raw text restored"))
+                case .replaced: self.hud.show(.notice(action == .undo ? "Last dictation undone" : "Original text restored"))
                 case .refused: self.hud.show(.notice(GuardedDictationEdits<Inserter.FieldIdentity>.refusalMessage))
-                case .unverified: self.hud.show(.notice("Couldn’t verify the edit — use Copy Original"))
+                case .unverified: self.hud.show(.notice("Couldn’t check the edit — use Copy original text"))
                 }
             }
         }
@@ -338,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return recognitionFactory
     }
     lazy var nativePreparationMenu = NativePreparationMenuActions { [weak self] action, token in
-        self?.templates.cancel("Form canceled."); self?.audioImport.invalidate("Preparation action changed import authority.")
+        self?.templates.cancel("Form canceled."); self?.audioImport.invalidate("Speech settings changed. Choose the file again.")
         MainActor.assumeIsolated { self?.meetingHub.revokePreparation(.whisper) }
         self?.nativePreparation.act(action, token: token)
     }
@@ -445,7 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }, secure: { [weak self] in
             let secure = Self.automationSecureEvidence()
-            if secure { self?.templates.cancel("Form canceled because a password field was active."); self?.audioImport.invalidate("Import discarded after secure-input evidence.") }
+            if secure { self?.templates.cancel("Form canceled because a password field was active."); self?.audioImport.invalidate("Import canceled because a password field was active.") }
             return secure
         },
         keyboardAllowed: { [weak self] in self.map { !$0.updater.committing && $0.axGranted } ?? false },
@@ -540,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.preparationSelectionEpoch = epoch; self?.nativePreparation.changedSelection(epoch, request: request)
         }
         m.onPreparationAction = { [weak self] action, token in
-            self?.templates.cancel("Form canceled."); self?.audioImport.invalidate("Preparation action changed import authority.")
+            self?.templates.cancel("Form canceled."); self?.audioImport.invalidate("Speech settings changed. Choose the file again.")
             MainActor.assumeIsolated { self?.meetingHub.revokePreparation(.whisper) }
         self?.nativePreparation.act(action, token: token)
         }
@@ -713,9 +713,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reply: { NSApp.reply(toApplicationShouldTerminate: $0) },
         failure: { [weak self] in
             self?.canceledCaptureUndo.quitCanceled()
-            let message = self?.savedImports.shutdownRefusal.map { "Quit canceled: " + $0 } ?? (self?.nativePreparation.core.persistenceFailed == true
-                ? "Quit canceled: native preparation tracking could not be persisted. Open Safe Start."
-                : "Quit canceled: clipboard restoration is unresolved. The original remains in memory.")
+            let message = self?.savedImports.shutdownRefusal.map { "Couldn’t quit: " + $0 } ?? (self?.nativePreparation.core.persistenceFailed == true
+                ? "Couldn’t quit: Safe Start couldn’t save. Open Safe Start."
+                : "Couldn’t quit: your clipboard hasn’t been restored yet.")
             self?.hud.show(.error(message))
         }, onIntent: { [weak self] in guard let self else { return }; MainActor.assumeIsolated { self.meetingHub.reserveShutdown() }; Self.cleanupFailoverIntent(self.store); Self.guidedQuitIntent(self.templates, imports: self.audioImport) })
 
@@ -723,7 +723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if MainActor.assumeIsolated({ localCleanupAdmission.hasOrdinaryFailover }), session.isCapturing {
-            hud.show(.notice("Finish or cancel the current recording before quitting. Prior cleanup is still stopping."))
+            hud.show(.notice("Finish or cancel the recording before quitting."))
             return .terminateCancel
         }
         MainActor.assumeIsolated { revokeRecognitionPreview(); revokeActivityShadow() }
@@ -736,7 +736,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         templates.cancel("Form canceled.")
-        audioImport.invalidate("Import discarded for quit.")
+        audioImport.invalidate("Import canceled.")
         MainActor.assumeIsolated { revokeRecognitionPreview(); revokeActivityShadow() }
         canceledCaptureUndo.shutdown()
         clearDictationRecovery()
@@ -756,11 +756,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// of those. On true, new dictations are refused until the relaunch.
     @MainActor func claimRestartIfSafe() async -> Bool {
         if localCleanupAdmission.hasOrdinaryFailover, session.isCapturing {
-            hud.show(.notice("Finish or cancel the current recording before restarting. Prior cleanup is still stopping."))
+            hud.show(.notice("Finish or cancel the recording before restarting."))
             return false
         }
         Self.cleanupFailoverIntent(store)
-        audioImport.invalidate("Import discarded for restart.")
+        audioImport.invalidate("Import canceled.")
         revokeActivityShadow()
         revokeRecognitionPreview()
         cancelTryout()
@@ -805,7 +805,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let meeting { guard await meeting.drainRestart() else { return false } }
         await saved.drain()
         guard saved.restartReady() else {
-            saved.notice(saved.shutdownRefusal ?? "Saved IO has not settled. Restart is unavailable.")
+            saved.notice(saved.shutdownRefusal ?? "Can’t restart yet. Try again in a moment.")
             return false
         }
         await experimental.drainRestart()
@@ -913,7 +913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
         guard axGranted else {
-            hud.show(.error("Enable Parla in System Settings → Privacy & Security → Accessibility"))
+            hud.show(.error("Allow Parla in System Settings → Privacy & Security → Accessibility"))
             return nil
         }
         // Latch the settings for the whole dictation: the streaming loop
@@ -921,7 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // file every ~300ms pass. The re-read-only-if-changed cache lives
         // in SettingsStore.load() so all ten call sites get it.
         var settings = store.load()
-        guard store.lastError == nil else { session.revokeActivityShadow(); hud.show(.error("Repair settings before dictating")); return nil }
+        guard store.lastError == nil else { session.revokeActivityShadow(); hud.show(.error("Fix settings.json before dictating")); return nil }
         let appID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let destination = ProfileDestination(bundleID: appID,
             browserURL: settings.profiles.isEmpty ? nil : Inserter.focusedBrowserURL(bundleID: appID))
@@ -931,7 +931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if command, selection == nil { hud.show(.error("Select text first")); return nil }
         if !command, settings.outputMode == .selectedPreset {
             do { _ = try settings.selectedTransformPreset() }
-            catch { hud.show(.error("Choose a valid saved preset first")); return nil }
+            catch { hud.show(.error("Choose a preset in Output & Presets first")); return nil }
         }
         let refusal = MainActor.assumeIsolated {
             ParakeetAudioEntry.physical(settings, destination: destination, owner: parakeetPreparation)
@@ -990,7 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.pasteWhenModifiersClear(text, tries: tries - 1)
             }
         } else {
-            hud.show(.error("Release keys, then retry"))
+            hud.show(.error("Release the keys and try again"))
         }
     }
 
@@ -999,7 +999,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// left no trace to diagnose. The frontmost app is the one lead there is.
     func showSecureRefusal(_ passwordField: String) {
         templates.cancel("Form canceled because a password field was active.")
-        audioImport.invalidate("Import discarded after secure-input evidence.")
+        audioImport.invalidate("Import canceled because a password field was active.")
         clearDictationRecovery()
         MainActor.assumeIsolated {
             invocation.secureRefusal {
@@ -1031,7 +1031,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                           browserURL: Inserter.focusedBrowserURL(bundleID: bundleID))
         let flattened = category == .terminal || category == .chat || Inserter.focusedFieldIsSingleLine()
         if !insertionExecutor.insertStored(flattened ? TextRules.flattenForTerminal(text) : text) {
-            hud.show(.error(axGranted ? "Paste failed — copy the transcript from History" : "Enable Accessibility for Parla"))
+            hud.show(.error(axGranted ? "Paste failed — copy the transcript from History" : "Allow Accessibility access for Parla"))
         }
     }
 
@@ -1079,7 +1079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           epoch == self.hubModel.modelSelectionEpoch, request == RecognitionRequest(settings: self.store.load()) else { return }
                     self.lastGoodModelPath = nil; self.residentRecognition = nil; self.modelReady = false
                     self.hubModel.observedRecognition = nil; self.hubModel.modelLoaded = false
-                    self.hud.show(.error("Local model unavailable — check the selected model")); self.showIdle()
+                    self.hud.show(.error("Speech model unavailable — check General")); self.showIdle()
                 }
             }
         })
