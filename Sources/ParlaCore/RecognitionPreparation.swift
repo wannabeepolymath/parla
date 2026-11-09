@@ -6,13 +6,13 @@ public enum PreparationRefusal: String, Error, Sendable, CustomStringConvertible
     case paused, trackingUnavailable, unsupportedSelection, consentRequired, busy, revoked, preparedResidentRequired
     public var description: String {
         switch self {
-        case .paused: return "Safe start paused preparation after two unresolved records. Open Safe Start."
-        case .trackingUnavailable: return "Safe start tracking unavailable. Open Safe Start."
-        case .unsupportedSelection: return "Safe start supports verified catalog models and known loaded builds only."
-        case .consentRequired: return "Safe start needs explicit enablement with new consent."
-        case .busy: return "Safe start is waiting for preparation to exit."
-        case .revoked: return "Preparation permission ended. Start a new action."
-        case .preparedResidentRequired: return "Safe start requires the same resident to complete synthetic warmup and a real recognition request for canceled capture."
+        case .paused: return "The speech model crashed while loading, so it’s paused. Open Safe Start."
+        case .trackingUnavailable: return "Safe Start can’t save its records. Open Safe Start."
+        case .unsupportedSelection: return "Safe Start works only with Whisper models from the list."
+        case .consentRequired: return "Turn Safe Start off and on again to continue."
+        case .busy: return "Wait for the speech model to finish loading."
+        case .revoked: return "Settings changed. Try again."
+        case .preparedResidentRequired: return "Undo isn’t available until the speech model has loaded once."
         }
     }
 }
@@ -24,7 +24,17 @@ public struct PreparationSnapshot: Equatable, Sendable {
     public init(_ status: PreparationStatus, refusal: PreparationRefusal? = nil, token: UUID = UUID()) {
         self.status = status; self.refusal = refusal; self.token = token
     }
-    public var message: String { refusal?.description ?? "Safe start: \(status.rawValue)" }
+    public var message: String {
+        if let refusal { return refusal.description }
+        switch status {
+        case .off: return "Safe Start is off."
+        case .ready: return "Safe Start is on."
+        case .preparing: return "Loading the speech model…"
+        case .paused: return "The speech model crashed while loading, so it’s paused."
+        case .trackingUnavailable: return "Safe Start can’t save its records."
+        case .unsupportedSelection: return "Safe Start works only with Whisper models from the list."
+        }
+    }
 }
 public struct PreparationBuild: Codable, Hashable, Sendable {
     public let app: UUID, native: UUID

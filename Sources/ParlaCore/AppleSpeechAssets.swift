@@ -17,22 +17,22 @@ public enum AppleSpeechRefusal: String, Error, Sendable, CaseIterable {
     case configuration, closed, revoked, deadline, format, conversion, input, results, native
     public var message: String {
         switch self {
-        case .unsupported: return "Apple Speech requires a supported SDK and macOS 26."
+        case .unsupported: return "Apple Speech needs macOS 26 or later."
         case .deviceUnavailable: return "Apple Speech is unavailable on this device."
-        case .explicitLocaleRequired: return "Choose an explicit Apple Speech locale."
-        case .unsupportedLocale: return "This exact locale is unsupported. Choose a supported regional locale explicitly."
-        case .needsPreparation: return "Use Prepare language before Apple Speech recognition."
-        case .assetsUnavailable: return "Apple Speech assets are not currently installed and ready."
-        case .reservationUnavailable: return "The prepared language reservation is unavailable. Recheck, then Prepare explicitly."
-        case .capacity: return "Language reservation capacity reached. Release an unused Parla reservation explicitly."
-        case .trackingUnavailable: return "Language reservation tracking is unavailable. Existing reservations are preserved."
-        case .protectedReservation: return "This reservation is unknown, selected, used by a profile, or still in use."
-        case .configuration: return "Recognition configuration is invalid. Choose an engine and its explicit language settings."
-        case .closed: return "Apple Speech admission is closed for shutdown or restart."
-        case .revoked: return "Apple Speech work was canceled. Waiting for actual work to exit."
-        case .deadline: return "Apple Speech observation limit expired. Waiting for actual work to exit."
-        case .format, .conversion: return "Apple Speech audio conversion could not complete."
-        case .input, .results, .native: return "Apple Speech could not complete this batch."
+        case .explicitLocaleRequired: return "Enter a language for Apple Speech, e.g. en-US."
+        case .unsupportedLocale: return "Apple Speech doesn’t support this language. Try a regional code like en-US."
+        case .needsPreparation: return "Click Set up language first."
+        case .assetsUnavailable: return "The language isn’t downloaded yet. Click Set up language."
+        case .reservationUnavailable: return "Set up the language again."
+        case .capacity: return "Too many languages are set up. Release one you don’t use."
+        case .trackingUnavailable: return "Couldn’t check your Apple Speech languages."
+        case .protectedReservation: return "This language is in use, so it can’t be released."
+        case .configuration: return "Choose a speech engine and language in General."
+        case .closed: return "Parla is quitting."
+        case .revoked: return "Canceled."
+        case .deadline: return "Apple Speech took too long. Try again."
+        case .format, .conversion: return "Apple Speech couldn’t read the audio."
+        case .input, .results, .native: return "Apple Speech couldn’t transcribe this."
         }
     }
 }

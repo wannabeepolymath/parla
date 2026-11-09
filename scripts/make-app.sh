@@ -69,9 +69,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>LSMinimumSystemVersion</key><string>13.3</string>
     <key>LSUIElement</key><true/>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>When you explicitly start a meeting, Parla records the one application you selected for local transcription. No screen video is recorded.</string>
+    <string>When you record a meeting, Parla records audio from the app you choose and transcribes it on this Mac. Your screen isn’t recorded.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Parla transcribes what you dictate, on this Mac only. The microphone is opened while you dictate; an optional setting holds it open between dictations so one starts instantly, at the cost of the microphone indicator staying lit. Meeting microphone audio is saved only after you start a meeting and confirm consent; meeting transcription stays on this Mac.</string>
+    <string>Parla uses the microphone while you dictate or record a meeting, and transcribes on this Mac.</string>
 </dict>
 </plist>
 EOF

@@ -477,7 +477,7 @@ final class SurroundingTextContextIntegrationTests: XCTestCase {
             }
             await r.work(s, field: f, http: h).value
             XCTAssertTrue(r.posted.isEmpty); XCTAssertEqual(d.history.entries.first?.raw, r.raw); XCTAssertNil(d.history.entries.first?.cleaned); XCTAssertNil(r.runtime.results.read())
-            if !stale { XCTAssertTrue(r.hud.contains(.notice("Context result withheld; raw text only in History"))) }
+            if !stale { XCTAssertTrue(r.hud.contains(.notice("No text field to type into — saved in History"))) }
         }
     }
     @MainActor func testA29ActualShortcutsPresetTransformAndHistoryRetryAdaptersHaveNoContext() async throws {

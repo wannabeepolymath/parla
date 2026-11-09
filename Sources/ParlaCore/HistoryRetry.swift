@@ -22,11 +22,15 @@ public struct HistoryRetryConfiguration: Codable, Equatable, Sendable {
     public var retryMode: HistoryRetryMode { mode ?? .whole }
     public enum Kind: String, Codable, Sendable { case cleanup, preset }
 
+    /// Display only. The stored fields keep their original wording.
     public var summary: String {
-        let languageLabel = retryMode == .segmentedV1 ? "source language: \(language)" : "language: \(language) (recognition setting; no ASR)"
-        return "Provider: \(provider) · \(executionKind == .onDevice ? "On-device generation; no endpoint" : localOnly ? "Local-only, no provider request" : "provider request") · \(endpointOrigin) · model: \(model)\n"
-        + "\(kind == .cleanup ? "Ordinary cleanup; preserve source language" : "Apply selected preset: " + (presetName ?? "Unknown")) · style: \(style) (ordinary cleanup only) · \(languageLabel)\n"
-        + vocabularySummary + (kind == .preset ? "; presets use vocabulary hints, skip snippets/literal rules" : "") + "\nApp/site context: unknown. Current global settings chosen for this request."
+        let destination = executionKind == .onDevice ? "Apple Intelligence on this Mac"
+            : localOnly ? "Local rules only, nothing sent online" : "\(provider) · \(endpointOrigin) · \(model)"
+        let action = kind == .cleanup ? "Cleanup" : "Preset: " + (presetName ?? "Unknown")
+        let vocabulary = vocabularySummary
+            .replacingOccurrences(of: " (8,192-byte budget)", with: "").replacingOccurrences(of: " (8192-byte budget)", with: "")
+            .replacingOccurrences(of: "cleanup hints", with: "dictionary words").replacingOccurrences(of: "literal rules", with: "replacements")
+        return action + " · " + destination + "\nStyle: \(style) · " + vocabulary
     }
 }
 
@@ -87,10 +91,10 @@ public struct HistoryRetryRequest {
         frozen.outputMode = .cleanup // never inherit raw/preset dictation mode
         let preset = applyPreset ? try settings.selectedTransformPreset() : nil
         guard applyPreset || source.operation == nil else {
-            throw TransformError(description: "Historical transform instruction is unknown. Review and explicitly apply a currently selected preset to the original instead.")
+            throw TransformError(description: "The original instruction wasn’t saved. Apply your selected preset to the original instead.")
         }
         if applyPreset, !cleanupIsConfigured(settings: frozen, env: environment, credentials: credentials()) {
-            throw TransformError(description: "Selected preset requires an enabled, configured provider.")
+            throw TransformError(description: "Presets need cleanup turned on and set up.")
         }
         if settings.usesAppleIntelligence { frozen.anthropicApiKey = nil; frozen.cleanup.apiKey = nil }
         self.settings = frozen; self.environment = environment; self.preset = preset
@@ -156,13 +160,13 @@ public struct HistoryRetryRequest {
     public func run(source: String, factory: @escaping Factory,
                     now: () -> Date = Date.init, diagnostics: DiagnosticOperation? = nil) async throws -> (String, HistoryRetryProvenance) {
         guard !isSegmented else { throw SegmentedRetryFailure.configuration }
-        guard !source.isEmpty else { throw TransformError(description: "Original source is empty.") }
+        guard !source.isEmpty else { throw TransformError(description: "The original text is empty.") }
         let cleanup = diagnostics?.begin(.cleanup); defer { cleanup?.end() }
         let usage = TransformUsage()
         let make: (Settings) throws -> CleanupProviding = { settings in
             // Avoid leaking raw server/factory descriptions through Pipeline logs.
             do {
-                guard let access else { throw CredentialFailure("No provider request was prepared.") }
+                guard let access else { throw CredentialFailure("Nothing to send. Try again.") }
                 let create = { try factory(settings, environment, access, { model, input, output in
                     usage.record(model: settings.usesAppleIntelligence ? "Apple Intelligence · on-device" : access.redacting(Self.redact(Self.modelLabel(model), secrets: secrets)), input: input, output: output)
                 }) }
@@ -174,13 +178,13 @@ public struct HistoryRetryRequest {
         if let preset {
             // Check before invoking even an injected factory.
             guard access != nil else {
-                throw TransformError(description: "Selected preset requires an enabled, configured provider.")
+                throw TransformError(description: "Presets need cleanup turned on and set up.")
             }
             do { text = try await IntentionalTransform(source: source, instruction: preset.intent, settings: settings, preset: preset).run(makeClient: make) }
             catch {
                 diagnostics?.update { if $0.providerOutcome == .returned { $0.providerOutcome = .invalidResult } }
                 if let reason = LocalCleanupReason.from(error), settings.usesAppleIntelligence { throw reason.error }
-                throw TransformError(description: "Preset request failed or returned invalid text. Start a new request to try again.") }
+                throw TransformError(description: "The preset didn’t work. Try again.") }
         } else {
             var effective = settings
             if configuration.localOnly { effective.cleanupEnabled = false }
@@ -191,7 +195,7 @@ public struct HistoryRetryRequest {
             let result = await pipeline.clean(transcript: source)
             guard result.failure == nil else {
                 if settings.usesAppleIntelligence, let reason = LocalCleanupReason.allCases.first(where: { $0.message == result.failure }) { throw reason.error }
-                throw TransformError(description: "Cleanup request failed or returned invalid text. Start a new request to try again.")
+                throw TransformError(description: "Cleanup didn’t work. Try again.")
             }
             text = result.text
         }

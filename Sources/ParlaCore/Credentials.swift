@@ -14,7 +14,7 @@ public struct CredentialScope: Hashable, Sendable {
               let host = c.host?.lowercased(), !host.isEmpty,
               c.user == nil, c.password == nil, c.query == nil, c.fragment == nil,
               c.port.map({ (1...65535).contains($0) }) ?? true else {
-            throw CredentialFailure("cleanup.baseURL must be an unambiguous http(s) URL without userinfo, query or fragment.")
+            throw CredentialFailure("Enter a valid http or https base URL.")
         }
         c.scheme = scheme; c.host = host
         if c.port == (scheme == "https" ? 443 : 80) { c.port = nil }
@@ -27,7 +27,7 @@ public struct CredentialScope: Hashable, Sendable {
         switch settings.cleanup.provider {
         case "", "anthropic": return .anthropic
         case "openai-compatible": return try compatible(settings.cleanup.baseURL)
-        default: throw CredentialFailure("Unknown cleanup.provider (valid: anthropic, openai-compatible).")
+        default: throw CredentialFailure("Choose Anthropic or OpenAI-compatible as the cleanup service.")
         }
     }
 }
@@ -44,10 +44,10 @@ public enum CredentialStatus: String, Equatable, Sendable {
     public var message: String {
         switch self {
         case .present: return "Key stored in Keychain."
-        case .missing: return "No stored key. Compatible local servers may be keyless."
-        case .denied: return "Keychain access denied (locked, or the key was saved by another copy of Parla). Delete \"com.parla.provider-credentials.v1\" in Keychain Access, then paste the key again."
-        case .canceled: return "Keychain access canceled. Retry explicitly."
-        case .error: return "Credential unavailable. Retry or replace it explicitly."
+        case .missing: return "No key saved. Local servers may not need one."
+        case .denied: return "Keychain access was denied. In Keychain Access, delete \"com.parla.provider-credentials.v1\", then add your key again."
+        case .canceled: return "Keychain access was canceled. Try again."
+        case .error: return "Couldn’t read the key. Try again or replace it."
         }
     }
 }
@@ -86,19 +86,19 @@ public final class CredentialStore {
     public func migrate(_ value: String, scope: CredentialScope) throws {
         switch backend.read(scope, interactive: false) {
         case .value(let existing):
-            guard existing == value else { throw CredentialFailure("Credential migration conflict. Replace the stored key explicitly; legacy settings were preserved.") }
+            guard existing == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }
         case .missing:
             let result = backend.add(value, scope: scope, interactive: false)
             switch result {
             case .success, .duplicate: break
             default: throw failure(result)
             }
-        case let result: throw CredentialFailure(result.status.message + " Legacy credential migration pending.")
+        case let result: throw CredentialFailure(result.status.message + " Your API key hasn’t moved to Keychain yet.")
         }
         switch backend.read(scope, interactive: false) {
         case .value(let verified):
-            guard verified == value else { throw CredentialFailure("Credential migration conflict. Replace the stored key explicitly; legacy settings were preserved.") }
-        default: throw CredentialFailure("Credential verification failed. Legacy settings were preserved; retry migration.")
+            guard verified == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }
+        default: throw CredentialFailure("Couldn’t move your API key to Keychain. Click Refresh to try again.")
         }
     }
     public func replace(_ value: String, scope: CredentialScope) throws {
@@ -113,7 +113,7 @@ public final class CredentialStore {
         }
         guard case .success = result else { throw failure(result) }
         guard case .value(let verified) = backend.read(scope, interactive: true), verified == value else {
-            throw CredentialFailure("Credential verification failed. Retry Save/Replace.")
+            throw CredentialFailure("Couldn’t save the key. Try again.")
         }
     }
     public func remove(_ scope: CredentialScope) throws {
@@ -126,7 +126,7 @@ public final class CredentialStore {
         switch result {
         case .denied: return CredentialFailure(CredentialStatus.denied.message)
         case .canceled: return CredentialFailure(CredentialStatus.canceled.message)
-        default: return CredentialFailure("Credential operation failed. Retry explicitly; legacy settings were preserved.")
+        default: return CredentialFailure("Couldn’t update the key. Try again.")
         }
     }
 }

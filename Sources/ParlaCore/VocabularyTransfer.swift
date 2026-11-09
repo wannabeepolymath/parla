@@ -34,21 +34,21 @@ public struct VocabularyDocument: Codable, Equatable, Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
-        guard data.count <= Self.maxFileBytes else { throw VocabularyTransferError.invalid("Vocabulary file exceeds 1 MiB.") }
+        guard data.count <= Self.maxFileBytes else { throw VocabularyTransferError.invalid("This file is too large (over 1 MB).") }
         return data
     }
 
     public static func decode(_ data: Data) throws -> Self {
-        guard data.count <= maxFileBytes else { throw VocabularyTransferError.invalid("Vocabulary file exceeds 1 MiB.") }
+        guard data.count <= maxFileBytes else { throw VocabularyTransferError.invalid("This file is too large (over 1 MB).") }
         // Reject settings dumps and accidental extra fields rather than silently
         // accepting a credentials-bearing object as a vocabulary document.
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys) == Set(["format", "version", "words", "snippets", "replacements"]) else {
-            throw VocabularyTransferError.invalid("Expected a Parla vocabulary document, not settings.json.")
+            throw VocabularyTransferError.invalid("This is a settings file. Choose an exported vocabulary file.")
         }
         if let rules = object["replacements"] as? [[String: Any]],
            rules.contains(where: { Set($0.keys) != Set(["source", "replacement"]) }) {
-            throw VocabularyTransferError.invalid("Unexpected replacement fields.")
+            throw VocabularyTransferError.invalid("This file isn’t a Parla vocabulary file.")
         }
         let document = try JSONDecoder().decode(Self.self, from: data)
         try document.validate()
@@ -57,19 +57,19 @@ public struct VocabularyDocument: Codable, Equatable, Sendable {
 
     private func validate() throws {
         guard format == "parla-vocabulary", version == 1 else {
-            throw VocabularyTransferError.invalid("Unsupported vocabulary format or version.")
+            throw VocabularyTransferError.invalid("This file isn’t a Parla vocabulary file.")
         }
         guard words.count + snippets.count + replacements.count <= Self.maxEntries else {
-            throw VocabularyTransferError.invalid("Vocabulary has too many entries (maximum 10,000).")
+            throw VocabularyTransferError.invalid("This file has more than 10,000 entries.")
         }
         guard words.allSatisfy({ !VocabularyHints.normalized($0).isEmpty && $0.utf8.count <= VocabularyHints.maxHintBytes }) else {
-            throw VocabularyTransferError.invalid("Each word must contain text and fit in 256 UTF-8 bytes.")
+            throw VocabularyTransferError.invalid("A word in this file is empty or too long.")
         }
         guard snippets.allSatisfy({ !$0.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && $0.key.utf8.count <= VocabularyHints.maxHintBytes && $0.value.utf8.count <= Self.maxTextBytes }),
               replacements.allSatisfy({ !$0.source.isEmpty && $0.source.utf8.count <= VocabularyHints.maxHintBytes
                   && $0.replacement.utf8.count <= Self.maxTextBytes }) else {
-            throw VocabularyTransferError.invalid("Triggers must fit in 256 UTF-8 bytes; expansions must fit in 65,536 UTF-8 bytes.")
+            throw VocabularyTransferError.invalid("A snippet in this file is too long.")
         }
     }
 
@@ -102,7 +102,7 @@ public struct VocabularyImportPreview {
         // One source per rule is unambiguous in the transfer UI. Duplicate source
         // rules in manually edited settings still have deterministic first-wins semantics.
         guard Set(document.replacements.map(\.source)).count == document.replacements.count else {
-            throw VocabularyTransferError.invalid("Duplicate replacement sources; keep one rule per source.")
+            throw VocabularyTransferError.invalid("This file has the same replacement twice.")
         }
         let words = Set(original.words.map { VocabularyHints.normalized($0).lowercased() })
         let rules = Dictionary(original.replacements.map { ($0.source, $0.replacement) }, uniquingKeysWith: { a, _ in a })

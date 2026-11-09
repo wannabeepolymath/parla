@@ -96,12 +96,12 @@ public final class HistoryStore: NSObject {
         case load, migration, save, delete, clear, trim
         var message: String {
             switch self {
-            case .load: return "Couldn't load history. Original file is unchanged. Repair it, then Retry Load."
-            case .migration: return "Couldn't migrate history. Retry Load before changing rows."
-            case .save: return "Couldn't save result. Saved text is unchanged; retry explicitly."
-            case .delete: return "Couldn't delete text. Saved text is unchanged; retry explicitly."
-            case .clear: return "Couldn't clear text history. Saved text is unchanged; retry explicitly."
-            case .trim: return "Couldn't trim history. Count policy has not been applied; retry explicitly."
+            case .load: return "Couldn’t load history. Fix history.json, then try again."
+            case .migration: return "Couldn’t update history. Click Try again."
+            case .save: return "Couldn’t save to history. Try again."
+            case .delete: return "Couldn’t delete. Try again."
+            case .clear: return "Couldn’t clear history. Try again."
+            case .trim: return "Couldn’t apply the history limit. Try again."
             }
         }
     }
@@ -109,7 +109,7 @@ public final class HistoryStore: NSObject {
     public var lastError: String? {
         guard let failure else { return nil }
         return failure.message + (loadBlocked && failure != .load && failure != .migration
-            ? " Retry Load before changing rows." : "")
+            ? " History needs to reload first." : "")
     }
     public private(set) var loadBlocked = false
     public private(set) var pendingEntries: [HistoryEntry] = [] // newest first, never silently evicted

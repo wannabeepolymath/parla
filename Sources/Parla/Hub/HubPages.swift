@@ -29,7 +29,7 @@ struct GeneralPage: View {
             if let problem = model.downloadError {
                 HubBanner(text: problem)
             }
-            HubSection("Speech recognition", footer: model.recognitionCapabilityDetail.isEmpty ? nil : model.recognitionCapabilityDetail) {
+            HubSection("Speech recognition", footer: model.settings.recognitionEngine == .whisper || model.recognitionCapabilityDetail.isEmpty ? nil : model.recognitionCapabilityDetail) {
                 HubRow("Engine") {
                     Picker("", selection: $model.settings.recognitionEngine) {
                         Text("Whisper").tag(RecognitionEngine.whisper)

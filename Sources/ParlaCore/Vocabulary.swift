@@ -64,7 +64,7 @@ public struct LiteralReplacement: Codable, Equatable, Sendable {
         var result = "", bytes = 0
         func append(_ value: String) throws {
             if let maximumBytes {
-                guard value.utf8.count <= maximumBytes - bytes else { throw CleanupError(description: "Literal output exceeds preview budget") }
+                guard value.utf8.count <= maximumBytes - bytes else { throw CleanupError(description: "Too long to preview") }
             }
             bytes += value.utf8.count
             result += value

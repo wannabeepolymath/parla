@@ -38,7 +38,7 @@ public final class GuardedDictationEdits<Identity: Equatable> {
     public enum Action { case undo, restoreRaw }
     public enum Outcome: Equatable { case replaced, refused, unverified }
     public static var lifetime: TimeInterval { 10 * 60 }
-    public static var refusalMessage: String { "The text changed since Parla typed it — use Copy Original" }
+    public static var refusalMessage: String { "The text changed since Parla typed it — use Copy original text" }
 
     public struct Receipt {
         public let before: Field

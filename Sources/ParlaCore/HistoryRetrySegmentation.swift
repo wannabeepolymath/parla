@@ -6,11 +6,11 @@ public enum SegmentedRetryFailure: String, Error, Codable, Sendable {
     case request, headers, response, output, provider, canceled, deadline, payload
     public var message: String {
         switch self {
-        case .singleSegment: return "This Original fits one request. Review ordinary whole-text cleanup instead."
-        case .snippets: return "Segmented v1 refuses snippets unless the complete Original is a locked trigger. Review whole-text cleanup instead."
-        case .deadline: return "The acceptance deadline expired. Waiting for owned work to exit; no incomplete result can be saved."
-        case .canceled: return "Experimental cleanup was canceled."
-        default: return "Experimental cleanup refused or incomplete (\(rawValue)). No result can be saved. Review a new request to try again."
+        case .singleSegment: return "This text is short enough. Use Clean up again instead."
+        case .snippets: return "Text with snippets can’t be cleaned up in sections. Use Clean up again instead."
+        case .deadline: return "Cleanup took too long. Try again."
+        case .canceled: return "Cleanup was canceled."
+        default: return "Cleanup didn’t finish. Try again."
         }
     }
 }
@@ -291,11 +291,11 @@ struct SegmentedOriginalReview {
     var disclosure: String {
         let scope: String
         switch configuration.executionKind {
-        case .deterministic: scope = "Local rules only; zero generation or provider requests."
-        case .onDevice: scope = "At most \(planned) separate on-device generations; no endpoint request. Availability and language checks may refuse this request."
-        case .network: scope = "At most \(planned) separate requests to \(configuration.provider) at \(configuration.endpointOrigin), model \(configuration.model), subject to Start admission. Unconfigured cleanup may use whole-Original local rules with zero requests."
+        case .deterministic: scope = "Uses local rules only; nothing is sent online."
+        case .onDevice: scope = "At most \(planned) requests to Apple Intelligence on this Mac."
+        case .network: scope = "At most \(planned) requests to \(configuration.provider) (\(configuration.endpointOrigin), model \(configuration.model))."
         }
-        return "Experimental segmented cleanup. " + scope + " No automatic retry. Separate requests may miss corrections or structure across boundaries. Ordinary cleanup is requested regardless of dictation output mode. Review the complete result before saving. Nothing is inserted; Copy writes only explicitly selected text."
+        return "Long text is cleaned up one section at a time. " + scope + " Check the result before saving."
     }
     typealias Factory = (Settings, [String: String], CleanupAccess, HistoryRetryExecutionPolicy, @escaping CleanupUsageSink) throws -> CleanupProviding
     func run(policy: HistoryRetryExecutionPolicy, environment: () -> [String: String], credentials: () -> CredentialStore,

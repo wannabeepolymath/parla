@@ -161,7 +161,7 @@ final class HubHistoryRetryTests: XCTestCase {
             XCTAssertFalse(metadata.contains(secret)); XCTAssertFalse(originalConfig.summary.contains(secret))
         }
         XCTAssertEqual(provenance.configuration, originalConfig)
-        XCTAssertTrue(originalConfig.summary.contains("unknown"))
+        XCTAssertTrue(originalConfig.summary.contains("Cleanup"))
         let changed = try HistoryRetryRequest(settings: settings.load(), environment: [:], source: entry, applyPreset: false, credentials: settings.credentials)
         XCTAssertNotEqual(changed.configuration.rulesDigest, originalConfig.rulesDigest)
     }
@@ -704,7 +704,7 @@ extension HubHistoryRetryTests {
                 XCTAssertEqual(model.historyRetries[row.id]?.provenance?.configuration.executionKind, .deterministic)
                 XCTAssertTrue(model.historyRetries[row.id]?.provenance?.configuration.localOnly == true)
                 XCTAssertEqual(model.historyRetries[row.id]?.provenance?.segmented?.attempted, 0)
-                XCTAssertTrue(model.historyRetries[row.id]?.status.contains("no provider request") == true)
+                XCTAssertTrue(model.historyRetries[row.id]?.status.contains("Nothing was sent online") == true)
             }
             model.discardHistoryRetry(row.id)
         }

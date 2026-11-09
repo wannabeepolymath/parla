@@ -446,7 +446,7 @@ final class AutomationTests: XCTestCase {
             XCTAssertEqual(result.outcome, mode == 3 ? .localFallback : .final)
             XCTAssertTrue(rig.history.isEmpty); XCTAssertTrue(rig.insertions.isEmpty)
             XCTAssertEqual(rig.effects.filter { if case .finalResult = $0 { return true }; return false }.count, 1)
-            XCTAssertFalse(rig.effects.contains(.hud(.error("History off — text discarded"))))
+            XCTAssertFalse(rig.effects.contains(.hud(.error("No text field to type into — text discarded"))))
             XCTAssertEqual(provider.calls, mode == 1 || mode == 3 ? 1 : 0)
         }
     }

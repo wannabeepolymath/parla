@@ -25,7 +25,7 @@ final class HubSurroundingTextContextTests: XCTestCase {
         h.flushPendingSave(); XCTAssertEqual(saved, 1); XCTAssertNil(h.saveError)
         h.reviewSurrounding(profileID: d.id)
         let review = try XCTUnwrap(h.surroundingReview), disclosure = h.surroundingDisclosure(review.policy)
-        for text in ["existing text you did not dictate", "exact-model", "https://context.test/v1", "precedence:", "environment", "Keychain", "raw dictation", "last-result", "alias-to-dated", "billing"] { XCTAssertTrue(disclosure.contains(text)) }
+        for text in ["text you didn’t dictate", "exact-model", "https://context.test/v1", "Text after the cursor is never sent", "isn’t saved", "pauses this"] { XCTAssertTrue(disclosure.contains(text)) }
         XCTAssertEqual(d.backend.reads, 0); XCTAssertEqual(d.backend.statuses, 0)
         h.confirmSurrounding(); XCTAssertNotNil(h.surroundingPolicy?.revision); XCTAssertEqual(h.settingsBase.historyEnabled, base.historyEnabled)
         XCTAssertEqual(d.backend.reads, 0)

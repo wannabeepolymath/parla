@@ -15,7 +15,7 @@ public struct MouseButtonBinding: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let number = try c.decode(Int.self, forKey: .buttonNumber)
         guard let binding = Self(buttonNumber: number) else {
-            throw DecodingError.dataCorruptedError(forKey: .buttonNumber, in: c, debugDescription: "Choose middle or an extra mouse button (3–16).")
+            throw DecodingError.dataCorruptedError(forKey: .buttonNumber, in: c, debugDescription: "Choose Middle or a button from 4 to 16.")
         }
         self = binding
     }
@@ -68,11 +68,11 @@ public enum InputTapStatus: Equatable {
     case ready, unavailable, disabled, invalidPort, permissionLost
     public var message: String {
         switch self {
-        case .ready: return "Mouse trigger ready."
-        case .unavailable: return "Mouse trigger disabled: global input unavailable. Retrying automatically."
-        case .disabled: return "Mouse trigger paused: global input interrupted. Retrying automatically."
-        case .invalidPort: return "Mouse trigger disabled: global input disconnected. Retrying automatically."
-        case .permissionLost: return "Mouse trigger disabled: enable Accessibility access. Retrying automatically."
+        case .ready: return "Mouse push to talk is ready."
+        case .unavailable: return "Mouse push to talk isn’t working right now. Retrying…"
+        case .disabled: return "Mouse push to talk is paused. Retrying…"
+        case .invalidPort: return "Mouse push to talk disconnected. Retrying…"
+        case .permissionLost: return "Mouse push to talk needs Accessibility access."
         }
     }
 }

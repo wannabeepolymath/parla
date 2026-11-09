@@ -94,11 +94,10 @@ final class RecognitionAcquisitionTests: XCTestCase {
         for _ in 0..<10 {
             XCTAssertEqual(hub.recognitionCapabilities.modelLanguages, .englishOnly)
             XCTAssertTrue(hub.recognitionCapabilityDetail.contains("English only"))
-            XCTAssertTrue(hub.recognitionCapabilityDetail.contains("No native incremental stream"))
         }
         hub.settings.whisperModelPath = "/custom/ggml-base.en.bin"
         XCTAssertEqual(hub.recognitionCapabilities.modelLanguages, .unknown)
-        XCTAssertTrue(hub.recognitionCapabilityDetail.contains("unknown until loaded"))
+        XCTAssertFalse(hub.recognitionCapabilityDetail.contains("English only"))
         XCTAssertEqual(probe.paths.count, 1); XCTAssertEqual(probe.metadataReads, reads)
         hub.flushPendingSave()
     }

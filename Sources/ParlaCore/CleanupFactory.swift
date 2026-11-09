@@ -46,12 +46,12 @@ public func resolveCleanupCredential(settings: Settings, env: [String: String],
     if let key = environmentKey(settings: settings, env: env) { return ResolvedCredential(scope: scope, key: key) }
     // Inline values are migration input only; they cannot drift to an edited endpoint.
     if (scope == .anthropic ? settings.anthropicApiKey : settings.cleanup.apiKey).map({ !$0.isEmpty }) == true {
-        throw CredentialFailure("Legacy credential migration pending. Open AI Cleanup and retry migration before making a request.")
+        throw CredentialFailure("Your API key needs to move to Keychain. Open AI Cleanup and click Refresh.")
     }
     switch credentials.read(scope, interactive: true) {
     case .value(let key): return ResolvedCredential(scope: scope, key: key)
     case .missing:
-        if scope == .anthropic { throw CredentialFailure("No API key. Save one in AI Cleanup or set ANTHROPIC_API_KEY.") }
+        if scope == .anthropic { throw CredentialFailure("No API key. Add one in AI Cleanup.") }
         return ResolvedCredential(scope: scope, key: nil)
     case let result: throw CredentialFailure(result.status.message, status: result.status)
     }
@@ -64,12 +64,12 @@ func resolveOrdinaryFailoverPrimaryCredential(settings: Settings, env: [String: 
     if let key = environmentKey(settings: settings, env: env) { return ResolvedCredential(scope: scope, key: key) }
     // Inline values are migration input only; they cannot drift to an edited endpoint.
     if (scope == .anthropic ? settings.anthropicApiKey : settings.cleanup.apiKey).map({ !$0.isEmpty }) == true {
-        throw CredentialFailure("Legacy credential migration pending. Open AI Cleanup and retry migration before making a request.")
+        throw CredentialFailure("Your API key needs to move to Keychain. Open AI Cleanup and click Refresh.")
     }
     switch credentials.read(scope, interactive: false) {
     case .value(let key): return ResolvedCredential(scope: scope, key: key)
     case .missing:
-        if scope == .anthropic { throw CredentialFailure("No API key. Save one in AI Cleanup or set ANTHROPIC_API_KEY.") }
+        if scope == .anthropic { throw CredentialFailure("No API key. Add one in AI Cleanup.") }
         return ResolvedCredential(scope: scope, key: nil)
     case let result: throw CredentialFailure(result.status.message, status: result.status)
     }
@@ -94,22 +94,22 @@ public func cleanupConfigurationIssue(settings: Settings, env: @autoclosure () -
         let scope = try CredentialScope.selected(settings)
         if environmentKey(settings: settings, env: env()) != nil { return nil }
         if (scope == .anthropic ? settings.anthropicApiKey : settings.cleanup.apiKey).map({ !$0.isEmpty }) == true {
-            return "Legacy credential migration pending. Retry migration or explicitly replace the stored key."
+            return "Your API key needs to move to Keychain. Click Refresh or save the key again."
         }
         switch credentials().status(scope) {
         case .present: return nil
         case .missing: return scope == .anthropic ? "No API key is set." : nil
         case let state: return state.message
         }
-    } catch { return "Invalid provider or cleanup.baseURL. Use http(s) without userinfo, query or fragment." }
+    } catch { return "Check the cleanup service and base URL." }
 }
 
 public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> String {
-    if settings.usesAppleIntelligence { return "Apple Intelligence · on-device; no endpoint or API key." }
+    if settings.usesAppleIntelligence { return "No API key needed." }
     if environmentKey(settings: settings, env: env()) != nil {
-        return "Environment override active. Save/Replace and Remove affect Keychain only; environment still wins."
+        return "Using the API key from an environment variable."
     }
-    guard let scope = try? CredentialScope.selected(settings) else { return "Choose a valid provider and endpoint before saving a key." }
+    guard let scope = try? CredentialScope.selected(settings) else { return "Choose a cleanup service and base URL first." }
     return credentials().status(scope).message
 }
 
@@ -136,9 +136,9 @@ public func makeCleanupClient(
     }
     let scope = try CredentialScope.selected(settings)
     let prepared = try access ?? prepareCleanupAccess(settings: settings, env: env(), credentials: credentials())
-    guard case .network(let resolved) = prepared else { throw CredentialFailure("Provider access changed. Prepare a new request.") }
+    guard case .network(let resolved) = prepared else { throw CredentialFailure("Cleanup settings changed. Try again.") }
     let safeUsage: CleanupUsageSink = { model, input, output in usage(redactUsage ? resolved.redacting(model) : model, input, output) }
-    guard resolved.scope == scope else { throw CredentialFailure("Credential endpoint changed. Prepare a new request.") }
+    guard resolved.scope == scope else { throw CredentialFailure("Cleanup settings changed. Try again.") }
     let poster = http()
     guard executionPolicy == nil || poster is HistoryRetryHTTP else { throw SegmentedRetryFailure.configuration }
     switch settings.cleanup.provider {
@@ -179,7 +179,7 @@ func resolveCleanupBackupCredential(_ backup: CleanupBackup, settings: Settings,
     try backup.validate()
     let scope = try CredentialScope.selected(settings)
     guard !(settings.anthropicApiKey.map { !$0.isEmpty } ?? false), !(settings.cleanup.apiKey.map { !$0.isEmpty } ?? false) else {
-        throw CredentialFailure("Legacy credential migration pending. Review AI Cleanup before making a backup request.")
+        throw CredentialFailure("Your API key needs to move to Keychain. Open AI Cleanup and click Refresh.")
     }
     let key: String?
     switch backup.source {

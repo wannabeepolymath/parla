@@ -183,7 +183,7 @@ public enum Inserter {
 
     static func secureRefusalMessage(_ passwordField: String, secureInput: Bool, fieldIsSecure: Bool) -> String {
         secureInput && !fieldIsSecure
-            ? "Secure Input is on — close password prompts or disable Secure Keyboard Entry" : passwordField
+            ? "Secure input is on — close any password prompt or turn off Secure Keyboard Entry" : passwordField
     }
 
     /// Focused element via the system-wide query, falling back to asking the

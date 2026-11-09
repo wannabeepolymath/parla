@@ -145,7 +145,7 @@ final class HubModel: ObservableObject {
         let engine = RecognitionRequest(settings: settings).selection.engine
         if engine == .appleSpeech || engine == .parakeet { return "Dictionary words are used for cleanup only." }
         if engine == .invalid { return AppleSpeechRefusal.configuration.message }
-        return ""
+        return recognitionCapabilities.modelLanguages == .englishOnly ? "This model understands English only." : ""
     }
     @Published var catalogDownloads: [String: CatalogDownloadRow] = [:]
     var onCatalogDownloadAction: (CatalogDownloadAction, ModelCatalog.Model) -> Void = { _, _ in }

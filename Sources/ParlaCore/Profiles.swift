@@ -76,16 +76,16 @@ public struct DictationProfile: Codable, Equatable, Identifiable, Sendable {
 
     public var validationError: String? {
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Give the profile a name." }
-        if normalizedTarget == nil { return "Enter an exact bundle ID or an ASCII host without a scheme, port or path." }
+        if normalizedTarget == nil { return "Enter an app bundle ID or a host name like mail.google.com." }
         if let language, language != "auto", !WhisperTranscriber.languages.contains(where: { $0.code == language }) {
-            return "Choose a supported spoken language."
+            return "Choose a supported language."
         }
-        if let whisperModelPath, whisperModelPath.isEmpty { return "Choose a local model or inherit." }
+        if let whisperModelPath, whisperModelPath.isEmpty { return "Choose a Whisper model or Same as global." }
         if let cleanupModel, cleanupModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Enter a cleanup model ID or inherit."
+            return "Enter a cleanup model or leave it blank."
         }
         if dictionary.contains(where: { VocabularyHints.normalized($0).utf8.count > VocabularyHints.maxHintBytes }) {
-            return "Profile words must be at most 256 UTF-8 bytes each."
+            return "A dictionary word is too long."
         }
         return nil
     }
@@ -164,9 +164,9 @@ public enum ProfileResolver {
         return profiles.compactMap { profile in
             if let error = profile.validationError { return "\(profile.name): \(error)" }
             guard let target = profile.normalizedTarget else { return nil }
-            if !ids.insert(profile.id).inserted { return "Duplicate profile ID: \(profile.name). Fix settings.json before editing profiles." }
+            if !ids.insert(profile.id).inserted { return "Two profiles have the same ID (\(profile.name)). Fix settings.json to edit profiles." }
             if !targets.insert("\(profile.targetKind.rawValue):\(target)").inserted {
-                return "Duplicate target: \(target). First saved enabled profile wins."
+                return "Two profiles target \(target). The first one is used."
             }
             return nil
         }

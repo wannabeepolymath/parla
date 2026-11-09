@@ -212,7 +212,7 @@ final class RecordingRecoveryTests: XCTestCase {
         XCTAssertNil(s.stash(tone))
         let relaunched = RecordingStore(directory: store.directory)
         let row = try XCTUnwrap(relaunched.descriptors().first)
-        XCTAssertFalse(row.available); XCTAssertTrue(row.reason?.contains("Unfinished") == true)
+        XCTAssertFalse(row.available); XCTAssertTrue(row.reason?.contains("incomplete") == true)
         XCTAssertThrowsError(try relaunched.acquire(row.url))
         XCTAssertTrue(relaunched.delete(row.url))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.directory.path), [])

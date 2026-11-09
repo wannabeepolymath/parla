@@ -393,7 +393,7 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.streamTyped(gen: 1, text: "helo"))
         _ = m.handle(.stopRequested)
         let fx = quiet(m.handle(.transcribed(s, raw: "hello world", probe: probe(typedIsOurs: false))))
-        XCTAssertEqual(fx.first, .hud(.error("History off — text discarded")))
+        XCTAssertEqual(fx.first, .hud(.error("No text field to type into — text discarded")))
         XCTAssertFalse(fx.contains(.playSound(.finish)))
         XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
     }
@@ -679,7 +679,7 @@ final class DictationSessionTests: XCTestCase {
     func testSecureFocusRefusesCommandModeBeforeAnyRecording() {
         XCTAssertEqual(m.handle(.startCommand(settings: settings(), cleanupConfigured: true,
                                               focus: .secure, selection: "the cat")),
-                       [.secureRefusal("No transforms in password fields")])
+                       [.secureRefusal("Not available in password fields")])
         XCTAssertEqual(m.state, .idle)
         XCTAssertEqual(m.gen, 0)
     }
@@ -947,7 +947,7 @@ final class DictationSessionTests: XCTestCase {
         let fx = quiet(m.handle(.transformReady(s, text: "the cat",
                                                 probe: TransformProbe(focus: .secure,
                                                                       selectionStillMatches: true, destinationStillMatches: true))))
-        XCTAssertEqual(fx.first, .hud(.error("History off — text discarded")))
+        XCTAssertEqual(fx.first, .hud(.error("No text field to type into — text discarded")))
         XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
     }
 

@@ -213,7 +213,7 @@ final class HubHistoryExportTests: XCTestCase {
             hub.prepareHistoryExport(rowID: entry.id); selectedURL = url
             hub.exportHistory(content: .result, format: .text)
             XCTAssertTrue(writes.isEmpty, url.path)
-            XCTAssertTrue(hub.historyExportMessage!.contains("Choose a file outside"), url.path)
+            XCTAssertTrue(hub.historyExportMessage!.contains("Choose a different file name or folder"), url.path)
         }
         XCTAssertEqual(try Data(contentsOf: settings.url), settingsBefore)
         XCTAssertEqual(try Data(contentsOf: history.url), historyBefore)
@@ -244,7 +244,7 @@ final class HubHistoryExportTests: XCTestCase {
             hub.prepareHistoryExport(rowID: entry.id); selectedURL = url
             hub.exportHistory(content: .original, format: .text)
             XCTAssertTrue(writes.isEmpty, url.path)
-            XCTAssertTrue(hub.historyExportMessage!.contains("Choose a file outside"), url.path)
+            XCTAssertTrue(hub.historyExportMessage!.contains("Choose a different file name or folder"), url.path)
         }
         XCTAssertEqual(try Data(contentsOf: sidecar), Data("sidecar".utf8))
         XCTAssertEqual(try Data(contentsOf: outside), Data("outside sidecar".utf8))
@@ -266,7 +266,7 @@ final class HubHistoryExportTests: XCTestCase {
             linkedHub.historyExportPanel = { _ in url }
             linkedHub.exportHistory(content: .original, format: .text)
             XCTAssertTrue(writes.isEmpty, url.path)
-            XCTAssertTrue(linkedHub.historyExportMessage!.contains("Choose a file outside"), linkedHub.historyExportMessage ?? "no status")
+            XCTAssertTrue(linkedHub.historyExportMessage!.contains("Choose a different file name or folder"), linkedHub.historyExportMessage ?? "no status")
         }
         linkedHub.prepareHistoryExport(rowID: entry.id)
         linkedHub.historyExportPanel = { [unowned self] _ in self.selectedURL }
@@ -289,7 +289,7 @@ final class HubHistoryExportTests: XCTestCase {
         for url in [alias, sidecarAlias, futureSidecar, outward] {
             selectedURL = url; hub.exportHistory(content: .original, format: .text)
             XCTAssertTrue(writes.isEmpty, url.path)
-            XCTAssertTrue(hub.historyExportMessage!.contains("Choose a file outside"), hub.historyExportMessage ?? "no status")
+            XCTAssertTrue(hub.historyExportMessage!.contains("Choose a different file name or folder"), hub.historyExportMessage ?? "no status")
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: history.url.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: futureSidecar.path))

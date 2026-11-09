@@ -145,7 +145,7 @@ final class LocalCleanupIntegrationTests: XCTestCase {
         r.hub.settings.cleanup.localSourceLocale = "hi"; r.hub.flushPendingSave()
         await r.hub.startHistoryRetry(row.id)
         XCTAssertEqual(r.hub.historyRetries[row.id]?.proposed, admittedOutput)
-        XCTAssertTrue(r.hub.historyRetries[row.id]!.status.contains("On-device generated"))
+        XCTAssertTrue(r.hub.historyRetries[row.id]!.status.contains("from Apple Intelligence"))
         XCTAssertEqual(r.history.entries, [row]); XCTAssertEqual(r.bottom.counts.generation, 1)
         r.hub.settings.historyEnabled = false; r.hub.flushPendingSave(); r.hub.saveHistoryRetry(row.id)
         XCTAssertEqual(r.history.entries, [row])

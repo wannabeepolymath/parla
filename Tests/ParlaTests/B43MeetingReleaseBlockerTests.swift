@@ -110,7 +110,7 @@ final class B43MeetingReleaseBlockerTests: XCTestCase {
         XCTAssertFalse(core.hasActualTask); XCTAssertFalse(r.controller.model.stoppingAvailable)
         XCTAssertEqual(bottom.destroyed,expected)
         XCTAssertTrue(r.admission.isAvailable); XCTAssertFalse(r.engine.isRunning)
-        XCTAssertTrue(r.controller.model.status.contains("Couldn't capture that app's audio"))
+        XCTAssertTrue(r.controller.model.status.contains("Couldn't record that app"))
         let terminated = expectation(description:"termination participant replied after actual drain")
         var permitted = false
         r.controller.beginShutdown { permitted = $0; terminated.fulfill() }

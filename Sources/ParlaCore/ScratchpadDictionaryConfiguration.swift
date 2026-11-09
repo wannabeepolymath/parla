@@ -35,7 +35,7 @@ public struct ScratchpadDictionaryConfiguration {
 
 public struct ScratchpadPreferenceFailure: Error, LocalizedError {
     public init() {}
-    public var errorDescription: String? { "Dictionary spelling settings unavailable or changed. Repair/reload settings and explicitly try again." }
+    public var errorDescription: String? { "Your dictionary changed or can’t be read. Try again." }
 }
 
 /// Narrow fakeable I/O seam. Reads must enforce regular-file and max+1 semantics.

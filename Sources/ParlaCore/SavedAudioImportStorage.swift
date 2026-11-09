@@ -9,15 +9,15 @@ public final class SavedAudioImportStorage: @unchecked Sendable {
         case unavailable, changed, unknown, contended, bounds, clock, space, io, uncertain, revoked
         public var message: String {
             switch self {
-            case .contended: return "Saved imports are in use by another owner."
-            case .unknown: return "Saved storage is unrecognized or incomplete. Its files have been preserved."
-            case .bounds: return "Saved storage reached a supported limit. No other saved job was removed."
-            case .clock: return "The clock could not be validated. Saved imports are unavailable."
-            case .space: return "Saved imports need 512 MiB of free space plus space reserved for this write."
-            case .revoked: return "This saved action is no longer current."
-            case .uncertain: return "Saved storage could not confirm a write or deletion. Private files may remain."
-            case .changed: return "Saved storage changed. Its files have been preserved."
-            case .io, .unavailable: return "Saved storage is unavailable. Its files have been preserved."
+            case .contended: return "Saved files are in use. Try again in a moment."
+            case .unknown: return "Saved files couldn’t be read. They haven’t been changed."
+            case .bounds: return "Too many saved files. Delete one first."
+            case .clock: return "Saved files are unavailable because the system clock looks wrong."
+            case .space: return "Not enough free space. Free up at least 512 MB."
+            case .revoked: return "This is out of date. Try again."
+            case .uncertain: return "Couldn’t confirm the change. Some files may remain."
+            case .changed: return "Saved files changed. Try again."
+            case .io, .unavailable: return "Saved files are unavailable right now."
             }
         }
     }

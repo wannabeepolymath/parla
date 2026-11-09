@@ -8,10 +8,10 @@ public enum ImportedWAV {
         case size, format, structure, duration
         public var message: String {
             switch self {
-            case .size: return "Choose a WAV no larger than 20 MiB."
-            case .format: return "Use RIFF WAV: mono, 16 kHz, signed 16-bit PCM."
-            case .structure: return "The complete WAV structure could not be validated."
-            case .duration: return "Use a complete clip between 0.4 and 600 seconds."
+            case .size: return "Choose a WAV file under 20 MB."
+            case .format: return "Use a mono 16 kHz 16-bit WAV file."
+            case .structure: return "This WAV file seems damaged."
+            case .duration: return "Use a file under 10 minutes."
             }
         }
     }

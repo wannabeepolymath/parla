@@ -59,7 +59,7 @@ final class HubProfileTests: XCTestCase {
         XCTAssertTrue(hub.saveProfile(p))
         var duplicate = profile("example.com"); duplicate.targetKind = .host
         XCTAssertFalse(hub.saveProfile(duplicate))
-        XCTAssertTrue(hub.profileError!.contains("Duplicate target"))
+        XCTAssertTrue(hub.profileError!.contains("Two profiles target"))
         var invalid = profile("app"); invalid.dictionary = [String(repeating: "界", count: 100)]
         XCTAssertFalse(hub.saveProfile(invalid))
         invalid.dictionary = []; invalid.language = "not-a-language"
@@ -77,7 +77,7 @@ final class HubProfileTests: XCTestCase {
         try data.write(to: store.url)
         hub.refresh()
         XCTAssertNotNil(hub.loadError)
-        XCTAssertTrue(hub.loadError!.contains("Profiles rejected"))
+        XCTAssertTrue(hub.loadError!.contains("Profile settings are invalid"))
         XCTAssertEqual(hub.settings.dictionary, ["keep"])
         XCTAssertEqual(hub.settings.anthropicApiKey, "preserve")
         XCTAssertTrue(hub.settings.profiles.isEmpty)

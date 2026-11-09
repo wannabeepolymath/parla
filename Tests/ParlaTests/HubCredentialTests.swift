@@ -63,7 +63,7 @@ final class HubCredentialTests: XCTestCase {
         let a = try CredentialScope.compatible("https://a.test/v1")
         XCTAssertEqual(backend.values[a], "a-key")
         hub.credentialDraft = "do-not-carry"; hub.settings.cleanup.baseURL = "https://a.test/v2"
-        XCTAssertEqual(hub.credentialDraft, ""); XCTAssertTrue(hub.credentialStatus.contains("No stored"))
+        XCTAssertEqual(hub.credentialDraft, ""); XCTAssertTrue(hub.credentialStatus.contains("No key saved"))
         hub.saveCredential(); hub.flushPendingSave()
         XCTAssertNil(backend.values[try .compatible("https://a.test/v2")])
         XCTAssertEqual(backend.values[a], "a-key"); XCTAssertEqual(backend.values[.anthropic], "anthropic")
@@ -74,11 +74,11 @@ final class HubCredentialTests: XCTestCase {
     func testExplicitReplaceAndRemoveRemainIndependentOfEnvironmentOverride() {
         backend.values[.anthropic] = "old"
         hub.credentialEnvironment = { ["ANTHROPIC_API_KEY": "env-secret"] }; hub.refreshCredentialStatus()
-        XCTAssertTrue(hub.credentialStatus.contains("Environment override")); XCTAssertTrue(hub.credentialStatus.contains("still wins"))
+        XCTAssertTrue(hub.credentialStatus.contains("environment variable"))
         hub.credentialDraft = "replacement"; hub.saveCredential(); hub.flushPendingSave()
         XCTAssertEqual(backend.values[.anthropic], "replacement"); XCTAssertEqual(hub.credentialDraft, "")
         hub.removeCredential(); hub.flushPendingSave()
-        XCTAssertNil(backend.values[.anthropic]); XCTAssertTrue(hub.credentialStatus.contains("Environment override"))
+        XCTAssertNil(backend.values[.anthropic]); XCTAssertTrue(hub.credentialStatus.contains("environment variable"))
         XCTAssertFalse(hub.credentialStatus.contains("env-secret"))
     }
     func testDeniedCanceledUpdateDeleteAreVisibleAndDraftIsRetainedForRetry() {
@@ -123,7 +123,7 @@ final class HubCredentialTests: XCTestCase {
         failWrite = true; hub.settings.cleanupModel = "edited"; hub.flushPendingSave()
         XCTAssertNotNil(hub.saveError)
         hub.credentialDraft = "blocked-by-save"; hub.saveCredential()
-        XCTAssertEqual(backend.adds, 0); XCTAssertTrue(hub.credentialMessage?.contains("save error") == true)
+        XCTAssertEqual(backend.adds, 0); XCTAssertTrue(hub.credentialMessage?.contains("settings error") == true)
     }
     func testCredentialDiskFailurePreservesLegacyBytesAndRetriesWithoutLosingSource() throws {
         let original = Data(#"{"anthropicApiKey":"legacy"}"#.utf8)

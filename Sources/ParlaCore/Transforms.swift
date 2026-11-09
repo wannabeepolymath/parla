@@ -23,12 +23,12 @@ public struct TransformPreset: Codable, Equatable, Identifiable, Sendable {
 
     public var validationError: String? {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if name.isEmpty || name.utf8.count > 120 { return "Preset name must contain 1–120 UTF-8 bytes." }
+        if name.isEmpty || name.utf8.count > 120 { return "Enter a preset name (up to 120 characters)." }
         let intent = (kind == .rewrite ? instruction : targetLanguage).trimmingCharacters(in: .whitespacesAndNewlines)
         let limit = kind == .rewrite ? 8192 : 120
         if intent.isEmpty || intent.utf8.count > limit {
-            return kind == .rewrite ? "Rewrite instruction must contain 1–8192 UTF-8 bytes."
-                : "Translation target must contain 1–120 UTF-8 bytes."
+            return kind == .rewrite ? "Enter an instruction (it can’t be empty or very long)."
+                : "Enter a target language."
         }
         return nil
     }
@@ -42,9 +42,9 @@ public struct TransformPreset: Codable, Equatable, Identifiable, Sendable {
 
 extension Settings {
     public func selectedTransformPreset() throws -> TransformPreset {
-        guard let id = selectedPresetID else { throw TransformError(description: "Choose a saved preset in the Hub") }
+        guard let id = selectedPresetID else { throw TransformError(description: "Choose a preset in Output & Presets") }
         let matches = transformPresets.filter { $0.id == id }
-        guard matches.count == 1 else { throw TransformError(description: "Selected preset missing or duplicated — choose a preset in the Hub") }
+        guard matches.count == 1 else { throw TransformError(description: "Selected preset is missing — choose one in Output & Presets") }
         let preset = matches[0]
         if let error = preset.validationError { throw TransformError(description: error) }
         return preset
@@ -64,9 +64,9 @@ public struct IntentionalTransform {
     }
 
     public func run(makeClient: (Settings) throws -> CleanupProviding) async throws -> String {
-        guard settings.cleanupEnabled else { throw TransformError(description: "Cleanup off — intentional transform refused") }
+        guard settings.cleanupEnabled else { throw TransformError(description: "Turn on cleanup to use presets") }
         guard !source.isEmpty, !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw TransformError(description: "Transform source or instruction is empty")
+            throw TransformError(description: "Nothing to change — select some text")
         }
         if settings.usesAppleIntelligence, preset?.kind != .rewrite || preset?.localPreserveSourceLanguage != true {
             throw LocalCleanupReason.unsupportedAction.error
@@ -79,7 +79,7 @@ public struct IntentionalTransform {
     public static func result(_ text: String, source: String) throws -> String {
         let result = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !result.isEmpty, result.count <= max(2000, 6 * source.count) else {
-            throw TransformError(description: "Transform returned empty or oversized text")
+            throw TransformError(description: "The preset returned no usable text")
         }
         return result
     }

@@ -23,18 +23,18 @@ struct HistoryRetryPreview: Identifiable {
     var saveFailed = false
 
     var status: String {
-        if stale { return "Saved row changed or was removed. This preview can only be copied; it cannot be saved." }
-        if loading { return request.isSegmented ? "Experimental cleanup: \(completedSegments)/\(request.plannedSegments) complete. Cancellation waits for owned work to exit." : "Request in progress…" }
-        if saved { return "Result saved. Original text and initial metadata preserved." }
+        if stale { return "This dictation changed in History. You can copy the result but not save it." }
+        if loading { return request.isSegmented ? "Cleaning up: \(completedSegments) of \(request.plannedSegments) sections…" : "Working…" }
+        if saved { return "Saved. The original text is kept too." }
         if let error { return error }
         if proposed != nil {
             switch provenance?.configuration.executionKind ?? request.configuration.executionKind {
-            case .deterministic: return "Local-only result ready — no provider request ran."
-            case .onDevice: return "On-device generated result ready for review; no endpoint request ran."
-            case .network: return "Proposed result ready for review."
+            case .deterministic: return "Result ready. Nothing was sent online."
+            case .onDevice: return "Result ready from Apple Intelligence."
+            case .network: return "Result ready."
             }
         }
-        return "Review the frozen current global settings below, then explicitly start the request."
+        return "Check the settings below, then start."
     }
 }
 
@@ -45,7 +45,7 @@ extension HubModel {
         let current = store.load()
         if store.lastError != nil { loadError = store.lastError }
         guard loadError == nil, saveError == nil, store.lastError == nil else {
-            historyRetryMessage = "Repair settings and reload them before starting a request or saving. Existing text and previews can still be copied."
+            historyRetryMessage = "Fix settings.json before starting or saving."
             return nil
         }
         return current
@@ -55,13 +55,13 @@ extension HubModel {
         // Latch invalidity before a pending flush can repair what was observed.
         do { _ = try store.savedRetrySnapshot() }
         catch {
-            historyRetryMessage = "Experimental cleanup requires readable, valid saved settings. Repair and reload before reviewing a new request."
+            historyRetryMessage = "Fix settings.json first."
             return nil
         }
         // The normal save owns credential migration and application callbacks.
         // Leave its pending work intact and require an explicit review afterward.
         guard !hasPendingSettingsSave else {
-            historyRetryMessage = "Settings are still saving. Review the request after they finish."
+            historyRetryMessage = "Wait for settings to save, then try again."
             return nil
         }
         do {
@@ -69,14 +69,14 @@ extension HubModel {
             guard loadError == nil, saveError == nil else { throw SegmentedRetryFailure.configuration }
             return current
         } catch {
-            historyRetryMessage = "Saved settings are unavailable. Repair and reload before starting or saving."
+            historyRetryMessage = "Settings can’t be read. Fix settings.json."
             return nil
         }
     }
 
     func prepareSegmentedHistoryRetry(_ id: UUID) {
         guard experimentalRetryOwner.admits else {
-            historyRetryMessage = "An experimental review or operation is still retained. Discard it and wait for actual exit before a new review."
+            historyRetryMessage = "Discard the current cleanup first."
             return
         }
         guard let current = currentSegmentedRetrySettings(), !history.loadBlocked,
@@ -91,7 +91,7 @@ extension HubModel {
             historyRetries[id] = HistoryRetryPreview(original: entry, version: version, request: request, operation: operation)
             historyRetryMessage = nil
         } catch {
-            historyRetryMessage = (error as? SegmentedRetryFailure)?.message ?? "Experimental cleanup configuration is unavailable."
+            historyRetryMessage = (error as? SegmentedRetryFailure)?.message ?? "Cleanup isn’t set up."
         }
     }
 
@@ -99,7 +99,7 @@ extension HubModel {
         guard let current = currentRetrySettings() else { return }
         guard !history.loadBlocked, let entry = history.entries.first(where: { $0.id == id }),
               let version = history.version(of: id) else {
-            historyRetryMessage = "Reload history before reviewing a saved row."
+            historyRetryMessage = "History couldn’t load. Try again."
             return
         }
         let operation = PendingOperation(name: "History retry", origin: .historyRetry, diagnostics: diagnostics)
@@ -113,14 +113,14 @@ extension HubModel {
             operation.diagnostics?.providerRefusal(error)
             operation.finish()
             // Only our policy errors are displayed, never raw provider errors.
-            historyRetryMessage = (error as? TransformError)?.description ?? "Cannot prepare this request."
+            historyRetryMessage = (error as? TransformError)?.description ?? "Couldn’t prepare this. Check your cleanup settings."
         }
     }
 
     @MainActor func startHistoryRetry(_ id: UUID) async {
         guard var preview = historyRetries[id], !preview.started else { return }
         if preview.request.isSegmented, (!experimentalRetryOwner.owns(preview.token) || preview.operation.shouldAbort) {
-            preview.started = true; preview.error = "This experimental review was revoked. Discard it and review a new request."
+            preview.started = true; preview.error = "Settings changed. Discard this and try again."
             historyRetries[id] = preview; return
         }
         // Start the single budget before validation/queueing/setup.
@@ -129,7 +129,7 @@ extension HubModel {
               !preview.started,
               !preview.stale, !history.loadBlocked, history.matches(preview.original, version: preview.version) else { return }
         guard historyRetryTasks[id] == nil else {
-            historyRetryMessage = "Previous request is still stopping. Wait for it to exit before starting another for this row."
+            historyRetryMessage = "Wait for the last request to stop."
             return
         }
         preview.started = true; preview.loading = true; preview.error = nil
@@ -201,7 +201,7 @@ extension HubModel {
             // Retain before any storage operation. This method never writes.
             active.proposed = text; active.provenance = provenance
         case .failure(let error):
-            active.error = (error as? SegmentedRetryFailure)?.message ?? LocalCleanupReason.from(error)?.message ?? "Request failed or returned empty/invalid text. Review a new request to try again; Retry Save is unavailable."
+            active.error = (error as? SegmentedRetryFailure)?.message ?? LocalCleanupReason.from(error)?.message ?? "That didn’t work. Try again."
         }
         historyRetries[id] = active
     }
@@ -209,7 +209,7 @@ extension HubModel {
     func saveHistoryRetry(_ id: UUID) {
         if let preview = historyRetries[id], preview.request.isSegmented,
            (!experimentalRetryOwner.owns(preview.token) || preview.operation.shouldAbort) {
-            historyRetryMessage = "This experimental review was revoked. Retained text can be copied; discard and review a new request to continue."
+            historyRetryMessage = "Settings changed. Copy the text or discard and try again."
             return
         }
         guard var preview = historyRetries[id],
@@ -217,11 +217,11 @@ extension HubModel {
               !preview.saved, !preview.stale, !preview.loading,
               let text = preview.proposed, let provenance = preview.provenance else { return }
         guard current.historyEnabled else {
-            historyRetryMessage = "History is off. Preview and Copy remain available until quit or discard. Enable history to explicitly save this same result without another request."
+            historyRetryMessage = "History is off. Turn it on to save, or copy the result."
             return
         }
         guard !history.loadBlocked else {
-            historyRetryMessage = "Retry Load before saving. The proposed result remains available."
+            historyRetryMessage = "History couldn’t load. Try again from History."
             return
         }
         switch history.updateResult(expected: preview.original, version: preview.version, text: text, retry: provenance) {
@@ -229,7 +229,7 @@ extension HubModel {
         case .stale: preview.stale = true
         case .failed:
             preview.saveFailed = true
-            preview.error = "Couldn't save. Saved text is unchanged. Retry Save stores this same result without another request."
+            preview.error = "Couldn’t save to history. Try again."
         }
         historyRetries[id] = preview
     }

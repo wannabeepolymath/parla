@@ -742,10 +742,10 @@ extension MeetingHubCompositionTests {
                 r.destination = r.fixture.root.appendingPathComponent("safe.\(ext)")
                 r.writerHook = {XCTAssertFalse(r.meeting.controller.reserveRestart());XCTAssertFalse(r.meeting.bottom.descriptors.isEmpty)}
                 run();XCTAssertEqual(r.writes.count,before+1)
-                XCTAssertTrue(r.audio.message?.hasPrefix("Exported current native segments") == true)
+                XCTAssertTrue(r.audio.message?.hasPrefix("Exported as ") == true)
                 XCTAssertTrue(String(decoding:r.writes.last!.0,as:UTF8.self).contains("Literal cue"))
                 r.destination = r.meeting.bottom.rootURL.appendingPathComponent("blocked.\(ext)");run()
-                XCTAssertEqual(r.writes.count,before+1);XCTAssertFalse(r.audio.message?.hasPrefix("Exported current native segments") == true)
+                XCTAssertEqual(r.writes.count,before+1);XCTAssertFalse(r.audio.message?.hasPrefix("Exported as ") == true)
                 r.destination = r.fixture.root.appendingPathComponent("throw.\(ext)");r.writerError = true;run();r.writerError = false
                 XCTAssertEqual(r.writes.count,before+2);XCTAssertEqual(r.audio.message,"Couldn’t export. Choose another location and try again.")
                 r.destination = r.fixture.root.appendingPathComponent("stale.\(ext)")

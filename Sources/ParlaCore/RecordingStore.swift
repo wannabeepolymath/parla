@@ -30,7 +30,9 @@ public final class RecordingStore: @unchecked Sendable {
         public var removed = 0
         public var busy = 0
         public var failed = 0
-        public var message: String { "Removed \(removed); busy/skipped \(busy); failed \(failed)." }
+        public var message: String {
+            "Deleted \(removed)." + (busy > 0 ? " \(busy) in use." : "") + (failed > 0 ? " \(failed) couldn’t be deleted." : "")
+        }
     }
     public struct Descriptor: Identifiable, Equatable {
         public let id: String
@@ -88,7 +90,7 @@ public final class RecordingStore: @unchecked Sendable {
         self.resolvedDirectory = self.directory.resolvingSymlinksInPath()
         self.keepAll = keepAll; self.writer = writer; self.remover = remover
         policyValue = requireValidatedPolicy ? nil : Policy()
-        policyErrorValue = requireValidatedPolicy ? "Audio policy unavailable. Existing files are kept; new disk stashes and recovery use are disabled until settings are repaired." : nil
+        policyErrorValue = requireValidatedPolicy ? "Settings can’t be read, so audio from failed dictations isn’t being saved." : nil
     }
     private func locked<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try body()
@@ -109,8 +111,8 @@ public final class RecordingStore: @unchecked Sendable {
                 policyErrorValue = nil
             } else {
                 policyErrorValue = policyValue == nil
-                    ? "Audio policy unavailable. Existing files are kept; new disk stashes and recovery use are disabled until settings are repaired."
-                    : "Settings unavailable. The last valid audio policy remains in effect. Repair settings before starting transcription or saving text."
+                    ? "Settings can’t be read, so audio from failed dictations isn’t being saved."
+                    : "Settings can’t be read. Fix settings.json to transcribe or save."
             }
             _ = prune(now: now)
         }
@@ -127,14 +129,14 @@ public final class RecordingStore: @unchecked Sendable {
     private func busy(_ url: URL) -> Bool { owner(url) != nil }
     private func safeRoot() throws {
         // Do not follow a recordings directory replaced by a symbolic link.
-        guard directory.resolvingSymlinksInPath().path == resolvedDirectory.path else { throw Failure("Recordings folder is a symbolic-link alias; access refused.") }
+        guard directory.resolvingSymlinksInPath().path == resolvedDirectory.path else { throw Failure("The recordings folder is an alias, so Parla won’t use it.") }
         do {
             let a = try FileManager.default.attributesOfItem(atPath: directory.path)
             guard a[.type] as? FileAttributeType == .typeDirectory else { throw Failure("Recordings folder is unavailable.") }
         } catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile { return }
     }
     private func attributes(_ url: URL) throws -> [FileAttributeKey: Any] {
-        guard owned(url) else { throw Failure("Recording is outside the owned folder.") }
+        guard owned(url) else { throw Failure("This file isn’t in Parla’s recordings folder.") }
         try safeRoot()
         return try FileManager.default.attributesOfItem(atPath: url.path) // lstat: never follows leaf symlinks
     }
@@ -142,12 +144,12 @@ public final class RecordingStore: @unchecked Sendable {
         let a = try attributes(url)
         guard a[.type] as? FileAttributeType == .typeRegular,
               let inode = a[.systemFileNumber] as? UInt64, let bytes = a[.size] as? Int,
-              let modified = a[.modificationDate] as? Date else { throw Failure("Unavailable: not a regular recording file (symlinks are refused).") }
+              let modified = a[.modificationDate] as? Date else { throw Failure("Not a regular audio file.") }
         return Identity(inode: inode, bytes: bytes, modified: modified)
     }
     private func metadata(_ url: URL, now: Date, allowPartial: Bool = false) throws -> (Identity, Double) {
-        guard let policyValue else { throw Failure("Audio policy unavailable; repair settings first.") }
-        guard allowPartial || !FileManager.default.fileExists(atPath: partialMarker(for: url).path) else { throw Failure("Unfinished audio write; this file cannot be played or transcribed. Delete it explicitly.") }
+        guard let policyValue else { throw Failure("Fix settings.json first.") }
+        guard allowPartial || !FileManager.default.fileExists(atPath: partialMarker(for: url).path) else { throw Failure("This recording is incomplete. Delete it.") }
         let stamp = try identity(url)
         guard stamp.modified >= now.addingTimeInterval(-Double(policyValue.days) * 86_400) else { throw Failure("Recording expired.") }
         guard stamp.bytes > 44, stamp.bytes <= Self.maximumBytes else { throw Failure("Empty or oversized recording.") }
@@ -161,7 +163,7 @@ public final class RecordingStore: @unchecked Sendable {
         let seconds = Double(file.length) / format.sampleRate
         guard format.streamDescription.pointee.mFormatID == kAudioFormatLinearPCM,
               format.channelCount > 0, format.channelCount <= 8, seconds.isFinite,
-              seconds > 0, seconds <= 1_200 else { throw Failure("Empty, unsupported, or over-20-minute recording.") }
+              seconds > 0, seconds <= 1_200 else { throw Failure("Empty, unsupported or longer than 20 minutes.") }
         return (stamp, seconds)
     }
     private func readURLs(includeOrphans: Bool = false) throws -> [URL] {
@@ -185,7 +187,7 @@ public final class RecordingStore: @unchecked Sendable {
     }
     private func urls() -> [URL] {
         do { return try readURLs() }
-        catch { report("Couldn’t read the recordings folder. No files were assumed missing."); return [] }
+        catch { report("Couldn’t read the recordings folder."); return [] }
     }
 
     /// Ownership starts before the injected writer runs, and ends only at resolve.
@@ -234,7 +236,7 @@ public final class RecordingStore: @unchecked Sendable {
                     // A failed/partial write is never offered as a failed dictation.
                     do { try removeOwned(lease.url) } catch { partial = true }
                 }
-                report(partial ? "Audio write failed and its partial file could not be removed. Delete the unavailable file explicitly. Dictation can continue." : "Couldn’t save recovery audio. Dictation can continue; recovery may be unavailable.")
+                report(partial ? "Couldn’t save the audio, and a partial file was left. Delete it in Data & Privacy." : "Couldn’t save the audio. Dictation still works.")
                 return nil
             }
         }
@@ -248,7 +250,7 @@ public final class RecordingStore: @unchecked Sendable {
                 let target = lease?.url ?? url
                 if let lease { lease.revoked = true; lease.onRevoke?(); release(lease) }
                 do { try removeOwned(target); changed() }
-                catch { report("Secure audio purge failed. The recording may still be on disk; delete it explicitly.") }
+                catch { report("Couldn’t delete a recording. Delete it in Data & Privacy.") }
                 return
             }
             guard let lease = active[url.path], captures.contains(lease.token) else { return }
@@ -273,7 +275,7 @@ public final class RecordingStore: @unchecked Sendable {
             // An already-resolved capture may have been acquired by recovery or
             // replaced externally. That is no longer ours to delete.
             guard owner(lease.url).map({ $0.token == lease.token }) != false else {
-                report("Discard could not remove audio now owned by another operation."); return false
+                report("Couldn’t delete the audio because it’s in use."); return false
             }
             do {
                 do {
@@ -287,7 +289,7 @@ public final class RecordingStore: @unchecked Sendable {
                 changed(); return true
             } catch {
                 release(lease)
-                report("Pending output discarded, but its audio or corpus sidecar could not be deleted. Check recordings and delete it explicitly.")
+                report("Discarded, but its audio couldn’t be deleted. Delete it in Data & Privacy.")
                 return false
             }
         }
@@ -305,7 +307,7 @@ public final class RecordingStore: @unchecked Sendable {
                 try transcript.write(to: sidecar(for: lease.url), atomically: true, encoding: .utf8)
             } else { try removeOwned(lease.url) }
             changed()
-        } catch { report("Recognition succeeded, but audio disposal/corpus marking failed. Check recordings; the text remains available.") }
+        } catch { report("Done, but its audio couldn’t be deleted. Delete it in Data & Privacy.") }
     }
     public func complete(_ lease: Lease, transcript: String?) {
         locked {
@@ -326,7 +328,7 @@ public final class RecordingStore: @unchecked Sendable {
             let eligibility = Result { try metadata(url, now: now) }
             _ = prune(now: now)
             let stamp = try eligibility.get().0
-            guard !FileManager.default.fileExists(atPath: sidecar(for: url).path) else { throw Failure("Corpus success is excluded from failed recovery.") }
+            guard !FileManager.default.fileExists(atPath: sidecar(for: url).path) else { throw Failure("This recording didn’t fail, so it isn’t listed.") }
             let lease = Lease(url, identity: stamp); lease.onRevoke = onRevoke
             active[url.path] = lease; changed(); return lease
         }
@@ -334,8 +336,8 @@ public final class RecordingStore: @unchecked Sendable {
     public func validate(_ lease: Lease, now: Date = Date()) throws {
         try locked {
             guard !lease.revoked, active[lease.url.path]?.token == lease.token else { throw Failure("Recording use was stopped.") }
-            guard !FileManager.default.fileExists(atPath: sidecar(for: lease.url).path) else { throw Failure("Recording is now marked as a corpus success.") }
-            guard try metadata(lease.url, now: now).0 == lease.identity else { throw Failure("Recording changed; refresh before using it.") }
+            guard !FileManager.default.fileExists(atPath: sidecar(for: lease.url).path) else { throw Failure("This recording didn’t fail, so it isn’t listed.") }
+            guard try metadata(lease.url, now: now).0 == lease.identity else { throw Failure("This recording changed. Click Refresh.") }
         }
     }
     /// Exact same loader as eval; revalidate at queued use, before any model load.
@@ -347,7 +349,7 @@ public final class RecordingStore: @unchecked Sendable {
                 try validate(lease, now: now)
                 guard !samples.isEmpty, samples.allSatisfy({ $0.isFinite }) else { throw Failure("Audio is empty or corrupt.") }
                 return samples
-            } catch { report("Couldn’t read recovery audio; no model was loaded."); throw Failure("Couldn’t read recovery audio.") }
+            } catch { report("Couldn’t read the audio file."); throw Failure("Couldn’t read recovery audio.") }
         }
     }
     public func descriptors(now: Date = Date()) -> [Descriptor] {
@@ -376,7 +378,7 @@ public final class RecordingStore: @unchecked Sendable {
             for url in urls() where !busy(url) {
                 guard let stamp = try? identity(url), stamp.modified < cutoff else { continue }
                 do { try removeOwned(url); removed += 1 }
-                catch { report("Couldn’t fully expire a recording or its sidecar. Check the folder and retry.") }
+                catch { report("Couldn’t delete an expired recording. Try again.") }
             }
             if removed > 0 { changed() }; return removed
         }
@@ -390,9 +392,9 @@ public final class RecordingStore: @unchecked Sendable {
     public func recordings() -> [URL] { locked { urls().filter { !busy($0) } } }
     @discardableResult public func delete(_ url: URL, now: Date = Date()) -> Bool {
         locked {
-            guard !busy(url) else { report("Recording is busy; it was not deleted."); return false }
+            guard !busy(url) else { report("This recording is in use, so it wasn’t deleted."); return false }
             do { try removeOwned(url); _ = prune(now: now); changed(); return true }
-            catch { report("Couldn’t delete the recording or its sidecar. Check the folder and retry."); return false }
+            catch { report("Couldn’t delete the recording. Try again."); return false }
         }
     }
     @discardableResult public func clear(now: Date = Date()) -> Outcome {
@@ -401,11 +403,11 @@ public final class RecordingStore: @unchecked Sendable {
             result.removed = prune(now: now)
             let files: [URL]
             do { files = try readURLs(includeOrphans: true) }
-            catch { result.failed = 1; report("Couldn’t read the recordings folder. Clear did not complete."); return result }
+            catch { result.failed = 1; report("Couldn’t read the recordings folder. Nothing was deleted."); return result }
             for url in files {
                 if busy(url) { result.busy += 1; continue }
                 do { try removeOwned(url); result.removed += 1 }
-                catch { result.failed += 1; report("Couldn’t clear a recording or its sidecar. Some files remain.") }
+                catch { result.failed += 1; report("Couldn’t delete some recordings. Try again.") }
             }
             changed(); return result
         }
@@ -470,7 +472,7 @@ public final class RecordingStore: @unchecked Sendable {
             let n = min(16_384, samples.count - offset)
             guard let buf = AVAudioPCMBuffer(pcmFormat: format,
                                              frameCapacity: AVAudioFrameCount(n)),
-                  let channel = buf.floatChannelData?[0] else { throw Failure("Couldn’t allocate audio buffer.") }
+                  let channel = buf.floatChannelData?[0] else { throw Failure("Not enough memory to read the audio.") }
             buf.frameLength = AVAudioFrameCount(n)
             samples.withUnsafeBufferPointer { channel.update(from: $0.baseAddress! + offset, count: n) }
             try file.write(from: buf)

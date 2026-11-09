@@ -258,7 +258,7 @@ final class TransformTests: XCTestCase {
                 XCTAssertTrue(records(fx).isEmpty)
                 XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
                 if mode == .selectedPreset, failure != nil { noInsert(fx); XCTAssertFalse(fx.contains(.hud(.done))) }
-                if focus == .none { noInsert(fx); XCTAssertTrue(fx.contains(.hud(.error("History off — text discarded")))) }
+                if focus == .none { noInsert(fx); XCTAssertTrue(fx.contains(.hud(.error("No text field to type into — text discarded")))) }
             }
         }
         let s = settings(history: false), m = DictationSession(), session = try saved(m, s)

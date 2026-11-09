@@ -497,7 +497,7 @@ public final class DictationSession {
             operation.revoke()
             if generation == gen, !isCapturing {
                 state = .idle
-                return [.abortOperation(operation), .menuBar(.idle), .hud(.notice("Pending output discarded. Stopping work…"))]
+                return [.abortOperation(operation), .menuBar(.idle), .hud(.notice("Discarded"))]
             }
             return [.abortOperation(operation)]
         case let .discardPending(token):
@@ -508,8 +508,8 @@ public final class DictationSession {
             if pendingGeneration == gen, !isCapturing {
                 state = .idle
                 effects += [.menuBar(.idle), .hud(.notice(outcome == .deliveryAttempted
-                    ? "Delivery was already attempted; remaining output discarded. No undo."
-                    : "Pending output discarded. Stopping work…"))]
+                    ? "Already typed — the rest was discarded"
+                    : "Discarded"))]
             }
             return effects
         case let .operationDisposalFailed(operation, message):
@@ -550,7 +550,7 @@ public final class DictationSession {
             // Refuse early — before any recording, and without consuming a
             // generation: a refused command must not silently invalidate an
             // in-flight polish.
-            guard focus != .secure else { return [.secureRefusal("No transforms in password fields")] }
+            guard focus != .secure else { return [.secureRefusal("Not available in password fields")] }
             guard let selection else { return [.hud(.error("Select text first"))] }
             gen += 1
             state = .starting(Session(gen: gen, mode: .command(selection: selection), settings: settings,
@@ -560,7 +560,7 @@ public final class DictationSession {
 
         case let .startSavedPreset(settings, configured, selection, target):
             guard !isCapturing else { return [.hud(.error("Finish recording first"))] }
-            guard target.focus != .secure else { return [.secureRefusal("No transforms in password fields")] }
+            guard target.focus != .secure else { return [.secureRefusal("Not available in password fields")] }
             guard target.focus == .editable || target.focus == .unknown,
                   let selection, !selection.isEmpty else { return [.hud(.error("Select text first"))] }
             let preset: TransformPreset
@@ -571,7 +571,7 @@ public final class DictationSession {
                                transformTarget: target, diagnostics: diagnostics)
                 .resolvingOutput(at: ProfileDestination(bundleID: target.bundleID, browserURL: target.browserURL))
             guard next.effectiveSettings.cleanupEnabled, configured else {
-                return [.hud(.error("Cleanup off or not configured — transform refused"))]
+                return [.hud(.error("Turn on cleanup to use presets"))]
             }
             gen += 1
             state = .polishing(gen: gen)
@@ -840,7 +840,7 @@ public final class DictationSession {
         // transcript IS final, so land the terminal state directly.
         let fieldHUD: HUDState = willPolish ? .polishing : .done
         let historyHUD: HUDState = willPolish ? .polishing
-            : s.settings.historyEnabled ? .savedToHistory : .error("History off — text discarded")
+            : s.settings.historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")
 
         // Length, never the text: logs land in a plain file that outlives "history off".
         var fx: [Effect] = [.log("Parla finish: chars=\(insertText.count) live=\(s.live ? 1 : 0) "
@@ -932,7 +932,7 @@ public final class DictationSession {
             if s.settings.historyEnabled {
                 fx.append(.appendHistory(raw: landed.raw, cleaned: text != landed.raw ? text : nil, appName: nil))
             }
-            fx += [.hud(.notice(failure == nil ? "Result ready" : "Local fallback result ready")), .playSound(.finish)]
+            fx += [.hud(.notice(failure == nil ? "Result ready" : "Result ready (without cleanup)")), .playSound(.finish)]
             return fx + finishTail(s)
         }
         if s.effectiveSettings.outputMode == .selectedPreset {
@@ -962,8 +962,8 @@ public final class DictationSession {
                     s.operation.diagnostics?.disposition(.noDestination)
                     fx.append(.log("Parla delivery: no current destination, insertion withheld"))
                     fx.append(.hud(s.surroundingTextRun.insertionOnly
-                        ? .notice(historyEnabled ? "Context result withheld; raw text only in History" : "Context result withheld; History off")
-                        : historyEnabled ? .savedToHistory : .error("History off — text discarded")))
+                        ? .notice(historyEnabled ? "No text field to type into — saved in History" : "No text field to type into")
+                        : historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")))
                 }
             } else {
                 s.operation.diagnostics?.disposition(.staleGeneration)
@@ -990,7 +990,7 @@ public final class DictationSession {
         let plan = LiveTyper.swapPlan(raw: landed.insertText, cleaned: cleaned)
         let failureHUD = failure.map(HUDState.rawFallback)
         let unverifiedHUD: HUDState = historyEnabled ? .cleanedInHistory
-            : .error("History off — cleanup discarded")
+            : .error("Couldn’t apply cleanup — kept your original text")
 
         var fx: [Effect] = []
         if s.gen != gen {
@@ -1009,7 +1009,7 @@ public final class DictationSession {
             case .history:
                 // Nothing of ours in a field — history is the only durable landing.
                 fx.append(.hud(historyEnabled ? (failureHUD ?? .savedToHistory)
-                                              : .error("History off — text discarded")))
+                                              : .error("No text field to type into — text discarded")))
             case .field:
                 if let plan {
                     fx.append(.replaceTailIfOurs(expect: landed.insertText, erase: plan.eraseTail.count,
@@ -1052,7 +1052,7 @@ public final class DictationSession {
                    .playSound(.finish), .hud(.done)]
         } else if s.gen == gen {
             let message: HUDState = transformed == nil ? .error(failure ?? "Transform failed")
-                : s.settings.historyEnabled ? .savedToHistory : .error("History off — text discarded")
+                : s.settings.historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")
             fx.append(.hud(message))
         }
         if s.settings.historyEnabled {
@@ -1084,7 +1084,7 @@ public final class DictationSession {
             fx += [.insertText(flatten ? TextRules.flattenForTerminal(result) : result, historyEnabled: s.settings.historyEnabled), .playSound(.finish), .hud(.done)]
         } else if s.gen == gen {
             fx.append(.hud(result == nil ? .error(failure ?? "Transform failed")
-                : s.settings.historyEnabled ? .savedToHistory : .error("History off — text discarded")))
+                : s.settings.historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")))
         }
         if s.settings.historyEnabled {
             let record = Effect.appendTransformHistory(raw: landed.raw, cleaned: result, appName: landed.appName,

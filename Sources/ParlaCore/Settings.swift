@@ -232,7 +232,7 @@ public struct Settings: Codable, Equatable, Sendable {
         recoveryAudioEnabled = try c.decodeIfPresent(Bool.self, forKey: .recoveryAudioEnabled) ?? true
         let days = try c.decodeIfPresent(Int.self, forKey: .recoveryAudioDays) ?? 7
         guard RecordingStore.dayRange.contains(days) else {
-            throw DecodingError.dataCorruptedError(forKey: .recoveryAudioDays, in: c, debugDescription: "Audio lifetime must be 1–30 days.")
+            throw DecodingError.dataCorruptedError(forKey: .recoveryAudioDays, in: c, debugDescription: "Choose between 1 and 30 days.")
         }
         recoveryAudioDays = days
         showHudAlways = try c.decodeIfPresent(Bool.self, forKey: .showHudAlways) ?? showHudAlways
@@ -243,7 +243,7 @@ public struct Settings: Codable, Equatable, Sendable {
         inputDeviceUID = try c.decodeIfPresent(String.self, forKey: .inputDeviceUID) ?? inputDeviceUID
         hotkeys = try c.decodeIfPresent(HotkeyBindings.self, forKey: .hotkeys) ?? hotkeys
         do { mouseBinding = try c.decodeIfPresent(MouseButtonBinding.self, forKey: .mouseBinding) }
-        catch { mouseBinding = nil; mouseBindingProblem = "Mouse trigger disabled: choose Middle or an extra button from 4 to 16." }
+        catch { mouseBinding = nil; mouseBindingProblem = "Mouse push to talk is off. Choose Middle or a button from 4 to 16." }
         // Not `?? onboardingCompleted`: we only get here because a settings.json
         // exists, and an existing user must not be interrupted by a first-run flow.
         onboardingCompleted = try c.decodeIfPresent(Bool.self, forKey: .onboardingCompleted) ?? true
@@ -406,13 +406,13 @@ public final class SettingsStore {
                     object.removeValue(forKey: "cleanupFailover")
                     let remainder = try JSONSerialization.data(withJSONObject: object)
                     if let globals = try? JSONDecoder().decode(Settings.self, from: remainder) {
-                        return (globals, "Cleanup backups rejected; editing disabled. " + Self.hint(error))
+                        return (globals, "Backup cleanup settings are invalid. " + Self.hint(error))
                     }
                     for key in ["guidedTemplates", "profiles", "transformPresets"] where object[key] != nil {
                         var candidate = object; candidate.removeValue(forKey: key)
                         if var globals = try? JSONDecoder().decode(Settings.self, from: JSONSerialization.data(withJSONObject: candidate)) {
                             if key == "profiles" { globals.recognitionEngine = .invalid }
-                            return (globals, "Cleanup backups and related block rejected; editing disabled. " + Self.hint(error))
+                            return (globals, "Backup cleanup settings are invalid. " + Self.hint(error))
                         }
                     }
                 }
@@ -422,7 +422,7 @@ public final class SettingsStore {
                    object.removeValue(forKey: "guidedTemplates") != nil,
                    let globals = try? JSONDecoder().decode(Settings.self,
                        from: JSONSerialization.data(withJSONObject: object)) {
-                    return (globals, "Templates rejected; editing disabled. " + Self.hint(error))
+                    return (globals, "Voice template settings are invalid. " + Self.hint(error))
                 }
                 // Reject the entire new profile block, keep unrelated globals usable,
                 // and leave the original bytes untouched. lastError disables Hub saves
@@ -432,13 +432,13 @@ public final class SettingsStore {
                    let globals = try? JSONDecoder().decode(Settings.self,
                        from: JSONSerialization.data(withJSONObject: object)) {
                     var refused = globals; refused.recognitionEngine = .invalid
-                    return (refused, "Profiles rejected; editing disabled. " + Self.hint(error))
+                    return (refused, "Profile settings are invalid. " + Self.hint(error))
                 }
                 if var object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    object.removeValue(forKey: "transformPresets") != nil,
                    let globals = try? JSONDecoder().decode(Settings.self,
                        from: JSONSerialization.data(withJSONObject: object)) {
-                    return (globals, "Presets rejected; editing disabled. " + Self.hint(error))
+                    return (globals, "Preset settings are invalid. " + Self.hint(error))
                 }
                 return (Self.refusedExplicitRecognition(in: data), Self.hint(error))
             }
@@ -567,9 +567,9 @@ public final class SettingsStore {
             guard var object = try JSONSerialization.jsonObject(with: seed) as? [String: Any] else { throw GuidedTemplateFailure("Settings unavailable.") }
             object["guidedTemplates"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(document))
             let output = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-            guard output.count <= ScratchpadPreferenceIO.maxBytes else { throw GuidedTemplateFailure("Settings exceed narrow template editing limit.") }
+            guard output.count <= ScratchpadPreferenceIO.maxBytes else { throw GuidedTemplateFailure("Settings are too large to edit templates.") }
             _ = try JSONDecoder().decode(Settings.self, from: output)
-            guard try readFailoverObservedNarrowLocked() == original else { throw GuidedTemplateFailure("Settings changed during template edit.") }
+            guard try readFailoverObservedNarrowLocked() == original else { throw GuidedTemplateFailure("Settings changed. Try again.") }
             try scratchpadIO.write(output, url); cached = nil
             return document
         }
@@ -586,18 +586,18 @@ public final class SettingsStore {
             let (selected, selectedError) = readFromDisk()
             _lastError = selectedError
             if selectedError != nil { cached = nil }
-            guard selectedError == nil else { throw CredentialFailure("Settings unavailable. Reload before importing.") }
+            guard selectedError == nil else { throw CredentialFailure("Settings can’t be read. Fix settings.json before importing.") }
             if !selected.usesAppleIntelligence { try migrateLocked() }
             let (current, error) = readFromDisk()
             _lastError = error
             cached = nil
-            guard error == nil else { throw VocabularyTransferError.invalid("Cannot import: settings failed to load.") }
+            guard error == nil else { throw VocabularyTransferError.invalid("Settings can’t be read. Fix settings.json before importing.") }
             guard VocabularyDocument(settings: current) == preview.original else {
-                throw VocabularyTransferError.invalid("Vocabulary changed since preview. Open the import again.")
+                throw VocabularyTransferError.invalid("Your vocabulary changed. Choose the file again.")
             }
             let document = preview.result(mode: mode)
             guard mode != .replace || !document.isEmpty else {
-                throw VocabularyTransferError.invalid("Empty replacement imports are refused. Use the editors to clear vocabulary.")
+                throw VocabularyTransferError.invalid("This file is empty. Nothing was replaced.")
             }
             _ = try document.encoded()
             var backup: URL?
@@ -624,7 +624,7 @@ public final class SettingsStore {
     @discardableResult public func migrateCredentials() -> String? {
         lock.withLock {
             do { try migrateLocked(); return nil }
-            catch { return _migrationError ?? "Credential migration pending. Original settings preserved." }
+            catch { return _migrationError ?? "API keys still need to move to Keychain. Click Refresh in AI Cleanup." }
         }
     }
 
@@ -632,7 +632,7 @@ public final class SettingsStore {
     @discardableResult public func migrateSelectedCredentials() -> String? {
         lock.withLock {
             let (settings, error) = readFromDisk()
-            guard error == nil else { return "Settings unavailable. Repair and reload." }
+            guard error == nil else { return "Settings can’t be read. Fix settings.json." }
             if settings.usesAppleIntelligence { return nil }
             do { try migrateLocked(); return nil }
             catch { return _migrationError ?? "Credential migration pending." }
@@ -643,7 +643,7 @@ public final class SettingsStore {
     /// secret-free. Never consult credentials to authorize a local edit.
     private func writeLocalPreserving(_ settings: Settings, replacing base: Settings?) throws {
         let (current, error) = readFromDisk()
-        guard error == nil else { throw CredentialFailure("Settings unavailable. Reload before saving.") }
+        guard error == nil else { throw CredentialFailure("Settings can’t be read. Fix settings.json.") }
         let original: Data?
         do { original = try readSettingsBytes() }
         catch let error as CocoaError where error.code == .fileReadNoSuchFile { original = nil }
@@ -653,7 +653,7 @@ public final class SettingsStore {
               settings.anthropicApiKey == authoritative.anthropicApiKey,
               settings.cleanup.apiKey == authoritative.cleanup.apiKey,
               settings.cleanup.baseURL == authoritative.cleanup.baseURL else {
-            throw CredentialFailure("Settings or network credential binding changed. Reload before saving; original preserved.")
+            throw CredentialFailure("Settings changed. Reopen Parla’s settings and try again.")
         }
         if settings == authoritative { return }
         let encoder = JSONEncoder()
@@ -664,9 +664,9 @@ public final class SettingsStore {
                 var cleanup = object["cleanup"] as? [String: Any] ?? [:]
                 cleanup["apiKey"] = key; object["cleanup"] = cleanup
             }
-            guard try readSettingsBytes() == original else { throw CredentialFailure("Settings changed. Reload before saving.") }
+            guard try readSettingsBytes() == original else { throw CredentialFailure("Settings changed. Try again.") }
         } else {
-            guard !(try settingsExist()) else { throw CredentialFailure("Settings changed. Reload before saving.") }
+            guard !(try settingsExist()) else { throw CredentialFailure("Settings changed. Try again.") }
         }
         try prepareSettingsParent()
         let encoded = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
@@ -681,14 +681,14 @@ public final class SettingsStore {
             let (settings, error) = readFromDisk()
             _lastError = error
             if error != nil { cached = nil }
-            guard error == nil else { throw CredentialFailure("Settings unavailable or invalid. Repair and reload before saving.") }
+            guard error == nil else { throw CredentialFailure("Settings can’t be read. Fix settings.json.") }
             guard (try settingsExist()) else { _migrationError = nil; return }
             let original = try readSettingsBytes()
             // Decode the exact bytes we compare, without the partial-block recovery path.
             let authoritative = try JSONDecoder().decode(Settings.self, from: original)
-            guard authoritative == settings else { throw CredentialFailure("Settings changed. Reload before retrying migration.") }
+            guard authoritative == settings else { throw CredentialFailure("Settings changed. Try again.") }
             guard var object = try JSONSerialization.jsonObject(with: original) as? [String: Any] else {
-                throw CredentialFailure("Settings unavailable. Repair and reload before saving.")
+                throw CredentialFailure("Settings can’t be read. Fix settings.json.")
             }
             let cleanup = object["cleanup"] as? [String: Any]
             guard object["anthropicApiKey"] != nil || cleanup?["apiKey"] != nil else { _migrationError = nil; return }
@@ -699,7 +699,7 @@ public final class SettingsStore {
             // An editor/provider switch during Keychain I/O must survive. Compare under
             // the same store lock immediately before the atomic legacy-field removal.
             guard try readSettingsBytes() == original else {
-                throw CredentialFailure("Settings changed during migration. Reload and retry; newer settings preserved.")
+                throw CredentialFailure("Settings changed. Try again.")
             }
             object.removeValue(forKey: "anthropicApiKey")
             if var cleanup { cleanup.removeValue(forKey: "apiKey"); object["cleanup"] = cleanup }
@@ -707,7 +707,7 @@ public final class SettingsStore {
             try atomicWrite(written, url); observeSurroundingTextBytesLocked(written)
             cached = nil; _migrationError = nil
         } catch {
-            let message = (error as? CredentialFailure)?.description ?? "Credential migration pending. Original settings preserved; retry migration."
+            let message = (error as? CredentialFailure)?.description ?? "API keys still need to move to Keychain. Click Refresh in AI Cleanup."
             _migrationError = message
             throw CredentialFailure(message)
         }
@@ -718,11 +718,11 @@ public final class SettingsStore {
     public func changeCredential(scope: CredentialScope, replacement: String?) throws {
         try lock.withLock {
             let (_, error) = readFromDisk()
-            guard error == nil else { throw CredentialFailure("Repair and reload settings before changing credentials.") }
+            guard error == nil else { throw CredentialFailure("Fix settings.json before changing keys.") }
             let original: Data?
             do { original = try readSettingsBytes() }
             catch let error as CocoaError where error.code == .fileReadNoSuchFile { original = nil }
-            catch { throw CredentialFailure("Settings became unreadable. Reload before changing credentials.") }
+            catch { throw CredentialFailure("Settings can’t be read. Fix settings.json before changing keys.") }
             let settings = try original.map { try JSONDecoder().decode(Settings.self, from: $0) }
             if let replacement {
                 guard !replacement.isEmpty else { return }
@@ -730,7 +730,7 @@ public final class SettingsStore {
             } else { try credentials.remove(scope) }
             guard let original, let settings else { return }
             guard try readSettingsBytes() == original else {
-                throw CredentialFailure("Settings changed during credential action. Reload and retry; newer settings preserved.")
+                throw CredentialFailure("Settings changed. Try again.")
             }
             var object = try JSONSerialization.jsonObject(with: original) as! [String: Any]
             if scope == .anthropic { object.removeValue(forKey: "anthropicApiKey") }
@@ -1066,7 +1066,7 @@ public final class SettingsStore {
 
     private func verifyExisting(_ key: String, scope: CredentialScope) throws {
         guard case .value(let existing) = credentials.read(scope, interactive: false), existing == key else {
-            throw CredentialFailure("Inline credentials cannot be saved. Use AI Cleanup Save/Replace; original settings preserved.")
+            throw CredentialFailure("API keys can’t be saved in settings.json. Add them in AI Cleanup.")
         }
     }
 

@@ -84,10 +84,10 @@ public enum ImportedAudio {
         case format, structure, duration, native, output
         public var message: String {
             switch self {
-            case .format: return "Use mono signed 16-bit PCM RIFF WAV at 8, 16, 22.05, 24, 32, 44.1 or 48 kHz."
-            case .structure: return "The complete WAV structure could not be validated."
-            case .duration: return "Use a complete clip between 0.4 and 600 seconds, within 20 MiB."
-            case .native, .output: return "The complete WAV could not be converted safely. Convert it to mono 16 kHz PCM WAV outside Parla."
+            case .format: return "Use a mono 16-bit WAV file."
+            case .structure: return "This WAV file seems damaged."
+            case .duration: return "Use a file under 10 minutes and 20 MB."
+            case .native, .output: return "This WAV couldn’t be converted. Save it as a mono 16 kHz WAV and try again."
             }
         }
     }
