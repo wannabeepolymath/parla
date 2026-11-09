@@ -38,19 +38,19 @@ enum HubPage: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .general: return "Permissions, whisper model, and app behavior"
-        case .templates: return "Named voice fields · literal review · explicit Copy and History Save"
-        case .audioImport: return "Transient or saved PCM WAV · raw review and explicit exports"
-        case .meetings: return "Record your microphone, then transcribe saved audio"
-        case .microphone: return "Check input and listen without a speech model"
-        case .cleanup: return "Where transcripts get polished"
-        case .transforms: return "Raw ASR and intentional rewrites or translations"
-        case .profiles: return "Local rules for exact apps and browser hosts"
-        case .dictionary: return "Exact spellings that bias transcription"
+        case .general: return "Permissions, speech recognition and shortcuts"
+        case .templates: return "Fill in forms by voice, one field at a time"
+        case .audioImport: return "Transcribe an audio file"
+        case .meetings: return "Record a meeting, then transcribe it"
+        case .microphone: return "Check that your microphone works"
+        case .cleanup: return "Polish punctuation and wording after you dictate"
+        case .transforms: return "Choose what gets typed, and save rewrite presets"
+        case .profiles: return "Different settings for specific apps and websites"
+        case .dictionary: return "Names and terms Parla should spell your way"
         case .snippets: return "Spoken triggers that expand to text"
-        case .history: return "Your recent dictations, stored locally"
+        case .history: return "Your recent dictations, saved on this Mac"
         case .privacy: return "What Parla keeps and where"
-        case .safeStart: return "Optional native preparation guard · partial coverage"
+        case .safeStart: return "Recover from a speech model that keeps crashing"
         }
     }
 }
@@ -93,7 +93,7 @@ final class HubWindowController: NSObject, NSWindowDelegate {
         model.leaveAudioImport()
         model.microphoneTestLifecycle(.windowClose); model.stopRecoveryPlayback()
     }
-    func windowDidResignKey(_ notification: Notification) { model.templates.cancel("Form discarded when the window resigned."); model.cancelTemplateEditor(); model.microphoneTestLifecycle(.resign) }
+    func windowDidResignKey(_ notification: Notification) { model.templates.cancel("Form canceled."); model.cancelTemplateEditor(); model.microphoneTestLifecycle(.resign) }
 
     private func makeWindow() -> NSWindow {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
@@ -128,7 +128,7 @@ struct HubRootView: View {
                 VStack {
                     OnboardingView(model: model)
                     Button("Open Voice Templates") { page = .templates }
-                    Button("Import a PCM WAV without microphone setup") { page = .audioImport }
+                    Button("Transcribe an audio file instead") { page = .audioImport }
                         .padding(.bottom)
                 }
             }
@@ -214,8 +214,8 @@ struct HubRootView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 if let err = model.loadError {
-                    HubBanner(text: "settings.json is invalid — editing is disabled until it's fixed. \(err)",
-                              actionTitle: "Open File") { model.onOpenSettingsFile() }
+                    HubBanner(text: "Settings can't be read, so editing is off. Fix settings.json to continue. \(err)",
+                              actionTitle: "Open file") { model.onOpenSettingsFile() }
                 }
                 if let err = model.saveError {
                     HubBanner(text: err)

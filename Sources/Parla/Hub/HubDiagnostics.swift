@@ -19,12 +19,12 @@ extension HubModel {
         do {
             diagnosticReview = try diagnostics.snapshot().encoded()
             diagnosticMessage = nil
-        } catch { diagnosticMessage = "Couldn’t prepare diagnostics. Clear and try again." }
+        } catch { diagnosticMessage = "Couldn’t show diagnostics. Clear them and try again." }
     }
     func clearDiagnostics() {
         diagnostics.clear()
         diagnosticReview = nil
-        diagnosticMessage = "Diagnostics cleared from memory. Existing exported files are unchanged."
+        diagnosticMessage = "Diagnostics cleared."
     }
     func exportDiagnostics() {
         guard let frozen = diagnosticReview else { return }
@@ -35,13 +35,13 @@ extension HubModel {
             diagnosticMessage = "Diagnostics exported."
             diagnosticReview = nil
         } catch HistoryExportDestination.Refusal.savedStorage {
-            diagnosticMessage = "Saved storage cannot supply complete protection. Retry export after storage is available."
+            diagnosticMessage = "Couldn’t export because storage isn’t available. Try again."
         } catch HistoryExportDestination.Refusal.protectedPath {
-            diagnosticMessage = "Choose a file outside Parla’s settings, history and recording files."
+            diagnosticMessage = "Choose a different file name or folder."
         } catch HistoryExportDestination.Refusal.extensionMismatch {
             diagnosticMessage = "Choose a filename ending in .json."
         } catch {
-            diagnosticMessage = "Couldn’t export diagnostics. Choose a writable location and retry this same review."
+            diagnosticMessage = "Couldn’t export. Choose another location and try again."
         }
     }
 }

@@ -19,18 +19,11 @@ struct OnboardingView: View {
 
     private static let titles = ["Give Parla permission", "Pick a speech model", "Try it out"]
     private static let subtitles = [
-        // Safe in both states: the mic is opened per dictation by default, and
-        // holding it open is opt-in (Settings.warmMic, off), so onboarding can
-        // promise the closed mic again. "What you dictate" rather than "while you
-        // hold" because fn+Space latches hands-free and keeps recording past the
-        // release — the mic outlives the keypress even on the cold path.
-        "Parla opens the mic while you dictate, transcribes what you dictate, and types the result into whatever you're using.",
-        // Scoped to audio on purpose: with a cleanup provider configured — which
-        // the README and the menu's Set API Key… item both steer users toward —
-        // the transcript text does leave the Mac. Says the same thing the
-        // Privacy page and the README already say.
-        "Speech recognition runs on this Mac. Optional cleanup uses Apple’s on-device system model or your configured endpoint. Endpoint cleanup sends text, never audio. Apple manages its system-model assets and updates.",
-        "One dictation, straight into this window — nothing is typed anywhere else."
+        // The mic is opened per dictation by default (warm mic is opt-in).
+        "Parla uses the mic while you dictate and types what you say into the app you're using.",
+        // Scoped to audio on purpose: online cleanup does send text.
+        "Speech recognition runs on this Mac. Your audio never leaves it.",
+        "Try one dictation. The text appears here, not in another app."
     ]
 
     /// The primary button's gate. Skip is always there, so nobody is trapped.
@@ -47,7 +40,6 @@ struct OnboardingView: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Button("Safe Start controls (optional)") { model.requestedPage = .safeStart }
                     stepView
                 }
                     .padding(.horizontal, 32)
@@ -139,8 +131,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 18) {
             HubSection("Permissions") {
                 HubRow("Microphone",
-                       detail: "Held open between dictations (not Bluetooth ones) so one starts "
-                           + "instantly; only what you dictate is transcribed") {
+                       detail: "Used only while you dictate") {
                     if model.micGranted {
                         StatusChip(text: "Granted")
                     } else {
@@ -149,7 +140,7 @@ struct OnboardingView: View {
                     }
                 }
                 HubDivider()
-                HubRow("Accessibility", detail: "The global hotkey, and typing into the app you're in") {
+                HubRow("Accessibility", detail: "Needed for shortcuts and typing into apps") {
                     if model.axGranted {
                         StatusChip(text: "Granted")
                     } else {
@@ -158,7 +149,7 @@ struct OnboardingView: View {
                     }
                 }
             }
-            Button("Microphone self-test (no model needed)") { model.requestedPage = .microphone }
+            Button("Test your microphone") { model.requestedPage = .microphone }
                 .buttonStyle(HubButtonStyle())
             if !model.axGranted { dragTile }
         }
@@ -175,7 +166,7 @@ struct OnboardingView: View {
             Text("Drag Parla into the Accessibility list")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Theme.text)
-            Text("Open the list above, then drop it in and switch it on.")
+            Text("Open System Settings, drop Parla into the list and turn it on.")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.muted)
         }
@@ -193,11 +184,11 @@ struct OnboardingView: View {
 
     private var modelStep: some View {
         HubSection("Speech model",
-                   footer: "You can switch models later in General. Larger ones are more accurate and slower.") {
+                   footer: "You can change models later in General. Larger models are more accurate but slower.") {
             HubRow(ModelCatalog.default.displayName,
-                   detail: "\(ModelCatalog.default.sizeLabel) · downloaded once, then used offline") {
+                   detail: "\(ModelCatalog.default.sizeLabel) · works offline once downloaded") {
                 if model.modelInstalled {
-                    StatusChip(text: "Installed")
+                    StatusChip(text: "Downloaded")
                 } else if let progress = model.downloadProgress {
                     ProgressView(value: progress).frame(width: 160)
                 } else {
@@ -214,12 +205,10 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 18) {
             if let tryoutError { HubBanner(text: tryoutError) }
             HubSection("Dictation test",
-                       footer: "This one goes nowhere else: the transcript appears here, and is never "
-                           + "typed into another app. Every other dictation lands wherever your "
-                           + "cursor is.") {
+                       footer: "After setup, dictation types wherever your cursor is.") {
                 HubRow(recording ? "Listening…" : transcribing ? "Transcribing…" : "Say a sentence",
-                       detail: recording ? "Press Stop when you're done"
-                           : "Parla records, transcribes on this Mac, and shows you what it heard") {
+                       detail: recording ? "Click Stop when you're done"
+                           : "Parla shows you what it heard") {
                     Button(recording ? "Stop" : transcript == nil ? "Start" : "Try again") {
                         if recording { stopTryout() } else { startTryout() }
                     }
@@ -229,7 +218,7 @@ struct OnboardingView: View {
                 if let transcript {
                     HubDivider()
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(transcript.isEmpty ? "Nothing was heard — try again, a little louder."
+                        Text(transcript.isEmpty ? "Nothing was heard. Try again a little louder."
                                                 : transcript)
                             .font(.system(size: 13))
                             .foregroundStyle(transcript.isEmpty ? Theme.muted : Theme.text)
@@ -281,16 +270,16 @@ struct OnboardingView: View {
 /// app" a property of the code rather than a promise.
 extension AppDelegate {
     func tryoutStart() -> String? {
-        guard MainActor.assumeIsolated({ invocation.beginTryout() }) else { return "Finish the dictation that's already running first." }
+        guard MainActor.assumeIsolated({ invocation.beginTryout() }) else { return "Finish the current dictation first." }
         let request = RecognitionRequest(settings: store.load())
         let refusal: String? = MainActor.assumeIsolated {
-            guard store.lastError == nil, !invocation.secureEvidence() else { return "Recognition settings or secure focus are unavailable." }
+            guard store.lastError == nil, !invocation.secureEvidence() else { return "Can't start right now. Check your settings and try again." }
             return ParakeetAudioEntry.tryout(request, owner: parakeetPreparation, otherEngine: {
                 appleSpeechPreparation.deliberateEntry()
-                if request.selection.engine == .invalid { return "Recognition configuration unavailable." }
+                if request.selection.engine == .invalid { return "Choose a speech engine in General." }
                 if let reason = appleSpeechPreparation.cachedRefusal(for: request) { return reason.message }
                 if let reason = nativePreparation.cachedRefusal { return reason.description }
-                if request.selection.engine == .whisper, !FileManager.default.fileExists(atPath: request.modelPath) { return "Choose an installed speech model first." }
+                if request.selection.engine == .whisper, !FileManager.default.fileExists(atPath: request.modelPath) { return "Download a speech model first." }
                 return nil
             })
         }

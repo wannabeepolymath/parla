@@ -58,15 +58,15 @@ final class MicrophoneTestController: ObservableObject {
         beforeStart()
         clear()
         guard playbackAllowed() else {
-            state = .refused("Stop recovery playback before starting a microphone test."); return
+            state = .refused("Stop audio playback first."); return
         }
         guard allowed(), let capture, let lease = admission.acquire(.microphoneTest) else {
-            state = .refused("Finish the current dictation, tryout or shortcut recording first."); return
+            state = .refused("Finish the current dictation first."); return
         }
         // Read-only permission evidence. No requestAccess call, even on Start.
         guard permission() else {
             admission.release(lease)
-            state = .refused("Allow Microphone in General or System Settings → Privacy & Security, then start again."); return
+            state = .refused("Allow microphone access in System Settings, then try again."); return
         }
         let id = UUID(); operation = id; self.lease = lease
         suspension = HotkeyMonitor.acquireSuspension()
@@ -74,7 +74,7 @@ final class MicrophoneTestController: ObservableObject {
         do { try capture.start(operation: id, lease: lease) }
         catch {
             clear()
-            state = .failed("Couldn’t start the input. Check Microphone permission and the input device, then retry.")
+            state = .failed("Couldn’t start the microphone. Check access and your device.")
             return
         }
         guard operation == id else { return }
@@ -118,16 +118,16 @@ final class MicrophoneTestController: ObservableObject {
     }
     func listen() {
         guard operation != nil, !capturing, !review.isEmpty, player == nil else { return }
-        guard playbackAllowed() else { state = .refused("Stop recovery playback before listening to this test."); return }
+        guard playbackAllowed() else { state = .refused("Stop audio playback first."); return }
         let id = UUID(); playbackID = id
         let player = playerFactory(); self.player = player; state = .listening
         do {
             try player.play(samples: review, sampleRate: 16_000) { [weak self] success in
                 guard let self, self.playbackID == id else { return }
                 self.stopListening()
-                if !success { self.state = .failed("Local playback failed. You can retry Listen or Clear.") }
+                if !success { self.state = .failed("Couldn’t play the test. Try Listen again.") }
             }
-        } catch { stopListening(); state = .failed("Local playback failed. You can retry Listen or Clear.") }
+        } catch { stopListening(); state = .failed("Couldn’t play the test. Try Listen again.") }
     }
     func stopListening() {
         playbackID = nil; player?.stop(); player = nil

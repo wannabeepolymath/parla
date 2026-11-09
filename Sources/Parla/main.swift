@@ -157,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func cleanupFailoverIntent(_ store: SettingsStore) { store.revokeCleanupFailover(); store.revokeSurroundingTextContext() }
 
     static func guidedQuitIntent(_ templates: GuidedTemplateOwner, imports: AudioImportOwner) {
-        templates.cancel("Form discarded for quit."); imports.invalidate("Import discarded for quit.")
+        templates.cancel("Form canceled."); imports.invalidate("Import discarded for quit.")
     }
 
     lazy var history = HistoryStore(settings: store)
@@ -338,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return recognitionFactory
     }
     lazy var nativePreparationMenu = NativePreparationMenuActions { [weak self] action, token in
-        self?.templates.cancel("Form discarded for preparation action."); self?.audioImport.invalidate("Preparation action changed import authority.")
+        self?.templates.cancel("Form canceled."); self?.audioImport.invalidate("Preparation action changed import authority.")
         MainActor.assumeIsolated { self?.meetingHub.revokePreparation(.whisper) }
         self?.nativePreparation.act(action, token: token)
     }
@@ -445,7 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }, secure: { [weak self] in
             let secure = Self.automationSecureEvidence()
-            if secure { self?.templates.cancel("Form discarded after secure-input evidence."); self?.audioImport.invalidate("Import discarded after secure-input evidence.") }
+            if secure { self?.templates.cancel("Form canceled because a password field was active."); self?.audioImport.invalidate("Import discarded after secure-input evidence.") }
             return secure
         },
         keyboardAllowed: { [weak self] in self.map { !$0.updater.committing && $0.axGranted } ?? false },
@@ -540,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.preparationSelectionEpoch = epoch; self?.nativePreparation.changedSelection(epoch, request: request)
         }
         m.onPreparationAction = { [weak self] action, token in
-            self?.templates.cancel("Form discarded for preparation action."); self?.audioImport.invalidate("Preparation action changed import authority.")
+            self?.templates.cancel("Form canceled."); self?.audioImport.invalidate("Preparation action changed import authority.")
             MainActor.assumeIsolated { self?.meetingHub.revokePreparation(.whisper) }
         self?.nativePreparation.act(action, token: token)
         }
@@ -643,7 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     lazy var scratchpad = MainActor.assumeIsolated { ScratchpadController.application(store: store) }
 
     @objc func openHub() {
-        templates.cancel("Form discarded for settings entry.")
+        templates.cancel("Form canceled.")
         hubController.show()
         if nativePreparation.cachedRefusal == nil { MainActor.assumeIsolated { startup.enterSetup() } }
     }
@@ -652,12 +652,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hubController.show(templatesOnly: true)
     }
     @objc func openAudioImport() {
-        templates.cancel("Form discarded for audio import.")
+        templates.cancel("Form canceled.")
         hubModel.requestedPage = .audioImport
         hubModel.audioImportPageActive = true
         hubController.show(audioImportOnly: true)
     }
-    @objc func openNativePreparation() { templates.cancel("Form discarded for preparation."); hubModel.requestedPage = .safeStart; hubController.show(preparationOnly: true) }
+    @objc func openNativePreparation() { templates.cancel("Form canceled."); hubModel.requestedPage = .safeStart; hubController.show(preparationOnly: true) }
     @objc func openScratchpad() { MainActor.assumeIsolated { scratchpad.show() } }
 
     // Opening Parla again from Finder/Spotlight while it runs lands here, not on
@@ -732,10 +732,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return canceledCaptureTermination.request()
     }
 
-    func applicationDidResignActive(_ notification: Notification) { templates.cancel("Form discarded when the app resigned."); activeMicrophoneTest?.lifecycle(.resign); scratchpad.focusLost() }
+    func applicationDidResignActive(_ notification: Notification) { templates.cancel("Form canceled."); activeMicrophoneTest?.lifecycle(.resign); scratchpad.focusLost() }
 
     func applicationWillTerminate(_ notification: Notification) {
-        templates.cancel("Form discarded for quit.")
+        templates.cancel("Form canceled.")
         audioImport.invalidate("Import discarded for quit.")
         MainActor.assumeIsolated { revokeRecognitionPreview(); revokeActivityShadow() }
         canceledCaptureUndo.shutdown()
@@ -791,7 +791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         experimental: ExperimentalHistoryRetryOwner, guided: GuidedTemplateOwner? = nil, chain: @escaping () -> Task<Void,Never>?,
         reservation: ImportRestartReservation? = nil, meeting: MeetingHubController? = nil, releaseClaim: @escaping () -> Void = {},
         claim: () async -> Bool) async -> Bool {
-        guided?.cancel("Form discarded for restart.")
+        guided?.cancel("Form canceled.")
         guard reservation?.isHeld != true else { return false }
         var releases: [() -> Void] = []
         var claimed = false
@@ -998,7 +998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fn-down logged nothing, so "it said password field in a plain text box"
     /// left no trace to diagnose. The frontmost app is the one lead there is.
     func showSecureRefusal(_ passwordField: String) {
-        templates.cancel("Form discarded after secure-input evidence.")
+        templates.cancel("Form canceled because a password field was active.")
         audioImport.invalidate("Import discarded after secure-input evidence.")
         clearDictationRecovery()
         MainActor.assumeIsolated {
@@ -1259,7 +1259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() {
-        templates.cancel("Form discarded for settings file editing.")
+        templates.cancel("Form canceled.")
         // Only seed defaults when there's no file yet — never overwrite a
         // broken settings.json the user is about to fix (that's their typo'd
         // API key / dictionary, don't discard it).

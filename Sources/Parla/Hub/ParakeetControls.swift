@@ -14,19 +14,15 @@ struct ParakeetControls: View {
             if let bytes = state.bytes, let total = state.total {
                 ProgressView(value: Double(bytes), total: Double(total))
             }
-            if target == nil { Text("Save valid settings/profile and reload before acting.").font(.caption) }
+            if target == nil { Text("Save your settings first.").font(.caption) }
             HStack {
                 Button("Install") { if let target { model.parakeetAction(.install, target: target) } }.disabled(target == nil || !state.canInstall)
                 Button("Prepare") { if let target { model.parakeetAction(.prepare, target: target) } }.disabled(target == nil || !state.canPrepare)
-                Button("Recheck") { if let target { model.parakeetAction(.recheck, target: target) } }.disabled(target == nil || !state.canRecheck)
+                Button("Check") { if let target { model.parakeetAction(.recheck, target: target) } }.disabled(target == nil || !state.canRecheck)
                 Button("Retry") { if let target { model.parakeetAction(.retry, target: target) } }.disabled(target == nil || !state.canRetry)
                 Button("Cancel") { model.onParakeetCancel(state.token) }.disabled(!state.canCancel)
                 Button("Delete") { if let target { model.parakeetAction(.delete, target: target) } }.disabled(target == nil || !state.canDelete)
             }
-            Text("Fixed pinned 21-file INT4 release. Install never selects or prepares it. Retry revalidates completed files and re-fetches the interrupted file; no byte-offset resume. Recheck is read-only. Delete protects saved global/profile references and live leases.")
-                .font(.caption).foregroundStyle(Theme.muted)
-            Text("Source enabler only. Reviewed full release hashes, selected-artifact terms and independently trusted G3 production identity are still required. Production packaging and native qualification remain separate.")
-                .font(.caption).foregroundStyle(Theme.muted)
         }
     }
 }
@@ -38,16 +34,16 @@ struct ParakeetSettingsFields: View {
     var inherits = false
     var body: some View {
         Picker("Parakeet model", selection: $modelID) {
-            if inherits { Text("Inherit global").tag(Optional<String>.none) }
+            if inherits { Text("Same as global").tag(Optional<String>.none) }
             Text(ParakeetWire.model).tag(Optional(ParakeetWire.model))
-            if let modelID, modelID != ParakeetWire.model { Text("Invalid saved model").tag(Optional(modelID)) }
+            if let modelID, modelID != ParakeetWire.model { Text("Unknown model").tag(Optional(modelID)) }
         }
-        Picker("Script filter", selection: $filter) {
-            Text(inherits ? "Inherit global" : "Unfiltered multilingual").tag(Optional<String>.none)
-            if inherits { Text("None · unfiltered multilingual").tag(Optional("none")) }
+        Picker("Languages", selection: $filter) {
+            Text(inherits ? "Same as global" : "All languages").tag(Optional<String>.none)
+            if inherits { Text("All languages").tag(Optional("none")) }
             ForEach(ParakeetWire.filters.sorted(), id: \.self) { Text($0).tag(Optional($0)) }
             if let filter, !ParakeetWire.filters.contains(filter), !(inherits && filter == "none") {
-                Text("Invalid saved filter").tag(Optional(filter))
+                Text("Unknown filter").tag(Optional(filter))
             }
         }
     }

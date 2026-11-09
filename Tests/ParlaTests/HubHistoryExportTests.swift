@@ -74,7 +74,7 @@ final class HubHistoryExportTests: XCTestCase {
                 XCTAssertEqual(hub.historyExport?.count, 1)
                 hub.exportHistory(content: content, format: .text)
                 XCTAssertTrue(output.contains(content == .original ? entry.raw : entry.best))
-                XCTAssertTrue(hub.historyExportMessage!.contains("1 saved entry · \(content.rawValue) · Plain text"))
+                XCTAssertTrue(hub.historyExportMessage!.contains("Exported 1 dictation."))
                 XCTAssertNil(hub.historyExport)
             }
         }
@@ -106,7 +106,7 @@ final class HubHistoryExportTests: XCTestCase {
         hub.exportHistory(content: .result, format: .text)
         XCTAssertTrue(output.contains(second.best)); XCTAssertTrue(output.contains(first.best))
         for excluded in ["unmatched", "PENDING", "UNSAVED_PROPOSED", "LATE"] { XCTAssertFalse(output.contains(excluded)) }
-        XCTAssertTrue(hub.historyExportMessage!.contains("2 saved entries · Result"))
+        XCTAssertTrue(hub.historyExportMessage!.contains("Exported 2 dictations."))
     }
 
     func testPerRowScopeFreezesOriginalAndResultEvenAfterDeletion() {
@@ -114,13 +114,13 @@ final class HubHistoryExportTests: XCTestCase {
         hub.prepareHistoryExport(rowID: first.id); history.delete(first.id)
         hub.exportHistory(content: .original, format: .text)
         XCTAssertTrue(output.contains(first.raw)); XCTAssertFalse(output.contains(other.raw))
-        XCTAssertTrue(hub.historyExportMessage!.contains("1 saved entry"))
+        XCTAssertTrue(hub.historyExportMessage!.contains("Exported 1 dictation."))
     }
 
     func testEmptyFilterAndNonSavedIDsNeverOpenPanelOrWrite() {
         let entry = row()
         hub.prepareFilteredHistoryExport("missing"); hub.exportHistory(content: .result, format: .text)
-        XCTAssertNil(hub.historyExport); XCTAssertTrue(hub.historyExportMessage!.contains("No saved entries"))
+        XCTAssertNil(hub.historyExport); XCTAssertTrue(hub.historyExportMessage!.contains("Nothing in History matches"))
         failHistoryWrite = true; let pending = HistoryEntry(raw: "pending"); history.append(pending)
         hub.prepareHistoryExport(rowID: pending.id); hub.exportHistory(content: .original, format: .text)
         history.delete(entry.id) // fails; still saved, but not the requested ID
@@ -176,12 +176,12 @@ final class HubHistoryExportTests: XCTestCase {
         let entry = row(); hub.prepareHistoryExport(rowID: entry.id)
         failExportWrite = true; hub.exportHistory(content: .original, format: .text)
         XCTAssertEqual(writes.count, 1); XCTAssertNotNil(hub.historyExport)
-        XCTAssertTrue(hub.historyExportMessage!.contains("Couldn’t export 1 saved entry · Original · Plain text"))
+        XCTAssertTrue(hub.historyExportMessage!.contains("Couldn’t export."))
         XCTAssertFalse(hub.historyExportMessage!.contains("SENTINEL_RAW_ERROR"))
         failExportWrite = false; history.delete(entry.id)
         hub.exportHistory(content: .original, format: .text)
         XCTAssertEqual(writes.count, 2); XCTAssertEqual(writes[0].0, writes[1].0)
-        XCTAssertTrue(hub.historyExportMessage!.contains("Exported 1 saved entry"))
+        XCTAssertTrue(hub.historyExportMessage!.contains("Exported 1 dictation."))
     }
 
     func testProductionAtomicWriterWritesUTF8AndFailureLeavesExistingBytes() throws {

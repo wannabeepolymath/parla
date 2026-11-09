@@ -11,13 +11,13 @@ extension HubModel {
             let saved = try store.savedRetrySnapshot()
             audioImport.observe(saved)
             adoptAudioImportSettings(saved)
-        } catch { audioImport.invalidate("Repair saved settings before Start.") }
+        } catch { audioImport.invalidate("Fix settings.json, then try again.") }
     }
     private func audioImportSettings() -> Settings? {
-        guard loadError == nil, saveError == nil else { audioImport.invalidate("Repair and reload settings before Start, Copy or Save."); return nil }
-        guard !hasPendingSettingsSave else { audioImport.notice("Save the pending settings draft before Start, Copy or Save."); return nil }
+        guard loadError == nil, saveError == nil else { audioImport.invalidate("Fix settings.json, then try again."); return nil }
+        guard !hasPendingSettingsSave else { audioImport.notice("Wait for your settings to save, then try again."); return nil }
         guard let saved = try? store.savedRetrySnapshot(), !saved.recognitionConfigurationInvalid, RecognitionRequest(settings: saved).selection.engine != .invalid else {
-            audioImport.invalidate("Repair saved recognition settings before Start."); return nil
+            audioImport.invalidate("Choose a speech engine in General, then try again."); return nil
         }
         audioImport.observe(saved)
         return saved
@@ -45,7 +45,7 @@ extension HubModel {
     }
     func discardAudioImport() {
         audioImport.invalidate()
-        savedAudioImport?.notice("Review closed. Committed private copies and results remain until expiry or Delete.")
+        savedAudioImport?.notice("Transcript closed. Saved files are kept until they expire.")
     }
     func leaveAudioImport() { discardAudioImport() }
     func copyAudioImport() {
@@ -65,7 +65,7 @@ extension HubModel {
         guard audioImport.boundaryIsSafe() else { return false }
         guard !hasPendingSettingsSave, modelSelectionEpoch == job.selectionEpoch,
               audioImportSettings() != nil, job.authorize(store) else {
-            audioImport.invalidate("Export authority changed. Choose the file again."); return false
+            audioImport.invalidate("Something changed. Choose the file again."); return false
         }
         return job.current && audioImport.review?.entry.id == resultID
     }
@@ -77,13 +77,13 @@ extension HubModel {
         guard let review = audioImport.review,
               audioImportExportIsCurrent(job: review.job, resultID: review.entry.id) else { return }
         guard let segments = review.segments else {
-            audioImport.notice("Native timing is unavailable for this review. Copy or save its raw text."); return
+            audioImport.notice("No timestamps for this file. Copy or save the text instead."); return
         }
         let data: Data
         do { data = try SubtitleExport.encoded(segments, format: format) }
         catch SubtitleExport.Refusal.markup {
-            audioImport.notice("SRT can’t show this text literally: it contains < > { } \\ or a code like &amp; that some players treat as formatting. Export WebVTT instead, or copy or save the raw text."); return
-        } catch { audioImport.notice("These native segments cannot be exported as literal \(formatName). Copy or save the raw text."); return }
+            audioImport.notice("This text has characters SRT can’t show. Export WebVTT instead."); return
+        } catch { audioImport.notice("This text can’t be exported as \(formatName). Copy or save it instead."); return }
         // Freeze bytes AND authority before the reentrant modal boundary.
         let job = review.job, resultID = review.entry.id
         guard let url = audioImportExportPanel("Parla-native-segments.\(fileExtension)") else { return }
@@ -94,15 +94,15 @@ extension HubModel {
                 try historyExportWriter(data,url); return true
             }
             guard written else { return }
-            audioImport.notice("Exported current native segments as \(formatName). History still contains text only.")
+            audioImport.notice("Exported as \(formatName).")
         } catch HistoryExportDestination.Refusal.savedStorage {
-            audioImport.notice("Saved storage cannot supply complete protection. Retry export after storage is available.")
+            audioImport.notice("Couldn’t export because storage isn’t available. Try again.")
         } catch HistoryExportDestination.Refusal.protectedPath {
-            audioImport.notice("Choose a file outside the original audio and Parla’s settings, history and recordings.")
+            audioImport.notice("Choose a different file name or folder.")
         } catch HistoryExportDestination.Refusal.extensionMismatch {
             audioImport.notice("Choose a filename ending in .\(fileExtension).")
         } catch {
-            audioImport.notice("Couldn’t export. Choose a writable location and explicitly try again; this review is still available.")
+            audioImport.notice("Couldn’t export. Choose another location and try again.")
         }
     }
 
@@ -120,7 +120,7 @@ extension HubModel {
         guard audioImport.boundaryIsSafe(), let settings = audioImportSettings() else { return }
         savedAudioImport?.start(source:nil,id:id,settings:settings,epoch:modelSelectionEpoch,preparation:audioImportPreparationEpoch(),diagnostics:diagnostics)
     }
-    func cancelSavedAudioImport() { savedAudioImport?.invalidate("Transcription canceled. Committed private files remain.") }
+    func cancelSavedAudioImport() { savedAudioImport?.invalidate("Transcription canceled. The saved file is kept.") }
     func deleteSavedAudioImport(_ id: UUID) { savedAudioImport?.delete(id) }
     private func savedReviewIsCurrent(_ review: SavedAudioImportOwner.Review, allowIO: Bool = false) -> Bool {
         guard audioImport.boundaryIsSafe(), audioImportSettings() != nil else { return false }
@@ -151,14 +151,14 @@ extension HubModel {
                 try historyExportWriter(bytes,destination); return true
             }
             guard written else { return }
-            saved.notice("Raw text exported. The saved job and independent History are unchanged.")
+            saved.notice("Text exported.")
         } catch HistoryExportDestination.Refusal.savedStorage {
-            saved.notice("Saved storage cannot supply complete protection. Retry export after storage is available.")
+            saved.notice("Couldn’t export because storage isn’t available. Try again.")
         } catch HistoryExportDestination.Refusal.protectedPath {
-            saved.notice("Choose a destination outside the original audio and protected Parla files.")
+            saved.notice("Choose a different file name or folder.")
         } catch HistoryExportDestination.Refusal.extensionMismatch {
             saved.notice("Choose a filename ending in .txt.")
-        } catch { saved.notice("Couldn’t export. Retry export writes this same current raw text without transcription.") }
+        } catch { saved.notice("Couldn’t export. Choose another location and try again.") }
     }
     static func selectAudioImportExportURL(_ filename: String) -> URL? {
         let panel = NSSavePanel()
@@ -168,7 +168,7 @@ extension HubModel {
     }
     static func selectAudioImportURL() -> URL? {
         let panel = NSOpenPanel()
-        panel.title = "Choose WAV or restricted MOV…"
+        panel.title = "Choose an audio file"
         panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
         panel.allowedContentTypes = [.wav, .quickTimeMovie]; panel.resolvesAliases = false
         return panel.runModal() == .OK ? panel.url : nil

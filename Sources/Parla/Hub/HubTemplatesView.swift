@@ -7,14 +7,14 @@ struct HubTemplatesView: View {
     @ObservedObject var owner: GuidedTemplateOwner
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Saved global recognition · raw only. Profiles, cleanup, presets, replacements and snippets do not apply. Only definitions persist unless you explicitly save the completed document to History.")
+            Text("Uses your original words, without cleanup or snippets.")
                 .font(.callout).foregroundStyle(.secondary)
             if let message = model.templateMessage { Text(message).foregroundStyle(.red) }
             if let message = owner.message { Text(message).textSelection(.enabled) }
             if owner.ownsSession { sessionView }
             else if model.templateEditor != nil { editor }
             else {
-                if model.templateDocument.definitions.isEmpty { Text("Create a definition with named fields to begin. No templates are installed by default.") }
+                if model.templateDocument.definitions.isEmpty { Text("Create a template to get started.") }
                 ForEach(model.templateDocument.definitions) { definition in
                     HStack {
                         Button(definition.name) { model.selectTemplate(definition.id) }
@@ -25,11 +25,11 @@ struct HubTemplatesView: View {
                     }
                 }
                 HStack {
-                    Button("New definition") { model.editTemplate(nil) }
-                    Button("Begin form") { model.beginTemplate() }.disabled(model.selectedTemplateID == nil)
-                    Button("Refresh definitions") { model.refreshTemplates() }
+                    Button("New template") { model.editTemplate(nil) }
+                    Button("Start") { model.beginTemplate() }.disabled(model.selectedTemplateID == nil)
+                    Button("Refresh") { model.refreshTemplates() }
                 }
-                Button("Allow Microphone") { model.requestMicrophone() }
+                Button("Allow microphone") { model.requestMicrophone() }
             }
         }
         .onExitCommand { if model.templateEditor != nil { model.cancelTemplateEditor() } else { owner.cancel() } }
@@ -37,23 +37,23 @@ struct HubTemplatesView: View {
     @ViewBuilder private var sessionView: some View {
         if let state = owner.session {
             Text(state.definition.name).font(.headline)
-            if let recognition = owner.recognitionSummary { Text("Saved global: " + recognition + " · raw only").font(.caption) }
+            if let recognition = owner.recognitionSummary { Text(recognition).font(.caption) }
             Text("\(state.index + 1) of \(state.definition.fields.count): \(state.field.label) · \(state.field.required ? "Required" : "Optional")")
             if let completion = state.completion {
-                Text("Approved completion").font(.headline)
+                Text("Finished").font(.headline)
                 Text(completion.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 HStack {
                     Button("Copy") { model.copyTemplate() }
-                    Button(state.saved ? "Saved" : "Save completed result / Retry Save") { model.saveCompletedTemplate() }.disabled(state.saved)
+                    Button(state.saved ? "Saved" : "Save to history") { model.saveCompletedTemplate() }.disabled(state.saved)
                     Button("Done") { owner.cancel() }
                 }
             } else if let preview = state.preview {
-                Text("Review the full literal document").font(.headline)
+                Text("Review").font(.headline)
                 Text(preview.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 HStack {
-                    Button("Approve completion") { owner.approve(preview.id) }
+                    Button("Finish") { owner.approve(preview.id) }
                     Button("Back to fields") { owner.back() }
-                    Button("Re-record this field") { owner.start() }
+                    Button("Re-record field") { owner.start() }
                 }.disabled(owner.busy || owner.recording)
             } else {
                 if let candidate = state.candidate {
@@ -61,28 +61,27 @@ struct HubTemplatesView: View {
                         .frame(minHeight: 130)
                     Button("Accept field") { owner.accept() }.disabled(owner.busy || owner.recording)
                 }
-                if let route = owner.route.name { Text("Input: \(route)\(owner.route.fallback == true ? " (system fallback)" : "")") }
-                else { Text("Input route: unknown until capture") }
+                if let route = owner.route.name { Text("Microphone: \(route)\(owner.route.fallback == true ? " (system default)" : "")") }
                 HStack {
-                    Button(owner.recording ? "Stop" : "Start recording / Re-record") { if owner.recording { owner.stop() } else { owner.start() } }
+                    Button(owner.recording ? "Stop" : (state.candidate == nil ? "Record" : "Re-record")) { if owner.recording { owner.stop() } else { owner.start() } }
                         .disabled(owner.busy)
-                    Button("Discard take") { owner.discardTake() }
+                    Button("Discard") { owner.discardTake() }
                     Button("Back") { owner.back() }.disabled(owner.busy || owner.recording)
-                    Button("Skip optional field") { owner.skip() }.disabled(state.field.required || owner.busy || owner.recording)
+                    Button("Skip") { owner.skip() }.disabled(state.field.required || owner.busy || owner.recording)
                 }
-                Button("Review completed form") { owner.review() }.disabled(!state.allAnswered || owner.busy || owner.recording)
+                Button("Review") { owner.review() }.disabled(!state.allAnswered || owner.busy || owner.recording)
             }
-        } else { Text("Stopping. Waiting for actual recorder and recognition exit.") }
+        } else { Text("Stopping…") }
         Button("Cancel form") { owner.cancel() }
     }
     private var editor: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField("Definition name", text: draft(\.name))
-            Text("Fields are recorded in this order. Keys use a–z, then a–z, 0–9 or _. Every key must appear in the body.").font(.caption)
+            TextField("Template name", text: draft(\.name))
+            Text("You'll fill in fields in this order. Keys use lowercase letters, digits or _.").font(.caption)
             if let definition = model.templateEditor {
                 ForEach(Array(definition.fields.enumerated()), id: \.element.id) { index, field in
                     HStack {
-                        TextField("key", text: fieldBinding(index, \.key))
+                        TextField("Key", text: fieldBinding(index, \.key))
                         TextField("Label", text: fieldBinding(index, \.label))
                         Toggle("Required", isOn: fieldBinding(index, \.required))
                         Button("↑") { guard index > 0 else { return }; model.templateEditor?.fields.swapAt(index, index - 1) }.disabled(index == 0)
@@ -91,11 +90,11 @@ struct HubTemplatesView: View {
                 }
                 Button("Add field") { model.templateEditor?.fields.append(GuidedTemplateField(key: "", label: "")) }.disabled(definition.fields.count >= 12)
             }
-            Text("Use {{key}}. {{{{key}}}} prints literal {{key}} and does not reference a field. Single JSON braces stay literal. No backslash escape or expressions.").font(.caption)
+            Text("Write the text below. Put {{key}} where each field goes.").font(.caption)
             TextEditor(text: draft(\.body)).frame(minHeight: 180)
             HStack {
-                Button("Save definition") { model.saveTemplateDefinition() }
-                Button("Cancel editor") { model.cancelTemplateEditor() }
+                Button("Save template") { model.saveTemplateDefinition() }
+                Button("Cancel") { model.cancelTemplateEditor() }
             }
         }
     }

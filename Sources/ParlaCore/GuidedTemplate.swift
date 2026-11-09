@@ -28,7 +28,7 @@ public struct GuidedTemplateDefinition: Codable, Equatable, Identifiable, Sendab
         guard Self.text(name, limit: 120), body.utf8.count <= 8_192, (1...12).contains(fields.count),
               Set(fields.map(\.id)).count == fields.count, Set(fields.map(\.key)).count == fields.count,
               fields.allSatisfy({ Self.key($0.key) && Self.text($0.label, limit: 160) }) else {
-            throw GuidedTemplateFailure("Invalid template name, fields or size.")
+            throw GuidedTemplateFailure("Check the template name and fields.")
         }
         return try GuidedTemplateProgram(body: body, fields: fields)
     }
@@ -49,9 +49,9 @@ public struct GuidedTemplateDocument: Codable, Equatable, Sendable {
     public init(definitions: [GuidedTemplateDefinition] = []) { self.definitions = definitions }
     public func validate() throws {
         guard format == "parla-guided-templates", schemaVersion == 1, definitions.count <= 32,
-              Set(definitions.map(\.id)).count == definitions.count else { throw GuidedTemplateFailure("Unsupported or invalid template document.") }
+              Set(definitions.map(\.id)).count == definitions.count else { throw GuidedTemplateFailure("This template file can't be read.") }
         for definition in definitions { _ = try definition.compiled() }
-        guard try JSONEncoder().encode(self).count <= 262_144 else { throw GuidedTemplateFailure("Template document exceeds 262,144 bytes.") }
+        guard try JSONEncoder().encode(self).count <= 262_144 else { throw GuidedTemplateFailure("Templates are too large to save.") }
     }
 }
 
@@ -71,18 +71,18 @@ public struct GuidedTemplateProgram: Equatable, Sendable {
                 flush(); index += 2
                 let start = index
                 while index < bytes.count, bytes[index] != 123, bytes[index] != 125 { index += 1 }
-                guard index < bytes.count, bytes[index...].starts(with: "}}".utf8) else { throw GuidedTemplateFailure("Unmatched or nested template token.") }
+                guard index < bytes.count, bytes[index...].starts(with: "}}".utf8) else { throw GuidedTemplateFailure("A {{ in the text isn't closed.") }
                 let key = String(decoding: bytes[start..<index], as: UTF8.self)
-                guard GuidedTemplateDefinition.key(key), let id = keys[key] else { throw GuidedTemplateFailure("Unknown or malformed template key.") }
-                guard index + 2 == bytes.count || bytes[index + 2] != 125 else { throw GuidedTemplateFailure("Triple closing delimiter is invalid.") }
+                guard GuidedTemplateDefinition.key(key), let id = keys[key] else { throw GuidedTemplateFailure("The text uses a key that isn't a field.") }
+                guard index + 2 == bytes.count || bytes[index + 2] != 125 else { throw GuidedTemplateFailure("The text has an extra }.") }
                 index += 2; occurrences += 1
-                guard occurrences <= 64 else { throw GuidedTemplateFailure("At most 64 placeholders are supported.") }
+                guard occurrences <= 64 else { throw GuidedTemplateFailure("Use 64 or fewer {{key}} placeholders.") }
                 result.append(.field(id)); used.insert(id)
-            } else if matches("}}") { throw GuidedTemplateFailure("Unmatched closing template delimiter.") }
+            } else if matches("}}") { throw GuidedTemplateFailure("A }} in the text has no matching {{.") }
             else { literal.append(bytes[index]); index += 1 }
         }
         flush()
-        guard used == Set(fields.map(\.id)) else { throw GuidedTemplateFailure("Every field must be referenced by its exact key.") }
+        guard used == Set(fields.map(\.id)) else { throw GuidedTemplateFailure("Put every field's {{key}} in the text.") }
         segments = result
     }
     public func render(_ values: [UUID: String]) throws -> String {
@@ -92,10 +92,10 @@ public struct GuidedTemplateProgram: Equatable, Sendable {
             switch segment {
             case .literal(let value): text = value
             case .field(let id):
-                guard let value = values[id] else { throw GuidedTemplateFailure("Accept or explicitly skip every field.") }
+                guard let value = values[id] else { throw GuidedTemplateFailure("Accept or skip every field.") }
                 text = value
             }
-            guard text.utf8.count <= 65_536 - count else { throw GuidedTemplateFailure("Completed form exceeds 65,536 bytes.") }
+            guard text.utf8.count <= 65_536 - count else { throw GuidedTemplateFailure("The finished form is too long.") }
             count += text.utf8.count; output.append(text)
         }
         guard GuidedTemplateDefinition.text(output, limit: 65_536) else { throw GuidedTemplateFailure("Completed form is empty.") }

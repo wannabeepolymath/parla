@@ -48,7 +48,7 @@ final class HubModel: ObservableObject {
     var audioImportExportPanel: (String) -> URL? = HubModel.selectAudioImportExportURL
     var onAudioImport: (AudioImportOwner.Job, @escaping (Result<AudioImportOwner.Completed, Error>) -> Void) -> Void = { job, done in
         job.source.cancel(); job.operation.finish()
-        done(.failure(RecordingStore.Failure("Local import recognition is unavailable.")))
+        done(.failure(RecordingStore.Failure("Transcription isn't available.")))
     }
     // Wired by AppDelegate to its existing actions.
     var modelSelectionEpoch = UUID()
@@ -57,7 +57,7 @@ final class HubModel: ObservableObject {
         if audioImport.job?.configuration.request.selection.engine == .parakeet || savedAudioImport?.currentEngine == .parakeet,
            (parakeetSnapshot.refusal != nil && parakeetSnapshot.refusal != .configuration && oldValue.refusal != parakeetSnapshot.refusal
             || oldValue.phase == .ready && (parakeetSnapshot.phase == .installed || parakeetSnapshot.phase == .blocked) && parakeetSnapshot.refusal != .configuration) {
-            audioImport.invalidate("Parakeet preparation changed. Choose the file again.")
+            audioImport.invalidate("Speech settings changed. Choose the file again.")
         }
     } }
     private var parakeetObserver: AnyCancellable?
@@ -78,7 +78,7 @@ final class HubModel: ObservableObject {
     }
     func parakeetAction(_ action: ParakeetPreparation.Action, target: ParakeetPreparation.SavedTarget) {
         guard loadError == nil, saveError == nil else { return }
-        templates.cancel("Form discarded for preparation action."); audioImport.invalidate("Preparation action changed import authority.")
+        templates.cancel("Form canceled."); audioImport.invalidate("Speech settings changed. Choose the file again.")
         MainActor.assumeIsolated { meetingHub?.revokePreparation(.parakeet); parakeetOwner?.act(action, target: target) }
     }
     /// Only a successful disk save/reload (or explicit fresh load) grants targets.
@@ -98,7 +98,7 @@ final class HubModel: ObservableObject {
         onParakeetAction = { [weak self, weak owner] action, token in
             guard let self, self.loadError == nil, self.saveError == nil else { return }
             guard let target = owner?.savedTarget(.global), target.admissionToken == token else { return }
-            self.templates.cancel("Form discarded for preparation action."); self.audioImport.invalidate("Preparation action changed import authority.")
+            self.templates.cancel("Form canceled."); self.audioImport.invalidate("Speech settings changed. Choose the file again.")
             self.meetingHub?.revokePreparation(.parakeet)
             owner?.act(action, target: target)
         }
@@ -110,7 +110,7 @@ final class HubModel: ObservableObject {
         if audioImport.job?.configuration.request.selection.engine == .appleSpeech || savedAudioImport?.currentEngine == .appleSpeech,
            appleSpeechSnapshot.refusal != nil, appleSpeechSnapshot.refusal != .configuration,
            oldValue.refusal != appleSpeechSnapshot.refusal {
-            audioImport.invalidate("Apple Speech preparation changed. Choose the file again.")
+            audioImport.invalidate("Speech settings changed. Choose the file again.")
         }
     } }
     private var appleSpeechObserver: AnyCancellable?
@@ -123,7 +123,7 @@ final class HubModel: ObservableObject {
         onAppleSpeechAction = { [weak self, weak owner] action, locale, token in
             guard let self, let owner else { return }
             guard self.loadError == nil, self.saveError == nil else { return }
-            self.templates.cancel("Form discarded for preparation action."); self.audioImport.invalidate("Preparation action changed import authority.")
+            self.templates.cancel("Form canceled."); self.audioImport.invalidate("Speech settings changed. Choose the file again.")
             if action != .recheck { self.meetingHub?.revokePreparation(.appleSpeech) }
             owner.deliberateEntry()
             owner.act(action, locale: locale, token: token)
@@ -143,20 +143,9 @@ final class HubModel: ObservableObject {
     }
     var recognitionCapabilityDetail: String {
         let engine = RecognitionRequest(settings: settings).selection.engine
-        if engine == .appleSpeech {
-            return "Apple Speech · explicit fixed locale · post-stop batch only. Words apply to cleanup only; no ASR dictionary or initial prompts. Shadow preview and Undo Canceled Capture are unsupported. No auto language, timing, confidence or alternatives. Cancellation waits for actual exit."
-        }
-        if engine == .parakeet { return "Parakeet · explicit installation and preparation; one fresh local helper per pass. Unfiltered multilingual or one script filter; no language detection. Words apply to cleanup only. No ASR prompt, preview, canceled-capture Undo, timing or confidence." }
+        if engine == .appleSpeech || engine == .parakeet { return "Dictionary words are used for cleanup only." }
         if engine == .invalid { return AppleSpeechRefusal.configuration.message }
-        let language: String
-        switch recognitionCapabilities.modelLanguages {
-        case .unknown: language = "Model languages unknown until loaded"
-        case .englishOnly: language = "Loaded model: English only"
-        case .fixedLocale: language = "Explicit fixed locale"
-        case .multilingual: language = "Loaded model: multilingual"
-        }
-        return "Whisper · mono 16 kHz · batch decode · manual text prompts. " + language
-            + ". Cooperative decode cancellation; construction cannot be canceled. No native incremental stream, acoustic enrollment, word timing, confidence or alternatives."
+        return ""
     }
     @Published var catalogDownloads: [String: CatalogDownloadRow] = [:]
     var onCatalogDownloadAction: (CatalogDownloadAction, ModelCatalog.Model) -> Void = { _, _ in }
@@ -252,9 +241,9 @@ final class HubModel: ObservableObject {
         }
         if GuidedTemplateOwner.Configuration(oldValue) != GuidedTemplateOwner.Configuration(settings)
             || oldValue.guidedTemplates != settings.guidedTemplates { templates.relevantDraftChanged() }
-        if !loading, oldValue != settings { savedAudioImport?.invalidate("Saved review closed after a settings draft changed.") }
+        if !loading, oldValue != settings { savedAudioImport?.invalidate("Settings changed, so the transcript was closed.") }
         if AudioImportOwner.Configuration(oldValue) != AudioImportOwner.Configuration(settings) {
-            audioImport.invalidate("Recognition settings changed. Choose the file again.")
+            audioImport.invalidate("Speech settings changed. Choose the file again.")
         }
 
         if !loading, oldValue.energyActivityShadowEnabled != settings.energyActivityShadowEnabled { activityShadowDraftTouched = true }
@@ -297,8 +286,8 @@ final class HubModel: ObservableObject {
     @Published private(set) var surroundingPolicy: SurroundingTextPolicy?
     @Published var surroundingMessage: String?
     var surroundingState: String {
-        guard let policy = surroundingPolicy, policy.revision != nil else { return "Cloud context is off" }
-        return store.surroundingTextIsPaused ? "Cloud context is paused — review again" : "Cloud context enabled for " + policy.target
+        guard let policy = surroundingPolicy, policy.revision != nil else { return "Off for online cleanup" }
+        return store.surroundingTextIsPaused ? "Paused — turn it on again to resume" : "On for " + policy.target
     }
     func surroundingDraftChanged() {
         store.revokeSurroundingTextContext(); surroundingReview = nil; surroundingMessage = nil
@@ -311,7 +300,7 @@ final class HubModel: ObservableObject {
               settings.outputMode == .cleanup, settings.cleanupEnabled, !settings.usesAppleIntelligence,
               settings.cleanupFailover == nil else {
             surroundingReview = nil
-            surroundingMessage = "Use Normal cleanup with a cloud provider, save your changes, resolve errors, and remove backups before reviewing nearby text."
+            surroundingMessage = "Nearby text needs an online cleanup provider, output set to Cleaned up, and no backup cleanup."
             return false
         }
         return true
@@ -319,32 +308,28 @@ final class HubModel: ObservableObject {
     func reviewSurrounding(profileID: UUID) {
         guard surroundingActionReady() else { return }
         do { surroundingReview = try store.reviewSurroundingText(profileID: profileID); surroundingMessage = nil }
-        catch { surroundingReview = nil; surroundingMessage = "Saved app profile or exact primary is unavailable for review." }
+        catch { surroundingReview = nil; surroundingMessage = "Save this profile and your cleanup settings first." }
     }
     func confirmSurrounding() {
         guard surroundingActionReady(), let review = surroundingReview else { return }
         do {
             surroundingPolicy = try store.confirmSurroundingText(review)
             surroundingReview = nil
-            surroundingMessage = "Cloud context enabled for future dictations in this app profile."
-        } catch { surroundingReview = nil; surroundingMessage = "Saved settings changed or could not be written. Review again." }
+            surroundingMessage = "Nearby text is on for this app."
+        } catch { surroundingReview = nil; surroundingMessage = "Settings changed. Try again." }
     }
     func disableSurrounding(profileID: UUID) {
         // Intent revokes even if strict review or exact byte CAS subsequently fails.
         surroundingDraftChanged()
         do {
             try store.disableSurroundingText()
-            surroundingPolicy = nil; surroundingMessage = "Disabled for future captures; held work remains revoked."
-        } catch { surroundingMessage = "Paused now; disable could not be saved. Repair settings and disable again." }
+            surroundingPolicy = nil; surroundingMessage = "Nearby text is off."
+        } catch { surroundingMessage = "Paused, but couldn't save. Fix settings.json and turn it off again." }
     }
     func surroundingDisclosure(_ policy: SurroundingTextPolicy) -> String {
-        "This sends existing text you did not dictate to your cleanup provider. App: \(policy.target). "
-        + "Provider: \(policy.primary.provider); endpoint: \(policy.primary.endpoint); exact requested model: \(policy.primary.model). "
-        + "Up to 256 UTF-16 units (1024 UTF-8 bytes) before the caret are sent with each eligible dictation. Text after the caret is never sent. "
-        + "Nearby text and context-assisted results stay out of History, diagnostics, last-result retrieval and correction learning. History keeps only your raw dictation when enabled. "
-        + "No backups. Changing the profile, provider, model, vocabulary or style pauses this permission until you review again. "
-        + "Credential precedence: \(policy.primary.source). Your ordinary Keychain and environment settings apply. Endpoint Keychain entries are shared across models. "
-        + "A different reported model, including alias-to-dated identity, rejects output after sending and possible billing."
+        "With each dictation in \(policy.target), Parla will send about 256 characters of text before the cursor — text you didn’t dictate — "
+        + "to \(policy.primary.provider) (\(policy.primary.endpoint), model \(policy.primary.model)). Text after the cursor is never sent, and nearby text isn’t saved. "
+        + "Changing this profile or your cleanup settings pauses this until you turn it on again."
     }
 
     @Published private(set) var failoverReview: CleanupFailoverReview?
@@ -362,15 +347,15 @@ final class HubModel: ObservableObject {
     }
     private var failoverPrerequisiteMessage: String? {
         guard settings.outputMode == .cleanup, settings.cleanupEnabled else {
-            return "Backups require Dictation output set to Normal cleanup (Output & Presets) and cleanup not turned off in settings. After the change saves, review the chain."
+            return "Backups need cleanup turned on and Dictation output set to Cleaned up (Output & Presets)."
         }
         return nil
     }
     var failoverState: String {
         guard let policy = settings.cleanupFailover, policy.review != nil else { return "Off" }
         if let message = failoverPrerequisiteMessage { return "Paused — " + message }
-        guard policy.isReviewed(for: settings), !store.cleanupFailoverIsPaused else { return "Paused — review the complete chain to enable new captures" }
-        return "Enabled for new ordinary captures; profiles with a different cleanup model are paused"
+        guard policy.isReviewed(for: settings), !store.cleanupFailoverIsPaused else { return "Paused — review backups to turn them back on" }
+        return "On (except for profiles with their own cleanup model)"
     }
     private func failoverEligibilityReady() -> Bool {
         guard let message = failoverPrerequisiteMessage else { return true }
@@ -380,7 +365,7 @@ final class HubModel: ObservableObject {
     private func failoverActionReady() -> Bool {
         guard !hasPendingSettingsSave, loadError == nil, saveError == nil else {
             failoverReview = nil
-            failoverMessage = "Wait for the settings save to finish, or resolve its error, then review again."
+            failoverMessage = "Wait for settings to save, then try again."
             return false
         }
         return true
@@ -390,33 +375,33 @@ final class HubModel: ObservableObject {
         do {
             failoverReview = try store.reviewCleanupFailover(backups: failoverBackups)
             failoverMessage = nil
-        } catch { failoverReview = nil; failoverMessage = "Cannot review this chain. Check the saved primary and each backup's model, endpoint and credential source." }
+        } catch { failoverReview = nil; failoverMessage = "Couldn't check backups. Review each one's server, model and key." }
     }
     func confirmFailover() {
         guard failoverActionReady(), failoverEligibilityReady(), let review = failoverReview else { return }
         do {
             let policy = try store.confirmCleanupFailover(review)
-            adoptFailover(policy); failoverMessage = "Enabled for new ordinary captures with a 15-second cleanup result deadline and owned drain. Existing captures keep their original authority."
-        } catch { failoverReview = nil; failoverMessage = "Settings changed or could not be saved. Review the complete chain again." }
+            adoptFailover(policy); failoverMessage = "Backups are on."
+        } catch { failoverReview = nil; failoverMessage = "Settings changed. Review backups again." }
     }
     func saveFailoverDraft() {
         guard failoverActionReady() else { return }
         do {
             let policy = try store.editCleanupFailover(backups: failoverBackups, expected: settings.cleanupFailover)
-            adoptFailover(policy); failoverMessage = "Backup order saved. Review and confirm to enable."
-        } catch { failoverMessage = "Cannot save these backups. Reload the saved chain and check each destination." }
+            adoptFailover(policy); failoverMessage = "Backups saved. Review them to turn them on."
+        } catch { failoverMessage = "Couldn't save backups. Check each server and try again." }
     }
     func disableFailover() {
         // Revocation is immediate even on a disk fault; ordinary debounce stays owed.
         do {
             let policy = try store.disableCleanupFailover(expected: settings.cleanupFailover)
-            adoptFailover(policy); failoverMessage = "Disabled. Active backups are canceled; frozen primary intent remains until deadline or operation abort. New ordinary starts stay busy until owned work exits."
-        } catch { failoverReview = nil; failoverMessage = "Backups paused for this session, but disable could not be saved. Repair settings and disable again." }
+            adoptFailover(policy); failoverMessage = "Backups are off."
+        } catch { failoverReview = nil; failoverMessage = "Backups are paused, but couldn't save. Fix settings.json and turn them off again." }
     }
     func loadFailoverDraft() {
         guard failoverActionReady() else { return }
         do { adoptFailover(try store.savedRetrySnapshot().cleanupFailover) }
-        catch { failoverMessage = "Saved backup settings are unavailable. Repair and reload settings." }
+        catch { failoverMessage = "Couldn't load saved backups. Fix settings.json." }
     }
     private func adoptFailover(_ policy: CleanupFailoverPolicy?) {
         let wasLoading = loading; loading = true
@@ -436,8 +421,8 @@ final class HubModel: ObservableObject {
             guard row.source == .scopedKeychain else { throw CleanupFailoverFailure.configuration }
             let scope = row.provider == "anthropic" ? CredentialScope.anthropic : try CredentialScope.compatible(row.baseURL)
             try store.changeCredential(scope: scope, replacement: remove ? nil : failoverKeyDraft(index))
-            failoverKeyDrafts.removeValue(forKey: scope); failoverMessage = "Keychain updated for this endpoint. Saving a key does not enable backups."
-        } catch { failoverMessage = "Credential action failed. Check the destination and retry explicitly." }
+            failoverKeyDrafts.removeValue(forKey: scope); failoverMessage = "Key updated."
+        } catch { failoverMessage = "Couldn't update the key. Check the server and try again." }
     }
     @Published var localCleanupStatus: LocalCleanupReason? = .unknown
     var localCleanupRuntime = LocalCleanupRuntime()
@@ -471,11 +456,11 @@ final class HubModel: ObservableObject {
     func saveCredential() { changeCredential(remove: false) }
     func removeCredential() { changeCredential(remove: true) }
     private func changeCredential(remove: Bool) {
-        guard loadError == nil else { credentialMessage = "Repair and reload settings before changing credentials."; return }
+        guard loadError == nil else { credentialMessage = "Fix settings.json before changing keys."; return }
         guard remove || !credentialDraft.isEmpty else { return }
         flushPendingSave()
         guard saveError == nil || store.migrationError != nil else {
-            credentialMessage = "Resolve the settings save error and reload before changing credentials."
+            credentialMessage = "Fix the settings error before changing keys."
             return
         }
         do {
@@ -486,18 +471,18 @@ final class HubModel: ObservableObject {
             if scope == .anthropic { settings.anthropicApiKey = nil }
             else { settings.cleanup.apiKey = nil }
             credentialMessage = store.migrateCredentials()
-        } catch { credentialMessage = (error as? CredentialFailure)?.description ?? "Credential action failed. Reload and retry explicitly." }
+        } catch { credentialMessage = (error as? CredentialFailure)?.description ?? "Couldn't update the key. Try again." }
         refreshCredentialStatus()
     }
 
-    @Published var words: [WordRow] = [] { didSet { if !loading { surroundingDraftChanged(); templates.relevantDraftChanged(); onScratchpadDictionaryDraftChanged(); audioImport.invalidate("Vocabulary draft changed. Choose the file again.") }; touch() } }
-    @Published var snippets: [SnippetRow] = [] { didSet { if !loading { surroundingDraftChanged(); onScratchpadDictionaryDraftChanged(); audioImport.invalidate("Vocabulary draft changed. Choose the file again.") }; touch() } }
-    @Published var replacements: [ReplacementRow] = [] { didSet { if !loading { surroundingDraftChanged(); onScratchpadDictionaryDraftChanged(); audioImport.invalidate("Vocabulary draft changed. Choose the file again.") }; touch() } }
+    @Published var words: [WordRow] = [] { didSet { if !loading { surroundingDraftChanged(); templates.relevantDraftChanged(); onScratchpadDictionaryDraftChanged(); audioImport.invalidate("Dictionary changed. Choose the file again.") }; touch() } }
+    @Published var snippets: [SnippetRow] = [] { didSet { if !loading { surroundingDraftChanged(); onScratchpadDictionaryDraftChanged(); audioImport.invalidate("Dictionary changed. Choose the file again.") }; touch() } }
+    @Published var replacements: [ReplacementRow] = [] { didSet { if !loading { surroundingDraftChanged(); onScratchpadDictionaryDraftChanged(); audioImport.invalidate("Dictionary changed. Choose the file again.") }; touch() } }
     @Published var importPreview: VocabularyImportPreview?
     @Published var transferMessage: String?
     /// settings.json decode error. Editing is disabled while non-nil so the hub
     /// never clobbers a file the user needs to hand-fix (same rule as the menu).
-    @Published var loadError: String? { didSet { if loadError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings unavailable."); audioImport.invalidate("Settings are unavailable."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
+    @Published var loadError: String? { didSet { if loadError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings unavailable."); audioImport.invalidate("Settings can't be read."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
     @Published var saveError: String? { didSet { if saveError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings save failed."); audioImport.invalidate("Settings could not be saved."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
     @Published var modelLoaded = false
     @Published var downloadProgress: Double? // non-nil while downloading
@@ -525,7 +510,7 @@ final class HubModel: ObservableObject {
     @Published var playingRecordingID: String?
     var recoveryClock: () -> Date = Date.init
     var onRecoveryTranscribe: (RecordingStore.Lease, RecognitionRequest, @escaping (Result<String, Error>) -> Void) -> Void = { _, _, done in
-        done(.failure(RecordingStore.Failure("Local transcription is unavailable.")))
+        done(.failure(RecordingStore.Failure("Transcription isn't available.")))
     }
     private var recordingObserver: AnyCancellable?
     let recordingDirectory: URL
@@ -546,7 +531,7 @@ final class HubModel: ObservableObject {
     var segmentedRetryNow: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     var segmentedRetrySleep: (TimeInterval) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000)) }
 
-    @Published var requestedPage: HubPage? { didSet { if let requestedPage, requestedPage != .templates { templates.cancel("Form discarded for navigation."); cancelTemplateEditor() } } }
+    @Published var requestedPage: HubPage? { didSet { if let requestedPage, requestedPage != .templates { templates.cancel("Form canceled."); cancelTemplateEditor() } } }
     private var historyObserver: AnyCancellable?
     private let clipboard: ((String) -> Void)?
     @Published var launchAtLogin = false
@@ -730,7 +715,7 @@ final class HubModel: ObservableObject {
     var microphoneRequest: (@escaping (Bool) -> Void) -> Void = { AVCaptureDevice.requestAccess(for: .audio, completionHandler: $0) }
     lazy var microphonePrivacy: () -> Void = { [weak self] in self?.openPrivacyPane("Privacy_Microphone") }
     func requestMicrophone() {
-        templates.cancel("Form discarded for microphone permission action. Start a fresh form after permission succeeds.")
+        templates.cancel("Form canceled. Start again after allowing the microphone.")
         guard microphoneAuthorization() == .notDetermined else {
             microphonePrivacy()
             return
@@ -791,10 +776,10 @@ final class HubModel: ObservableObject {
             }
             next[index] = preset
         } else {
-            guard !next.contains(where: { $0.id == preset.id }) else { presetError = "Duplicate preset ID."; return false }
+            guard !next.contains(where: { $0.id == preset.id }) else { presetError = "This preset already exists."; return false }
             next.append(preset)
         }
-        guard Set(next.map(\.id)).count == next.count else { presetError = "Duplicate preset ID."; return false }
+        guard Set(next.map(\.id)).count == next.count else { presetError = "This preset already exists."; return false }
         presetError = nil
         settings.transformPresets = next
         return true
@@ -892,7 +877,7 @@ final class HubModel: ObservableObject {
         if profile.enabled, (profile.recognitionEngine ?? settings.recognitionEngine) == .whisper, let path = profile.whisperModelPath {
             var directory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &directory), !directory.boolValue else {
-                profileError = "Local ASR model is unavailable. Choose an existing model file or inherit."
+                profileError = "Model file not found. Choose another or use the global model."
                 return false
             }
         }
@@ -930,7 +915,7 @@ final class HubModel: ObservableObject {
         flushPendingSave()
         importPreview = nil
         guard loadError == nil, saveError == nil else {
-            transferMessage = "Resolve the settings error before importing."
+            transferMessage = "Fix the settings error before importing."
             return
         }
         let current = store.load()
@@ -945,13 +930,13 @@ final class HubModel: ObservableObject {
 
     func applyVocabulary(_ mode: VocabularyImportMode) {
         guard loadError == nil, saveError == nil, let preview = importPreview else {
-            transferMessage = "Import preview expired. Open the import again."
+            transferMessage = "Import expired. Choose the file again."
             return
         }
         do {
             let backup = try store.importVocabulary(preview, mode: mode)
             refresh()
-            transferMessage = backup.map { "Imported. Vocabulary backup: \($0.path)" } ?? "Merged. Existing entries kept on conflict."
+            transferMessage = backup.map { "Imported. Backup saved to \($0.path)" } ?? "Added. Your existing entries were kept."
             onSaved()
         } catch {
             transferMessage = error.localizedDescription
@@ -970,13 +955,13 @@ final class HubModel: ObservableObject {
             defer { try? file.close() }
             let data = try file.read(upToCount: VocabularyDocument.maxFileBytes + 1) ?? Data()
             previewVocabulary(data)
-        } catch { transferMessage = "Couldn't open vocabulary: \(error.localizedDescription)" }
+        } catch { transferMessage = "Couldn't open the file: \(error.localizedDescription)" }
     }
 
     func exportVocabulary() {
         flushPendingSave()
         guard loadError == nil, saveError == nil else {
-            transferMessage = "Resolve the settings error before exporting."
+            transferMessage = "Fix the settings error before exporting."
             return
         }
         let current = store.load()
@@ -987,8 +972,8 @@ final class HubModel: ObservableObject {
             let data = try VocabularyDocument(settings: current).encoded()
             guard let url = vocabularyExportPanel() else { return }
             try withValidatedExportDestination(url,fileExtension:"json") { try vocabularyExportWriter(data,url) }
-            transferMessage = "Exported words, snippets, and replacements."
-        } catch { transferMessage = "Couldn’t export vocabulary. Choose a supported location outside protected files and try again." }
+            transferMessage = "Exported."
+        } catch { transferMessage = "Couldn’t export. Choose another location and try again." }
     }
 
     /// Debounced whole-file save — same style as the menu's Set API Key path.
@@ -1017,7 +1002,7 @@ final class HubModel: ObservableObject {
         guard store.lastError == nil else {
             loadError = store.lastError
         onCanceledCaptureConfigurationChanged(loadError == nil)
-            saveError = "Couldn’t save settings: the current file is unavailable or invalid. Repair and reload it before saving."
+            saveError = "Couldn’t save settings because settings.json can’t be read. Fix it, then try again."
             clearLastOriginal()
             onCanceledCaptureConfigurationChanged(false)
             recordings.configure(settings: current, error: store.lastError, now: recoveryClock())
@@ -1037,13 +1022,13 @@ final class HubModel: ObservableObject {
             VocabularyHints.normalized($0).utf8.count > VocabularyHints.maxHintBytes && !settings.dictionary.contains($0)
         }) else {
             onCanceledCaptureConfigurationChanged(false)
-            saveError = "Word exceeds 256 UTF-8 bytes. Shorten it before saving."
+            saveError = "A dictionary word is too long. Shorten it to save."
             return
         }
         guard s.replacements.allSatisfy({ $0.source.utf8.count <= VocabularyHints.maxHintBytes
             && $0.replacement.utf8.count <= VocabularyDocument.maxTextBytes }) else {
             onCanceledCaptureConfigurationChanged(false)
-            saveError = "Replacement source exceeds 256 UTF-8 bytes or output exceeds 65,536 UTF-8 bytes."
+            saveError = "A replacement is too long. Shorten it to save."
             return
         }
         var oldWithoutShadow = current; oldWithoutShadow.energyActivityShadowEnabled = false

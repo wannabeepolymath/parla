@@ -66,7 +66,7 @@ final class NativePreparation: ObservableObject {
         target.flatMap { cachedRefusal(for: $0) }
     }
     func cachedRefusal(for request: RecognitionRequest) -> PreparationRefusal? { request.selection.engine == .whisper ? core.cachedRefusal(for: request.selection) : nil }
-    enum Action: String, CaseIterable { case keep = "Keep safe start", retry = "Retry preparation once", reset = "Reset recovery state" }
+    enum Action: String, CaseIterable { case keep = "Keep paused", retry = "Try loading once", reset = "Reset" }
     func act(_ action: Action, token: UUID) {
         guard snapshot.token == token else { return }
         switch action {

@@ -133,11 +133,11 @@ extension HubModel {
     func prepareHistoryExport(rowID: UUID) {
         guard let entry = history.entries.first(where: { $0.id == rowID }) else {
             historyExport = nil
-            historyExportMessage = "This saved entry is no longer available."
+            historyExportMessage = "This dictation is no longer in History."
             return
         }
         historyExportMessage = nil
-        historyExport = HistoryExportRequest(scope: "Saved entry", entries: [entry])
+        historyExport = HistoryExportRequest(scope: "1 dictation", entries: [entry])
     }
 
     func prepareFilteredHistoryExport(_ query: String) {
@@ -145,8 +145,8 @@ extension HubModel {
         // reload/trim is necessary for this read-only action.
         refreshHistory()
         let entries = filteredHistory(query)
-        historyExportMessage = entries.isEmpty ? "No saved entries match this search." : nil
-        historyExport = entries.isEmpty ? nil : HistoryExportRequest(scope: "All saved entries matching the current search", entries: entries)
+        historyExportMessage = entries.isEmpty ? "Nothing in History matches this search." : nil
+        historyExport = entries.isEmpty ? nil : HistoryExportRequest(scope: "Dictations matching your search", entries: entries)
     }
 
     func exportHistory(content: TranscriptExport.Content, format: TranscriptExport.Format) {
@@ -158,18 +158,18 @@ extension HubModel {
         guard let url = historyExportPanel(selection) else { return }
         do {
             try withValidatedExportDestination(url,fileExtension:format.fileExtension) { try historyExportWriter(data,url) }
-            historyExportMessage = "Exported \(request.count) saved \(request.count == 1 ? "entry" : "entries") · \(content.rawValue) · \(format.rawValue)."
+            historyExportMessage = "Exported \(request.count) \(request.count == 1 ? "dictation" : "dictations")."
             historyExport = nil
         } catch HistoryExportDestination.Refusal.savedStorage {
-            historyExportMessage = "Saved storage cannot supply complete protection. Retry export after storage is available."
+            historyExportMessage = "Couldn’t export because storage isn’t available. Try again."
         } catch HistoryExportDestination.Refusal.protectedPath {
-            historyExportMessage = "Choose a file outside Parla’s settings, history and recording files."
+            historyExportMessage = "Choose a different file name or folder."
         } catch HistoryExportDestination.Refusal.extensionMismatch {
             historyExportMessage = "Choose a filename ending in .\(format.fileExtension)."
         } catch {
             // Filesystem errors can contain private paths. Keep them out of the
             // transcript and user-facing status, just like provider errors.
-            historyExportMessage = "Couldn’t export \(request.count) saved \(request.count == 1 ? "entry" : "entries") · \(content.rawValue) · \(format.rawValue). Choose a writable location and try again."
+            historyExportMessage = "Couldn’t export. Choose another location and try again."
         }
     }
 }

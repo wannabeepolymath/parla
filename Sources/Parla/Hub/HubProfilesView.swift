@@ -10,14 +10,14 @@ struct HubProfilesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Exact browser host → exact app → global settings. One winner; unset fields inherit globals. Recognition is chosen at capture start. Output is chosen at landing.")
+            Text("A website profile wins over an app profile. Anything you leave unset uses your global settings.")
                 .font(.system(size: 12)).foregroundStyle(Theme.muted)
             ForEach(Array(ProfileResolver.warnings(model.settings.profiles).enumerated()), id: \.offset) { _, warning in
                 HubBanner(text: warning)
             }
-            HubSection("Profiles", footer: "Saved order breaks ties in hand-edited files. Site rules require a recognized browser and an available HTTP(S) URL. Bundle IDs are case-sensitive; hosts ignore case and one trailing dot. Subdomains are separate targets.") {
+            HubSection("Profiles", footer: "Website profiles work in supported browsers. Subdomains need their own profile.") {
                 ForEach(Array(model.settings.profiles.enumerated()), id: \.offset) { index, profile in
-                    HubRow(profile.name, detail: "\(profile.targetKind.rawValue): \(profile.normalizedTarget ?? profile.target)") {
+                    HubRow(profile.name, detail: (profile.targetKind == .app ? "App: " : "Website: ") + (profile.normalizedTarget ?? profile.target)) {
                         Toggle("Enabled", isOn: Binding(get: { profile.enabled }, set: { enabled in
                             var next = profile
                             next.enabled = enabled
@@ -35,43 +35,42 @@ struct HubProfilesView: View {
                     }
                     HubDivider()
                 }
-                if model.settings.profiles.isEmpty { EmptyHint(text: "No profiles — global settings apply") }
+                if model.settings.profiles.isEmpty { EmptyHint(text: "No profiles yet") }
             }
-            HubSection("Surrounding text", footer: "Nearby text can help cleanup with names and sentence continuity. Only the cleaned dictation is inserted. Nearby text is never saved in History or diagnostics. Secure fields, password managers, terminals and unsupported fields are excluded.") {
+            HubSection("Nearby text", footer: "Text before the cursor helps cleanup get names and sentences right. It's never saved, and password fields and terminals are skipped.") {
                 Toggle("Use nearby text with Apple Intelligence", isOn: $model.settings.cleanup.localSurroundingTextEnabled)
-                Text("On by default for on-device cleanup. Reads a short passage before the caret and keeps it on this Mac.").font(.caption).foregroundStyle(Theme.muted)
-                Text("Nearby text for cloud cleanup is off by default. To enable it, review a saved app profile below. Up to 256 UTF-16 units of existing text before the caret will be sent to your selected cleanup provider along with your dictation.").font(.caption)
+                Text("Stays on this Mac.").font(.caption).foregroundStyle(Theme.muted)
+                Text("For online cleanup, turn it on per app below. About 256 characters before the cursor are then sent to your cleanup provider with each dictation.").font(.caption)
                 Text(model.surroundingState).font(.headline)
                 ForEach(model.settings.profiles.filter { $0.targetKind == .app && $0.enabled }) { profile in
                     HubRow(profile.name, detail: profile.target) {
-                        Button("Review cloud context") { model.reviewSurrounding(profileID: profile.id) }
-                        Button("Disable cloud context") { model.disableSurrounding(profileID: profile.id) }
+                        Button("Turn on…") { model.reviewSurrounding(profileID: profile.id) }
+                        Button("Turn off") { model.disableSurrounding(profileID: profile.id) }
                     }
                 }
                 if let review = model.surroundingReview {
                     Text(model.surroundingDisclosure(review.policy)).font(.caption).textSelection(.enabled)
-                    Button("Enable cloud context for this profile") { model.confirmSurrounding() }
+                    Button("Send nearby text for this app") { model.confirmSurrounding() }
                 }
                 if let message = model.surroundingMessage { Text(message).font(.caption) }
             }
             Button("Add profile") { editingIndex = nil; draft = DictationProfile(); model.profileError = nil }
                 .buttonStyle(HubButtonStyle())
             if let error = model.profileError { HubBanner(text: error) }
-            HubSection("Resolver preview", footer: "Enter a target explicitly. This does not read the Hub's frontmost app, load a model, or contact a provider. URLs stay local; only the host is matched.") {
+            HubSection("Test your profiles", footer: "Enter an app or web address to see which profile applies.") {
                 VStack(alignment: .leading, spacing: 10) {
-                    TextField("Bundle ID, e.g. com.apple.Safari", text: $previewBundle).hubField()
-                    TextField("Optional HTTP(S) URL", text: $previewURL).hubField()
+                    TextField("App bundle ID, e.g. com.apple.Safari", text: $previewBundle).hubField()
+                    TextField("Web address (optional)", text: $previewURL).hubField()
                     let result = model.profilePreview(bundleID: previewBundle, browserURL: previewURL)
-                    Text("Winner: \(result.name)").fontWeight(.medium)
-                    Text("Cleanup: \(result.settings.cleanupEnabled ? "on if configured" : "off") · Style: \(result.settings.cleanupStyle.rawValue) · Language: \(result.settings.language ?? "auto")")
-                    Text("ASR model: \(result.settings.whisperModelPath ?? WhisperTranscriber.defaultModelPath())")
+                    Text("Profile: \(result.name)").fontWeight(.medium)
+                    Text("Cleanup: \(result.settings.cleanupEnabled ? "on" : "off") · Style: \(result.settings.cleanupStyle.rawValue) · Language: \(result.settings.language ?? "auto-detect")")
+                    Text("Speech model: \(URL(fileURLWithPath: result.settings.whisperModelPath ?? WhisperTranscriber.defaultModelPath()).lastPathComponent)")
                     Text("Cleanup model: \(result.settings.cleanupModelLabel)")
-                    Text("Hints selected: \(VocabularyHints.select(result.settings.dictionary, byteLimit: VocabularyHints.asrBytes).count) ASR / \(VocabularyHints.select(result.settings.dictionary, byteLimit: VocabularyHints.cleanupBytes).count) cleanup")
                 }.font(.system(size: 12)).padding(12).textSelection(.enabled)
             }
             if let recognition = model.lastRecognitionProfile, let output = model.lastOutputProfile {
-                HubSection("Last session") {
-                    HubRow("Recognition", detail: recognition) { EmptyView() }
+                HubSection("Last dictation") {
+                    HubRow("Speech", detail: recognition) { EmptyView() }
                     HubRow("Output", detail: output) { EmptyView() }
                 }
             }
@@ -104,45 +103,45 @@ private struct ProfileEditor: View {
                     TextField("Profile name", text: $profile.name).hubField()
                     Toggle("Enabled", isOn: $profile.enabled)
                     Picker("Target", selection: $profile.targetKind) {
-                        Text("Exact app bundle ID").tag(ProfileTargetKind.app)
-                        Text("Exact browser host").tag(ProfileTargetKind.host)
+                        Text("App (bundle ID)").tag(ProfileTargetKind.app)
+                        Text("Website (host name)").tag(ProfileTargetKind.host)
                     }
                     TextField(profile.targetKind == .app ? "com.apple.TextEdit" : "mail.google.com", text: $profile.target).hubField()
                     Picker("AI cleanup", selection: $profile.cleanup) {
-                        Text("Inherit global").tag(ProfileCleanup.inherit)
-                        Text("Off — local snippets and replacements").tag(ProfileCleanup.off)
-                        Text("On — requires global provider setup").tag(ProfileCleanup.on)
+                        Text("Same as global").tag(ProfileCleanup.inherit)
+                        Text("Off (snippets still apply)").tag(ProfileCleanup.off)
+                        Text("On").tag(ProfileCleanup.on)
                     }
                     Picker("Style", selection: $profile.style) {
-                        Text("Inherit global").tag(Optional<ProfileStyle>.none)
+                        Text("Same as global").tag(Optional<ProfileStyle>.none)
                         ForEach(ProfileStyle.allCases, id: \.self) { Text($0.rawValue.capitalized).tag(Optional($0)) }
                     }
-                    Picker("Recognition engine", selection: $profile.recognitionEngine) {
-                        Text("Inherit global").tag(Optional<RecognitionEngine>.none)
+                    Picker("Speech engine", selection: $profile.recognitionEngine) {
+                        Text("Same as global").tag(Optional<RecognitionEngine>.none)
                         Text("Whisper").tag(Optional(RecognitionEngine.whisper))
-                        Text("Apple Speech · batch").tag(Optional(RecognitionEngine.appleSpeech))
+                        Text("Apple Speech").tag(Optional(RecognitionEngine.appleSpeech))
                         if profile.recognitionEngine == .parakeet || model.parakeetProfileChoiceRefusal == nil {
-                            Text("Parakeet · local batch").tag(Optional(RecognitionEngine.parakeet))
+                            Text("Parakeet").tag(Optional(RecognitionEngine.parakeet))
                         }
-                        if profile.recognitionEngine == .invalid { Text("Invalid configuration").tag(Optional(RecognitionEngine.invalid)) }
+                        if profile.recognitionEngine == .invalid { Text("Choose an engine").tag(Optional(RecognitionEngine.invalid)) }
                     }
                     if (profile.recognitionEngine ?? model.settings.recognitionEngine) == .parakeet {
                         ParakeetSettingsFields(modelID: $profile.parakeetModelID, filter: $profile.parakeetLanguageFilter, inherits: true)
-                        Text("Save the profile before using its saved-row installation and preparation controls.").font(.caption)
+                        Text("Save the profile to install or prepare Parakeet for it.").font(.caption)
                     }
-                    TextField("Exact Apple locale (empty inherits)", text: optBinding($profile.appleSpeechLocale)).hubField()
+                    TextField("Apple Speech language (optional)", text: optBinding($profile.appleSpeechLocale)).hubField()
                     if (profile.recognitionEngine ?? model.settings.recognitionEngine) == .appleSpeech {
-                        Text("Save the profile before preparing its language. Words apply to cleanup only. Inherited Apple with legacy Whisper overrides needs an explicit Whisper engine or replacement Apple locale.").font(.caption)
+                        Text("Save the profile before setting up its language.").font(.caption)
                         AppleSpeechControls(model: model, locale: profile.appleSpeechLocale ?? model.settings.appleSpeechLocale)
                     }
                     if (profile.recognitionEngine ?? model.settings.recognitionEngine) == .whisper {
-                    Picker("Whisper spoken language", selection: optBinding($profile.language)) {
-                        Text("Inherit global").tag("")
-                        Text("Auto — follow speaker").tag("auto")
+                    Picker("Language", selection: optBinding($profile.language)) {
+                        Text("Same as global").tag("")
+                        Text("Auto-detect").tag("auto")
                         ForEach(WhisperTranscriber.languages, id: \.code) { Text($0.name).tag($0.code) }
                     }
-                    Picker("Local ASR model", selection: optBinding($profile.whisperModelPath)) {
-                        Text("Inherit global").tag("")
+                    Picker("Whisper model", selection: optBinding($profile.whisperModelPath)) {
+                        Text("Same as global").tag("")
                         ForEach(ModelCatalog.all.filter { ModelCatalog.isInstalled($0) }) {
                             Text($0.displayName).tag(ModelCatalog.path(for: $0))
                         }
@@ -151,15 +150,13 @@ private struct ProfileEditor: View {
                             Text(path).tag(path)
                         }
                     }
-                    TextField("Existing local model path (empty inherits)", text: optBinding($profile.whisperModelPath)).hubField()
+                    TextField("Custom model file (optional)", text: optBinding($profile.whisperModelPath)).hubField()
                     }
-                    TextField("Cleanup model ID in current provider (empty inherits)", text: optBinding($profile.cleanupModel)).hubField()
-                    Text("Ordered words — one per line, ahead of globals").font(.caption)
+                    TextField("Cleanup model (optional)", text: optBinding($profile.cleanupModel)).hubField()
+                    Text("Extra dictionary words, one per line").font(.caption)
                     TextEditor(text: Binding(get: { profile.dictionary.joined(separator: "\n") }, set: {
                         profile.dictionary = $0.components(separatedBy: "\n")
                     })).font(.system(size: 12)).frame(height: 100)
-                    Text("No downloads or provider changes. English-only models ignore language. Saved words are preserved; shared UTF-8 budgets and deduplication apply. Destination and single-line constraints take precedence over style.")
-                        .font(.caption).foregroundStyle(Theme.muted)
                     if let error = model.profileError { HubBanner(text: error) }
                 }
             }

@@ -70,10 +70,10 @@ final class GuidedTemplateOwner: ObservableObject {
     var recognitionSummary: String? {
         guard let request = configuration?.request else { return nil }
         switch request.selection {
-        case .whisper: return "Whisper · " + (request.language ?? "Automatic language")
+        case .whisper: return "Whisper · " + (request.language ?? "Auto-detect")
         case .appleSpeech(let locale): return "Apple Speech · " + locale
-        case .parakeet(_, let filter): return "Parakeet · " + (filter ?? "Automatic language")
-        case .invalid: return "Recognition unavailable"
+        case .parakeet(_, let filter): return "Parakeet · " + (filter ?? "Auto-detect")
+        case .invalid: return "Speech recognition unavailable"
         }
     }
     var ownsSession: Bool { lifetime != nil }
@@ -85,17 +85,17 @@ final class GuidedTemplateOwner: ObservableObject {
 
     /// Registers and reserves synchronously BEFORE the first queued await.
     func begin(_ definition: GuidedTemplateDefinition) {
-        guard !ownsSession, let store, let capture, let admission, let local, let enqueue else { notice("Previous form is stopping or entry is unavailable."); return }
-        guard !security(), draftReady(), allowed(), permission() else { notice("Save pending settings, finish other work and explicitly allow microphone before Begin."); return }
+        guard !ownsSession, let store, let capture, let admission, let local, let enqueue else { notice("Wait for the current form to stop."); return }
+        guard !security(), draftReady(), allowed(), permission() else { notice("Allow the microphone and finish other dictation first."); return }
         do {
             let saved = try store.savedRetrySnapshot(), config = Configuration(saved)
-            guard saved.guidedTemplates.definitions.contains(definition), config.request.selection.engine != .invalid else { throw GuidedTemplateFailure("Template or recognition settings changed.") }
+            guard saved.guidedTemplates.definitions.contains(definition), config.request.selection.engine != .invalid else { throw GuidedTemplateFailure("Settings changed. Try again.") }
             if let reason = preparationRefusal(config.request) { throw GuidedTemplateFailure(reason) }
             let state = try GuidedTemplateSession(definition: definition, now: clock())
             let registration = PendingOperation(name: "Guided voice form")
-            guard MainActor.assumeIsolated({ local.admit(registration) }) else { throw GuidedTemplateFailure("Shutdown or restart admission is closed.") }
+            guard MainActor.assumeIsolated({ local.admit(registration) }) else { throw GuidedTemplateFailure("Parla is quitting.") }
             lifetime = registration; identity = state.id
-            guard let acquired = admission.acquire(.guidedTemplate) else { dispose(); throw GuidedTemplateFailure("Another input owner is active.") }
+            guard let acquired = admission.acquire(.guidedTemplate) else { dispose(); throw GuidedTemplateFailure("Finish the other recording first.") }
             lease = acquired; suspension = suspend()
             do { try capture.reserve(session: state.id, lease: acquired) }
             catch { dispose(); throw error }
@@ -103,7 +103,7 @@ final class GuidedTemplateOwner: ObservableObject {
             session = state; busy = true; barrierOwed = true
             invalidatePriorAuthority()
             let barrier = PendingOperation(name: "Guided form admission barrier")
-            message = "Waiting for earlier recognition to exit. No audio is being captured."
+            message = "Getting ready…"
             cancelExpiry = schedule(1_200) { [weak self] in
                 guard self?.identity == state.id else { return }; self?.cancel("Form expired after 20 minutes.")
             }
@@ -112,14 +112,14 @@ final class GuidedTemplateOwner: ObservableObject {
                     guard let self, self.identity == state.id else { return }
                     self.barrierOwed = false; self.busy = false
                     if self.session == nil { self.dispose() }
-                    else if self.boundary() != nil { self.message = "Ready. Start each field explicitly." }
+                    else if self.boundary() != nil { self.message = "Ready. Record each field." }
                 }
             })
         } catch { notice(error.localizedDescription) }
     }
     /// Security is checked before all other stale/configuration guards.
     @discardableResult func boundary() -> Settings? {
-        guard !security() else { cancel("Form discarded after secure-input evidence."); return nil }
+        guard !security() else { cancel("Form canceled because a password field was active."); return nil }
         guard let session, let configuration, let store else { return nil }
         guard !session.isExpired(now: clock()), lifetime?.shouldAbort != true,
               frozenPreparation == preparationEpoch(), frozenSelection == selectionEpoch(),
@@ -127,9 +127,9 @@ final class GuidedTemplateOwner: ObservableObject {
               Configuration(saved) == configuration,
               saved.guidedTemplates.definitions.contains(session.definition),
               currentPreparationRefusal(configuration.request) == nil else {
-            cancel("Form expired or saved template, recognition or preparation authority changed."); return nil
+            cancel("Form canceled because settings changed."); return nil
         }
-        guard draftReady() else { notice("Save or repair the pending settings draft before continuing."); return nil }
+        guard draftReady() else { notice("Wait for your settings to save, then try again."); return nil }
         return saved
     }
     private func isDiscarded(_ attempt: PendingOperation) -> Bool {
@@ -152,13 +152,13 @@ final class GuidedTemplateOwner: ObservableObject {
         return preparationRefusal(request)
     }
     func observeSaved() { if session != nil { _ = boundary() } }
-    func relevantDraftChanged() { if ownsSession { cancel("Form discarded after a recognition or template draft changed.") } }
+    func relevantDraftChanged() { if ownsSession { cancel("Form canceled because settings changed.") } }
     func preparationChanged() { if session != nil { _ = boundary() } }
     func observe(_ event: DictationSession.Event) {
         switch event {
-        case .focusSampled(_, .secure), .cleanReady(_, _, _, _, .secure, _), .resultUnavailable(_, .secure): cancel("Form discarded after secure-input evidence.")
-        case .transcribed(_, _, let probe) where probe.focus == .secure: cancel("Form discarded after secure-input evidence.")
-        case .transformReady(_, _, let probe, _, _) where probe.focus == .secure: cancel("Form discarded after secure-input evidence.")
+        case .focusSampled(_, .secure), .cleanReady(_, _, _, _, .secure, _), .resultUnavailable(_, .secure): cancel("Form canceled because a password field was active.")
+        case .transcribed(_, _, let probe) where probe.focus == .secure: cancel("Form canceled because a password field was active.")
+        case .transformReady(_, _, let probe, _, _) where probe.focus == .secure: cancel("Form canceled because a password field was active.")
         default: break
         }
     }
@@ -169,7 +169,7 @@ final class GuidedTemplateOwner: ObservableObject {
             let take = try state.start(now: clock()); session = state
             try capture.start(session: state.id, capture: take.capture, lease: lease, inputUID: configuration.inputUID)
             recordingCapture = take.capture
-            recording = true; route = MicrophoneRoute(); message = "Recording. Stop within 30 seconds."
+            recording = true; route = MicrophoneRoute(); message = "Recording… (up to 30 seconds)"
             cancelTakeLimit = schedule(30) { [weak self] in self?.captureEnded(session: take.session, capture: take.capture) }
         } catch {
             if let take = session?.take { session?.settle(take, text: nil) }
@@ -178,7 +178,7 @@ final class GuidedTemplateOwner: ObservableObject {
     }
     func captureEnded(session id: UUID, capture idCapture: UUID) {
         guard identity == id, session?.take?.capture == idCapture, recording else { return }
-        discardTake(); notice("Take incomplete or limit reached. Re-record explicitly.")
+        discardTake(); notice("Recording stopped early. Record the field again.")
     }
     func stop() {
         guard recording, let take = session?.take, let lease, let capture, let enqueue, let config = configuration else { return }
@@ -186,12 +186,12 @@ final class GuidedTemplateOwner: ObservableObject {
         guard let audio = capture.stop(session: take.session, capture: take.capture, lease: lease), audio.complete,
               !audio.samples.isEmpty, audio.samples.count <= 480_000, audio.samples.allSatisfy(\.isFinite),
               Pipeline.recognitionSkip(samples: audio.samples) == nil, boundary() != nil else {
-            session?.settle(take, text: nil); notice("No complete usable take. Re-record explicitly."); return
+            session?.settle(take, text: nil); notice("Nothing was recorded. Record the field again."); return
         }
         route = audio.route; busy = true
         let attempt = PendingOperation(name: "Guided field recognition"); discardedTake = nil; operation = attempt
         let result = ResultBox()
-        message = "Recognizing saved global raw audio. Waiting for actual exit."
+        message = "Transcribing…"
         enqueue(attempt, { [weak self] in
             guard let self else { return }
             do {
@@ -219,7 +219,7 @@ final class GuidedTemplateOwner: ObservableObject {
                 self.operation = nil; self.discardedTake = nil; self.busy = false
                 if self.session != nil, self.boundary() != nil, !attempt.shouldAbort, !discarded {
                     self.session?.settle(take, text: result.text)
-                    self.message = result.text == nil ? "No usable recognition. Re-record explicitly." : "Review or edit this candidate, then Accept."
+                    self.message = result.text == nil ? "No speech recognized. Record the field again." : "Check or edit the text, then accept it."
                 } else if self.session != nil { self.session?.settle(take, text: nil) }
                 if self.session == nil { self.dispose() }
             }
@@ -243,17 +243,17 @@ final class GuidedTemplateOwner: ObservableObject {
     func approve(_ id: UUID) { guard !busy, boundary() != nil else { return }; session?.approve(id, date: date()) }
     func copy(using write: (String) -> Void) {
         guard boundary() != nil, let completion = session?.completion else { return }
-        write(completion.body); notice("Copy requested. Clipboard acceptance is not verified.")
+        write(completion.body); notice("Copied.")
     }
     func save(history: HistoryStore) {
         guard let saved = boundary(), saved.historyEnabled, let state = session, !state.saved, let completion = state.completion else { return }
         history.reload(countLimit: saved.historyTextCount)
         guard boundary() != nil else { return }
         let entry = HistoryEntry(id: completion.id, date: completion.date, raw: completion.body)
-        if history.appendReviewed(entry) { session?.markSaved(completion.id); notice("Completed result saved.") }
-        else { notice("Could not save. Retry Save repeats only this sealed result's storage.") }
+        if history.appendReviewed(entry) { session?.markSaved(completion.id); notice("Saved to history.") }
+        else { notice("Couldn't save to history. Try again.") }
     }
-    func cancel(_ reason: String = "Form discarded. Already requested Copy or Save cannot be undone.") {
+    func cancel(_ reason: String = "Form canceled.") {
         guard ownsSession else { return }
         lifetime?.revoke(); discardedTake = nil; session = nil // revoke all publication before closing native capture
         cancelExpiry?(); cancelExpiry = nil; cancelTakeLimit?(); cancelTakeLimit = nil

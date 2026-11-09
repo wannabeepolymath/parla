@@ -44,7 +44,7 @@ enum RecoveryTranscription {
             } catch {
                 if let reason = error as? ParakeetInstallationRefusal { result = .failure(RecordingStore.Failure(reason.message)) }
                 else if let reason = error as? PreparationRefusal { result = .failure(RecordingStore.Failure(reason.description)) }
-                else { result = .failure((error as? RecordingStore.Failure) ?? RecordingStore.Failure("Local transcription failed. Audio is retained when available; no provider or insertion ran.")) }
+                else { result = .failure((error as? RecordingStore.Failure) ?? RecordingStore.Failure("Transcription failed. The audio is still saved.")) }
             }
             // Complete and publish on the same main turn as Cancel. If Cancel
             // won, it has already released the lease, preserving the source.
@@ -69,7 +69,7 @@ private final class LocalRecoveryPlayer: NSObject, RecoveryAudioPlaying, AVAudio
         stop()
         let player = try AVAudioPlayer(contentsOf: url)
         self.player = player; self.finished = finished; player.delegate = self
-        guard player.play() else { stop(); throw RecordingStore.Failure("Couldn’t start local playback.") }
+        guard player.play() else { stop(); throw RecordingStore.Failure("Couldn’t play the audio.") }
     }
     func stop() { player?.stop(); player = nil; finished = nil }
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { complete(flag) }
@@ -134,30 +134,30 @@ extension HubModel {
     private func recoverySettings() -> Settings? {
         refreshRecovery()
         guard loadError == nil, saveError == nil, store.lastError == nil, recordings.policy != nil else {
-            recoveryMessage = "Repair settings and reload before transcription or Save. Existing previews can still be copied."
+            recoveryMessage = "Fix settings.json before transcribing or saving."
             return nil
         }
         return store.load()
     }
     func playRecovery(_ url: URL) {
         guard !microphoneTest.ownsSession else {
-            recoveryMessage = "Clear the microphone test before recovery playback."; return
+            recoveryMessage = "Stop the microphone test first."; return
         }
         refreshRecovery()
         do {
             try recoveryPlayback.start(url: url, store: recordings, now: recoveryClock()) { [weak self] success in
-                self?.recoveryMessage = success ? "Playback finished." : "Playback failed. Audio remains available when readable."
+                self?.recoveryMessage = success ? "Playback finished." : "Couldn’t play the audio."
                 self?.refreshRecoveryProjection()
             }
-            recoveryMessage = "Playing locally. Stop or leave this page to release the file."
-        } catch { recoveryMessage = (error as? RecordingStore.Failure)?.message ?? "Local playback failed." }
+            recoveryMessage = "Playing…"
+        } catch { recoveryMessage = (error as? RecordingStore.Failure)?.message ?? "Couldn’t play the audio." }
         refreshRecoveryProjection()
     }
     func stopRecoveryPlayback() { recoveryPlayback.stop(); refreshRecoveryProjection() }
     func deleteRecovery(_ url: URL) {
         if recoveryPlayback.id == url.lastPathComponent { stopRecoveryPlayback() }
         refreshRecovery()
-        recoveryMessage = recordings.delete(url, now: recoveryClock()) ? "Recording and paired hypothesis deleted." : recordings.lastError
+        recoveryMessage = recordings.delete(url, now: recoveryClock()) ? "Audio deleted." : recordings.lastError
         refreshRecoveryProjection()
     }
     func clearRecovery() {
@@ -191,13 +191,13 @@ extension HubModel {
                     var metrics = PipelineMetrics()
                     metrics.model = request.metricLabel
                     completed.entry = HistoryEntry(date: preview.date, raw: text, metrics: metrics)
-                case .failure(let error): completed.error = (error as? RecordingStore.Failure)?.message ?? "Local transcription failed."
+                case .failure(let error): completed.error = (error as? RecordingStore.Failure)?.message ?? "Transcription failed."
                 }
                 self.recoveryPreview = completed
                 self.refreshRecoveryProjection()
             }
             refreshRecoveryProjection()
-        } catch { recoveryMessage = (error as? RecordingStore.Failure)?.message ?? "Recording is unavailable. Refresh the list." }
+        } catch { recoveryMessage = (error as? RecordingStore.Failure)?.message ?? "This audio is no longer available. Click Refresh." }
     }
     /// Cancel is not Delete. Revoke preview/save and release the original file
     /// before asking the queued/native request to stop.
@@ -208,20 +208,20 @@ extension HubModel {
         if let lease = recoveryLease { recordings.release(lease) }
         recoveryLease = nil
         previous?.operation.requestAbort()
-        recoveryMessage = "Recovery preview discarded. Original audio retained when available; work may still be stopping."
+        recoveryMessage = "Transcript discarded. The audio is still saved."
         refreshRecoveryProjection()
     }
     func copyRecovery() { if let entry = recoveryPreview?.entry { copy(entry.raw) } }
     func saveRecovery() {
         guard let current = recoverySettings(), var preview = recoveryPreview,
               !preview.loading, !preview.saved, let entry = preview.entry else { return }
-        guard current.historyEnabled else { recoveryMessage = "History is off. Copy remains available; enable history to explicitly save this same result."; return }
+        guard current.historyEnabled else { recoveryMessage = "History is off. Turn it on to save, or copy the text."; return }
         // An external invalid history file must not be replaced from an old in-memory projection.
         history.reload(countLimit: current.historyTextCount)
-        guard !history.loadBlocked else { recoveryMessage = "Retry Load history before Save. The preview remains available."; return }
+        guard !history.loadBlocked else { recoveryMessage = "History couldn’t load. Try again from History."; return }
         preview.saved = history.append(entry)
         preview.saveFailed = !preview.saved
         recoveryPreview = preview
-        recoveryMessage = preview.saved ? "Raw transcript saved. Run an explicit text retry later if wanted." : "Couldn’t save text. Retry Save stores this same result without another ASR pass."
+        recoveryMessage = preview.saved ? "Saved to history." : "Couldn’t save to history. Try again."
     }
 }

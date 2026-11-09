@@ -65,8 +65,8 @@ extension HubCleanupFailoverTests {
                 if eligible { XCTAssertNotNil(h.failoverReview) }
                 else {
                     XCTAssertNil(h.failoverReview)
-                    XCTAssertTrue(h.failoverMessage?.contains("Normal cleanup") == true)
-                    XCTAssertTrue(h.failoverState.contains("Normal cleanup"))
+                    XCTAssertTrue(h.failoverMessage?.contains("Cleaned up") == true)
+                    XCTAssertTrue(h.failoverState.contains("Cleaned up"))
                 }
                 h.confirmFailover()
                 let actual = try d.store.savedRetrySnapshot()
@@ -94,7 +94,7 @@ extension HubCleanupFailoverTests {
         h.words = [.init(text: "owed-word")]
         h.settings.outputMode = .raw
         XCTAssertNil(h.failoverMessage)
-        XCTAssertTrue(h.failoverState.contains("Normal cleanup"))
+        XCTAssertTrue(h.failoverState.contains("Cleaned up"))
         h.settings.outputMode = .cleanup
         XCTAssertTrue(h.hasPendingSettingsSave)
         h.reviewFailover(); h.confirmFailover()
@@ -112,7 +112,7 @@ extension HubCleanupFailoverTests {
         XCTAssertNil(h.failoverMessage)
         h.flushPendingSave(); h.reviewFailover()
         XCTAssertNil(h.failoverReview)
-        XCTAssertTrue(h.failoverMessage?.contains("Normal cleanup") == true)
+        XCTAssertTrue(h.failoverMessage?.contains("Cleaned up") == true)
     }
 
     @MainActor func testB21UXConfirmRechecksCurrentHubEligibility() throws {
@@ -125,7 +125,7 @@ extension HubCleanupFailoverTests {
         h.confirmFailover()
         XCTAssertEqual(d.bytes, original)
         XCTAssertNil(h.failoverReview)
-        XCTAssertTrue(h.failoverMessage?.contains("Normal cleanup") == true)
+        XCTAssertTrue(h.failoverMessage?.contains("Cleaned up") == true)
         XCTAssertEqual(d.backend.reads, 0); XCTAssertEqual(d.backend.statuses, 0)
     }
 }

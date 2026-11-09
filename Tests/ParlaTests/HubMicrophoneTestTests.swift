@@ -283,7 +283,7 @@ private final class MicPlayer: MicrophoneTestPlaying {
         playbackAllowed = true; recordAndStop(); playbackAllowed = false; hub.listenMicrophoneTest()
         XCTAssertEqual(playerCreations, 0); XCTAssertTrue(controller.hasReview)
         hub.playRecovery(root.appendingPathComponent("unrelated.wav"))
-        XCTAssertEqual(hub.recoveryMessage, "Clear the microphone test before recovery playback.")
+        XCTAssertEqual(hub.recoveryMessage, "Stop the microphone test first.")
         XCTAssertTrue(controller.hasReview)
     }
     func testClearPageLeaveWindowCloseResignAndQuitDisposeRealHubController() {

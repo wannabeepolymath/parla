@@ -28,7 +28,7 @@ public struct GuidedTemplateSession: Sendable {
     }
     public func isExpired(now: TimeInterval) -> Bool { now < began || now - began >= 1_200 }
     public mutating func start(now: TimeInterval) throws -> Take {
-        guard take == nil, completion == nil, !isExpired(now: now), starts < 60 else { throw GuidedTemplateFailure("Form expired, busy or recording limit reached.") }
+        guard take == nil, completion == nil, !isExpired(now: now), starts < 60 else { throw GuidedTemplateFailure("Can't record right now. Start a new form.") }
         preview = nil; candidate = nil; starts += 1
         let value = Take(session: id, template: definition.id, revision: definition.revision, field: field.id,
                          fieldRevision: fieldRevision, attempt: UUID(), capture: UUID())
@@ -40,14 +40,14 @@ public struct GuidedTemplateSession: Sendable {
         candidate = text.flatMap { GuidedTemplateDefinition.text($0, limit: 8_192) ? $0 : nil }
     }
     public mutating func editCandidate(_ text: String) throws {
-        guard take == nil, completion == nil, candidate != nil, text.utf8.count <= 8_192 else { throw GuidedTemplateFailure("Candidate unavailable or too large.") }
+        guard take == nil, completion == nil, candidate != nil, text.utf8.count <= 8_192 else { throw GuidedTemplateFailure("This text is too long.") }
         candidate = text
     }
     public mutating func accept() throws {
-        guard take == nil, completion == nil, let candidate, GuidedTemplateDefinition.text(candidate, limit: 8_192) else { throw GuidedTemplateFailure("Review a nonempty candidate first.") }
+        guard take == nil, completion == nil, let candidate, GuidedTemplateDefinition.text(candidate, limit: 8_192) else { throw GuidedTemplateFailure("Record or type something first.") }
         var next = accepted; next[field.id] = .accepted(candidate)
         let count = next.values.reduce(0) { count, value in if case .accepted(let text) = value { return count + text.utf8.count }; return count }
-        guard count <= 98_304 else { throw GuidedTemplateFailure("Accepted fields exceed 98,304 bytes.") }
+        guard count <= 98_304 else { throw GuidedTemplateFailure("The fields are too long.") }
         accepted = next; advance()
     }
     public mutating func skip() throws {
@@ -64,7 +64,7 @@ public struct GuidedTemplateSession: Sendable {
     }
     public mutating func discardCandidate() { guard take == nil, completion == nil else { return }; candidate = nil; preview = nil }
     public mutating func review() throws {
-        guard take == nil, completion == nil, allAnswered else { throw GuidedTemplateFailure("Accept or skip each field before full review.") }
+        guard take == nil, completion == nil, allAnswered else { throw GuidedTemplateFailure("Accept or skip every field first.") }
         let values = accepted.mapValues { value in if case .accepted(let text) = value { return text }; return "" }
         preview = Preview(id: UUID(), body: try program.render(values))
     }

@@ -271,7 +271,7 @@ extension MeetingHubControllerTests {
         guard await hubComplete({await r.controller.drainActions()}) else {return}
         let callback = try XCTUnwrap(r.pendingPermission); r.pendingPermission = nil
         r.permission = .authorized; callback(true); callback(false)
-        guard await hubModel(r.controller, {$0.message == "Microphone access is ready. Press Start and confirm consent to record." && !$0.busy}) else {return}
+        guard await hubModel(r.controller, {$0.message == "Microphone access is on. Press Start recording." && !$0.busy}) else {return}
         XCTAssertEqual(r.engine.starts.value,0); XCTAssertEqual(r.resolutions,0)
         r.controller.startConsentedRecording(); guard await hubComplete({await r.controller.drainActions()}) else {return}
         guard await hubEntered([r.engine.started]) else {return}

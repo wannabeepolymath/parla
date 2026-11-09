@@ -1098,7 +1098,7 @@ extension AudioImportTests {
         r.hub.exportAudioImportSRT()
         XCTAssertEqual(writes, 1); XCTAssertEqual(panels, 1)
         XCTAssertEqual(try Data(contentsOf: destination), ImportTimedNative.expectedSRT)
-        XCTAssertEqual(r.owner.message, "Exported current native segments as SRT. History still contains text only.")
+        XCTAssertEqual(r.owner.message, "Exported as SRT.")
         r.hub.audioImportExportPanel = { _ in panels += 1; return nil }
         r.hub.exportAudioImportSRT(); XCTAssertEqual(writes, 1); XCTAssertEqual(panels, 2)
         XCTAssertEqual(r.owner.review?.entry.id, review.entry.id)
@@ -1107,7 +1107,7 @@ extension AudioImportTests {
         r.hub.exportAudioImportSRT(); XCTAssertEqual(writes, 2); XCTAssertEqual(panels, 3)
         XCTAssertEqual(try Data(contentsOf: destination), previous)
         XCTAssertEqual(r.owner.review?.entry.id, review.entry.id)
-        XCTAssertEqual(r.owner.message, "Couldn’t export. Choose a writable location and explicitly try again; this review is still available.")
+        XCTAssertEqual(r.owner.message, "Couldn’t export. Choose another location and try again.")
         XCTAssertFalse((r.owner.message ?? "").contains(destination.path))
         fail = false; r.hub.exportAudioImportSRT()
         XCTAssertEqual(writes, 3); XCTAssertEqual(panels, 4)
@@ -1130,12 +1130,12 @@ extension AudioImportTests {
         r.hub.historyExportWriter = { data, url in writes += 1; try atomic(data, url) }
         r.hub.exportAudioImportSRT()
         XCTAssertEqual(panels, 0); XCTAssertEqual(writes, 0); XCTAssertEqual(r.owner.review?.entry.id, token)
-        XCTAssertEqual(r.owner.message, "SRT can’t show this text literally: it contains < > { } \\ or a code like &amp; that some players treat as formatting. Export WebVTT instead, or copy or save the raw text.")
+        XCTAssertEqual(r.owner.message, "This text has characters SRT can’t show. Export WebVTT instead.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
         r.hub.exportAudioImportVTT()
         XCTAssertEqual(panels, 1); XCTAssertEqual(writes, 1)
         XCTAssertEqual(try Data(contentsOf: destination), ImportTimedNative.expectedVTT)
-        XCTAssertEqual(r.owner.message, "Exported current native segments as WebVTT. History still contains text only.")
+        XCTAssertEqual(r.owner.message, "Exported as WebVTT.")
         XCTAssertEqual(r.owner.review?.entry.id, token); XCTAssertEqual(p.calls, 1); XCTAssertEqual(r.reads, reads)
         XCTAssertTrue(r.history.entries.isEmpty)
         try await r.close()
@@ -1171,12 +1171,12 @@ extension AudioImportTests {
         r.hub.audioImportExportPanel = { _ in panels += 1; return r.root.appendingPathComponent("refused.srt") }
         r.hub.historyExportWriter = { _, _ in writes += 1 }
         r.hub.exportAudioImportSRT()
-        XCTAssertEqual(r.owner.message, "These native segments cannot be exported as literal SRT. Copy or save the raw text.")
+        XCTAssertEqual(r.owner.message, "This text can’t be exported as SRT. Copy or save it instead.")
         XCTAssertEqual(r.owner.review?.entry.id, token); XCTAssertEqual(panels, 0); XCTAssertEqual(writes, 0)
         p.ends[1] = 801; await runTimed(r, url)
         XCTAssertNotNil(r.owner.review); XCTAssertNil(r.owner.review?.segments)
         r.hub.exportAudioImportSRT()
-        XCTAssertEqual(r.owner.message, "Native timing is unavailable for this review. Copy or save its raw text.")
+        XCTAssertEqual(r.owner.message, "No timestamps for this file. Copy or save the text instead.")
         XCTAssertEqual(panels, 0); XCTAssertEqual(writes, 0); XCTAssertEqual(p.calls, 2)
         try await r.close()
     }

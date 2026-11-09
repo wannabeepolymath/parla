@@ -13,29 +13,29 @@ struct HubVocabularyView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HubSection("Literal replacements", footer: "Case-sensitive whole words or phrases. Longest match wins at each position; row order breaks ties. Applied once after cleanup, or locally when cleanup is off or fails. Whole-utterance snippets stay locked. Empty list means off.") {
+            HubSection("Replacements", footer: "Swap exact words or phrases after dictation. Matching is case-sensitive.") {
                 ForEach($model.replacements) { $row in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            TextField("Exact source", text: $row.source).hubField()
+                            TextField("Replace", text: $row.source).hubField()
                             Button { model.replacements.removeAll { $0.id == row.id } } label: {
                                 Image(systemName: "trash")
                             }.buttonStyle(.plain)
                         }
-                        Text("Literal output (line breaks allowed)").font(.caption).foregroundStyle(Theme.muted)
+                        Text("With").font(.caption).foregroundStyle(Theme.muted)
                         TextEditor(text: $row.replacement).font(.system(size: 12)).frame(height: 48)
                     }.padding(12)
                     HubDivider()
                 }
-                if model.replacements.isEmpty { EmptyHint(text: "No replacement rules") }
+                if model.replacements.isEmpty { EmptyHint(text: "No replacements yet") }
             }
             Button("Add replacement") { model.replacements.append(.init()) }
                 .buttonStyle(HubButtonStyle())
-            TextField("Preview replacement input", text: $sample).hubField()
+            TextField("Try a sentence", text: $sample).hubField()
             Text(LiteralReplacement.apply(rules, to: sample))
                 .font(.system(size: 12)).textSelection(.enabled)
 
-            HubSection("Vocabulary files", footer: "Versioned JSON containing only words, snippets, and replacements. Merge keeps existing entries on conflict. Replace first saves a vocabulary-only backup beside settings.json.") {
+            HubSection("Import and export", footer: "Share your words, snippets and replacements as a file.") {
                 HStack {
                     Button("Import…") { model.chooseVocabularyImport() }
                     Button("Export…") { model.exportVocabulary() }
@@ -43,7 +43,7 @@ struct HubVocabularyView: View {
                 if let preview = model.importPreview {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("\(preview.incoming.words.count) words · \(preview.incoming.snippets.count) snippets · \(preview.incoming.replacements.count) replacements")
-                        Text("\(preview.conflicts) existing-key conflicts; \(preview.duplicateWords) duplicate words removed from import.")
+                        Text("\(preview.conflicts) already exist · \(preview.duplicateWords) duplicates skipped")
                             .foregroundStyle(Theme.muted)
                         if !preview.conflictKeys.isEmpty {
                             ScrollView {
@@ -52,8 +52,8 @@ struct HubVocabularyView: View {
                             }.frame(maxHeight: 100)
                         }
                         HStack {
-                            Button("Merge — keep existing") { model.applyVocabulary(.merge) }
-                            Button("Replace vocabulary…") { confirmReplace = true }
+                            Button("Add to mine") { model.applyVocabulary(.merge) }
+                            Button("Replace mine…") { confirmReplace = true }
                                 .disabled(preview.incoming.isEmpty)
                             Button("Cancel") { model.importPreview = nil }
                         }.buttonStyle(HubButtonStyle())
@@ -64,11 +64,11 @@ struct HubVocabularyView: View {
                 }
             }
         }
-        .alert("Replace all vocabulary?", isPresented: $confirmReplace) {
+        .alert("Replace your words, snippets and replacements?", isPresented: $confirmReplace) {
             Button("Cancel", role: .cancel) {}
-            Button("Back up and replace", role: .destructive) { model.applyVocabulary(.replace) }
+            Button("Replace", role: .destructive) { model.applyVocabulary(.replace) }
         } message: {
-            Text("All current words, snippets, and replacement rules will be replaced by this import. Other settings are kept. A vocabulary-only backup must succeed first.")
+            Text("Parla saves a backup first. Other settings aren’t changed.")
         }
     }
 }

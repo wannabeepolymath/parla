@@ -712,7 +712,7 @@ extension MeetingHubCompositionTests {
                 }
                 func success() -> Bool {
                     switch caller {case .history:return r.hub.historyExportMessage?.hasPrefix("Exported ") == true
-                    case .vocabulary:return r.hub.transferMessage == "Exported words, snippets, and replacements."
+                    case .vocabulary:return r.hub.transferMessage == "Exported."
                     case .diagnostics:return r.hub.diagnosticMessage == "Diagnostics exported."}
                 }
                 let ext = caller == .history ? "txt" : "json"
@@ -747,7 +747,7 @@ extension MeetingHubCompositionTests {
                 r.destination = r.meeting.bottom.rootURL.appendingPathComponent("blocked.\(ext)");run()
                 XCTAssertEqual(r.writes.count,before+1);XCTAssertFalse(r.audio.message?.hasPrefix("Exported current native segments") == true)
                 r.destination = r.fixture.root.appendingPathComponent("throw.\(ext)");r.writerError = true;run();r.writerError = false
-                XCTAssertEqual(r.writes.count,before+2);XCTAssertEqual(r.audio.message,"Couldn’t export. Choose a writable location and explicitly try again; this review is still available.")
+                XCTAssertEqual(r.writes.count,before+2);XCTAssertEqual(r.audio.message,"Couldn’t export. Choose another location and try again.")
                 r.destination = r.fixture.root.appendingPathComponent("stale.\(ext)")
                 var injected = false
                 r.meeting.bottom.observe = {op,_ in if op == "protection-before-final",!injected {injected = true;r.audio.invalidate("final-current revoked")}}
@@ -762,7 +762,7 @@ extension MeetingHubCompositionTests {
             try await r.savedReview()
             let id = try XCTUnwrap(r.saved.rows.first?.id)
             func reopen() async throws {r.hub.openSavedAudioImport(id);await r.saved.drain();guard r.saved.review != nil else {throw MeetingSession.Failure.unavailable}}
-            let success = "Raw text exported. The saved job and independent History are unchanged."
+            let success = "Text exported."
             r.destination = r.fixture.root.appendingPathComponent("safe.txt")
             var io: [Bool] = []
             let sub = r.saved.$ioBusy.dropFirst().sink {value in
@@ -786,7 +786,7 @@ extension MeetingHubCompositionTests {
             let throwing = r.saved.$ioBusy.dropFirst().sink {io.append($0)};defer {throwing.cancel()}
             r.writerError = true;r.hub.exportSavedAudioImportText();r.writerError = false
             XCTAssertEqual(r.writes.count,2);XCTAssertEqual(io,[true,false]);XCTAssertFalse(r.saved.ioBusy)
-            XCTAssertEqual(r.saved.message,"Couldn’t export. Retry export writes this same current raw text without transcription.")
+            XCTAssertEqual(r.saved.message,"Couldn’t export. Choose another location and try again.")
             XCTAssertTrue(r.meeting.bottom.descriptors.isEmpty)
         }
     }

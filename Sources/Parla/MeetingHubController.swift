@@ -339,7 +339,7 @@ import ParlaCore
                 guard self.captureCurrent(active) else { value.requestStopSaving(); self.stopAndSave(); return }
                 self.armExpiry()
             } catch {
-                self.model.message = "Recording could not start. Check Microphone and System Audio Recording access in System Settings, and select an app that is playing audio. Any saved prefix is kept."
+                self.model.message = "Recording couldn't start. Check Microphone and System Audio Recording access."
                 self.applicationState = self.activeCapture?.actual == nil && value.state == .idle ? .refusedBeforeStart : .heldOrUnavailable
                 self.captureRetired(value)
                 if self.activeCapture != nil { self.stopAndSave() }
@@ -400,7 +400,7 @@ import ParlaCore
     func windowClosed() { leavePage() }
     /// Focus loss deliberately has no recording side effect.
     func focusChanged() {}
-    func chooseMicrophone() { model.message = "Choose a microphone in Settings. Changes apply to the next recording." }
+    func chooseMicrophone() { model.message = "Choose a microphone in General. It applies to the next recording." }
     func openMicrophoneSettings() { dependencies?.openPrivacy() }
     func startAndSave() {
         guard admits,idle,activeCapture == nil,dependencies?.captureCapability == true,owner?.metadata == nil else { return }
@@ -430,7 +430,7 @@ import ParlaCore
                 Task { @MainActor [weak self] in
                     guard let self,self.permission?.id == id else { return }
                     if self.pageLifetime == lifetime,self.page,self.reservation == nil {
-                        self.model.message = granted ? "Microphone access is ready. Press Start and confirm consent to record." : "Microphone access is off. Allow it in System Settings, then press Start."
+                        self.model.message = granted ? "Microphone access is on. Press Start recording." : "Microphone access is off. Allow it in System Settings, then press Start."
                     }
                     self.permission = nil
                     let pending = self.permissionWaiters; self.permissionWaiters.removeAll(); pending.forEach { $0.resume() }; self.publish()
@@ -469,7 +469,7 @@ import ParlaCore
                 guard self.captureCurrent(active) else { value.requestStopSaving(); self.stopAndSave(); return }
                 self.armExpiry()
             } catch {
-                self.model.message = "Recording could not start. Saved audio, if any, is kept."
+                self.model.message = "Recording couldn't start."
                 if let value = self.owner { self.captureRetired(value) }
                 if self.activeCapture != nil { self.stopAndSave() }
             }
@@ -584,7 +584,7 @@ import ParlaCore
                     catch { try value.endExplicitOutput(token); throw error }
                     try value.endExplicitOutput(token)
                 }
-            } catch { self.model.message = "Saved text could not be opened or copied. Try again after storage work finishes." }
+            } catch { self.model.message = "Couldn't open the transcript. Try again in a moment." }
         }
     }
     func deleteConfirmed(session: UUID,intent: UUID) {
@@ -596,7 +596,7 @@ import ParlaCore
         launch(.delete) { [weak self] in
             for task in pending { await task.value }
             do { if let value = self?.owner { try await value.delete(id:UUID()); self?.captureRetired(value) }; await self?.settleOldDeadline(session:nil); self?.model.message = "Saved meeting deleted." }
-            catch { self?.model.message = "Deletion is not finished. Saved files may remain." }
+            catch { self?.model.message = "Couldn't finish deleting. Try again." }
         }
     }
     var recoveryDeleteConfirmation: UUID? { owner?.canDeleteUnavailableMeetingData == true ? pageIntent : nil }
@@ -604,7 +604,7 @@ import ParlaCore
         guard admits,idle,pageIntent == intent,let value = owner,value.canDeleteUnavailableMeetingData else { return }
         launch(.delete) { [weak self,value] in
             do { try await value.deleteAllUnavailableMeetingData(); self?.model.message = "Saved meeting deleted." }
-            catch { self?.model.message = "Deletion is not finished. Saved files may remain." }
+            catch { self?.model.message = "Couldn't finish deleting. Try again." }
         }
     }
     func keepMeeting(_ keep: Bool) {
@@ -743,7 +743,7 @@ import ParlaCore
     }
     func releaseRestart() { reservation = nil; publish() } // no capture/ASR/output revival or bootstrap
     func cancelShutdown() { releaseRestart() }
-    private func storageFailure() { model.message = "Saved meeting unavailable. Parla could not safely finish storage work."; if owner?.protectionQuarantined == true { quarantine = true } }
+    private func storageFailure() { model.message = "Couldn't open the saved meeting."; if owner?.protectionQuarantined == true { quarantine = true } }
     private func publish(_ snapshot: MeetingSessionOwner.Snapshot? = nil) {
         let snapshot = snapshot ?? owner?.snapshot
         model.captureOwned = activeCapture != nil

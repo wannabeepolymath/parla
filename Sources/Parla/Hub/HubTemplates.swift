@@ -16,13 +16,13 @@ extension HubModel {
             let saved = try store.savedRetrySnapshot()
             templates.observeSaved(); adoptTemplates(saved.guidedTemplates)
             templateMessage = nil
-        } catch { templates.cancel("Saved template configuration unavailable."); templateMessage = "Repair saved settings before template actions." }
+        } catch { templates.cancel("Settings can't be read."); templateMessage = "Fix settings.json to use templates." }
     }
     func templateDraftReady() -> Bool { !hasPendingSettingsSave && loadError == nil && saveError == nil }
     func selectTemplate(_ id: UUID?) { templates.cancel(); selectedTemplateID = id; templateEditor = nil }
     func editTemplate(_ id: UUID?) {
-        templates.cancel("Form discarded for definition editing.")
-        guard !templates.ownsSession else { templateMessage = "Wait for the previous form to stop."; return }
+        templates.cancel("Form canceled.")
+        guard !templates.ownsSession else { templateMessage = "Wait for the current form to stop."; return }
         refreshTemplates()
         if let id, let definition = templateDocument.definitions.first(where: { $0.id == id }) {
             templateEditor = definition; templateEditorBase = definition.revision
@@ -41,12 +41,12 @@ extension HubModel {
         } catch { templateMessage = error.localizedDescription }
     }
     func deleteTemplateDefinition(_ definition: GuidedTemplateDefinition) {
-        templates.cancel("Form discarded for definition deletion.")
+        templates.cancel("Form canceled.")
         do { adoptTemplates(try store.deleteTemplateDefinition(definition.id, expectedRevision: definition.revision)) }
         catch { templateMessage = error.localizedDescription }
     }
     func beginTemplate() {
-        guard templateDraftReady() else { templates.notice("Save or repair the pending settings draft before Begin."); return }
+        guard templateDraftReady() else { templates.notice("Wait for your settings to save, then try again."); return }
         refreshTemplates()
         guard templateEditor == nil, let selectedTemplateID,
               let definition = templateDocument.definitions.first(where: { $0.id == selectedTemplateID }) else { return }
