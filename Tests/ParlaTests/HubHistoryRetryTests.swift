@@ -161,7 +161,7 @@ final class HubHistoryRetryTests: XCTestCase {
             XCTAssertFalse(metadata.contains(secret)); XCTAssertFalse(originalConfig.summary.contains(secret))
         }
         XCTAssertEqual(provenance.configuration, originalConfig)
-        XCTAssertTrue(originalConfig.summary.contains("Cleanup"))
+        XCTAssertTrue(originalConfig.summary.hasPrefix("Cleanup · ")); XCTAssertTrue(originalConfig.summary.contains(originalConfig.model))
         let changed = try HistoryRetryRequest(settings: settings.load(), environment: [:], source: entry, applyPreset: false, credentials: settings.credentials)
         XCTAssertNotEqual(changed.configuration.rulesDigest, originalConfig.rulesDigest)
     }

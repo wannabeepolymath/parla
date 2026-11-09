@@ -393,7 +393,7 @@ final class DictationSessionTests: XCTestCase {
         _ = m.handle(.streamTyped(gen: 1, text: "helo"))
         _ = m.handle(.stopRequested)
         let fx = quiet(m.handle(.transcribed(s, raw: "hello world", probe: probe(typedIsOurs: false))))
-        XCTAssertEqual(fx.first, .hud(.error("No text field to type into — text discarded")))
+        XCTAssertEqual(fx.first, .hud(.error("No text field and History is off — text discarded")))
         XCTAssertFalse(fx.contains(.playSound(.finish)))
         XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
     }
@@ -947,7 +947,7 @@ final class DictationSessionTests: XCTestCase {
         let fx = quiet(m.handle(.transformReady(s, text: "the cat",
                                                 probe: TransformProbe(focus: .secure,
                                                                       selectionStillMatches: true, destinationStillMatches: true))))
-        XCTAssertEqual(fx.first, .hud(.error("No text field to type into — text discarded")))
+        XCTAssertEqual(fx.first, .hud(.error("Couldn’t type it and History is off — text discarded")))
         XCTAssertFalse(fx.contains { if case .appendHistory = $0 { return true }; return false })
     }
 

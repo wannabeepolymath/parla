@@ -508,7 +508,7 @@ public final class DictationSession {
             if pendingGeneration == gen, !isCapturing {
                 state = .idle
                 effects += [.menuBar(.idle), .hud(.notice(outcome == .deliveryAttempted
-                    ? "Already typed — the rest was discarded"
+                    ? "Some text may already be typed — the rest was discarded"
                     : "Discarded"))]
             }
             return effects
@@ -571,7 +571,7 @@ public final class DictationSession {
                                transformTarget: target, diagnostics: diagnostics)
                 .resolvingOutput(at: ProfileDestination(bundleID: target.bundleID, browserURL: target.browserURL))
             guard next.effectiveSettings.cleanupEnabled, configured else {
-                return [.hud(.error("Turn on cleanup to use presets"))]
+                return [.hud(.error("Turn on and set up cleanup to use presets"))]
             }
             gen += 1
             state = .polishing(gen: gen)
@@ -840,7 +840,7 @@ public final class DictationSession {
         // transcript IS final, so land the terminal state directly.
         let fieldHUD: HUDState = willPolish ? .polishing : .done
         let historyHUD: HUDState = willPolish ? .polishing
-            : s.settings.historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")
+            : s.settings.historyEnabled ? .savedToHistory : .error("No text field and History is off — text discarded")
 
         // Length, never the text: logs land in a plain file that outlives "history off".
         var fx: [Effect] = [.log("Parla finish: chars=\(insertText.count) live=\(s.live ? 1 : 0) "
@@ -963,7 +963,7 @@ public final class DictationSession {
                     fx.append(.log("Parla delivery: no current destination, insertion withheld"))
                     fx.append(.hud(s.surroundingTextRun.insertionOnly
                         ? .notice(historyEnabled ? "No text field to type into — saved in History" : "No text field to type into")
-                        : historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")))
+                        : historyEnabled ? .savedToHistory : .error("No text field and History is off — text discarded")))
                 }
             } else {
                 s.operation.diagnostics?.disposition(.staleGeneration)
@@ -1009,7 +1009,7 @@ public final class DictationSession {
             case .history:
                 // Nothing of ours in a field — history is the only durable landing.
                 fx.append(.hud(historyEnabled ? (failureHUD ?? .savedToHistory)
-                                              : .error("No text field to type into — text discarded")))
+                                              : .error("No text field and History is off — text discarded")))
             case .field:
                 if let plan {
                     fx.append(.replaceTailIfOurs(expect: landed.insertText, erase: plan.eraseTail.count,
@@ -1052,7 +1052,7 @@ public final class DictationSession {
                    .playSound(.finish), .hud(.done)]
         } else if s.gen == gen {
             let message: HUDState = transformed == nil ? .error(failure ?? "Transform failed")
-                : s.settings.historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")
+                : s.settings.historyEnabled ? .savedToHistory : .error("Couldn’t type it and History is off — text discarded")
             fx.append(.hud(message))
         }
         if s.settings.historyEnabled {
@@ -1084,7 +1084,7 @@ public final class DictationSession {
             fx += [.insertText(flatten ? TextRules.flattenForTerminal(result) : result, historyEnabled: s.settings.historyEnabled), .playSound(.finish), .hud(.done)]
         } else if s.gen == gen {
             fx.append(.hud(result == nil ? .error(failure ?? "Transform failed")
-                : s.settings.historyEnabled ? .savedToHistory : .error("No text field to type into — text discarded")))
+                : s.settings.historyEnabled ? .savedToHistory : .error("Couldn’t type it and History is off — text discarded")))
         }
         if s.settings.historyEnabled {
             let record = Effect.appendTransformHistory(raw: landed.raw, cleaned: result, appName: landed.appName,

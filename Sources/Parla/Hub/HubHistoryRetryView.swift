@@ -30,7 +30,8 @@ struct HistoryRetryReview: View {
                      + (provenance.configuration.executionKind == .deterministic ? " · no online requests" : ""))
                     .font(.caption)
             }
-            if let model = preview.provenance?.usage?.cleanupModel {
+            // ponytail: segmented runs store a placeholder, not a model name; show nothing then.
+            if let model = preview.provenance?.usage?.cleanupModel, !model.contains("usage") {
                 Text("Model: \(model)").font(.caption)
             }
             Text(preview.status).font(.caption).foregroundStyle(Theme.muted)

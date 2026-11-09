@@ -41,7 +41,7 @@ struct GeneralPage: View {
                     }.labelsHidden()
                 }
                 if model.settings.recognitionEngine == .parakeet { ParakeetGlobalControls(model: model) }
-                else if model.parakeetChoiceRefusal == nil {
+                else if !model.parakeetUnavailable {
                     DisclosureGroup("Parakeet model") { ParakeetControls(model: model) }
                 }
                 if model.settings.recognitionEngine == .parakeet, let reason = model.parakeetChoiceRefusal { Text(reason.message).font(.caption) }
@@ -389,7 +389,7 @@ struct CleanupPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             if let issue = configIssue {
-                HubBanner(text: "Cleanup is off: \(issue)")
+                HubBanner(text: "Cleanup can’t run. \(issue)")
             }
             HubSection("Provider",
                        footer: "If cleanup fails, Parla inserts your original text.") {

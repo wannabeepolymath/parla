@@ -693,11 +693,10 @@ extension AppDelegate {
     /// Global shortcut only: capture while the destination app is frontmost,
     /// before queueing work. No Hub button and no ASR/model path.
     func runSelectedPreset() {
-        guard !updater.committing, axGranted else {
-            hud.show(.error("Presets unavailable — check Accessibility access")); return
-        }
+        guard axGranted else { hud.show(.error("Allow Accessibility for Parla to use presets")); return }
+        guard !updater.committing else { hud.show(.error("Parla is updating — try again in a moment")); return }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-            hud.show(.error("Select some text first")); return
+            hud.show(.error("Select text in another app first")); return
         }
         _ = store.migrateSelectedCredentials()
         let settings = store.load()

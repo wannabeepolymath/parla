@@ -74,11 +74,11 @@ final class HubCredentialTests: XCTestCase {
     func testExplicitReplaceAndRemoveRemainIndependentOfEnvironmentOverride() {
         backend.values[.anthropic] = "old"
         hub.credentialEnvironment = { ["ANTHROPIC_API_KEY": "env-secret"] }; hub.refreshCredentialStatus()
-        XCTAssertTrue(hub.credentialStatus.contains("environment variable"))
+        XCTAssertTrue(hub.credentialStatus.contains("environment variable")); XCTAssertTrue(hub.credentialStatus.contains("overrides"))
         hub.credentialDraft = "replacement"; hub.saveCredential(); hub.flushPendingSave()
         XCTAssertEqual(backend.values[.anthropic], "replacement"); XCTAssertEqual(hub.credentialDraft, "")
         hub.removeCredential(); hub.flushPendingSave()
-        XCTAssertNil(backend.values[.anthropic]); XCTAssertTrue(hub.credentialStatus.contains("environment variable"))
+        XCTAssertNil(backend.values[.anthropic]); XCTAssertTrue(hub.credentialStatus.contains("environment variable")); XCTAssertTrue(hub.credentialStatus.contains("overrides"))
         XCTAssertFalse(hub.credentialStatus.contains("env-secret"))
     }
     func testDeniedCanceledUpdateDeleteAreVisibleAndDraftIsRetainedForRetry() {

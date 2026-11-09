@@ -221,7 +221,7 @@ final class PendingDictationTests: XCTestCase {
         rig.discard(s); rig.discard(s)
         XCTAssertEqual(rig.inserted, ["posted"]); XCTAssertEqual(rig.history, ["posted"])
         XCTAssertEqual(rig.disposal, [s.operation.id])
-        XCTAssertTrue(rig.effects.contains(.hud(.notice("Already typed — the rest was discarded"))))
+        XCTAssertTrue(rig.effects.contains(.hud(.notice("Some text may already be typed — the rest was discarded"))))
     }
 
     @MainActor func testEveryLateCompletionIsRejectedByItsTokenAfterNewCapture() {

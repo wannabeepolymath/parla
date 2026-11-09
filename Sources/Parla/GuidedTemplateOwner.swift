@@ -86,7 +86,7 @@ final class GuidedTemplateOwner: ObservableObject {
     /// Registers and reserves synchronously BEFORE the first queued await.
     func begin(_ definition: GuidedTemplateDefinition) {
         guard !ownsSession, let store, let capture, let admission, let local, let enqueue else { notice("Wait for the current form to stop."); return }
-        guard !security(), draftReady(), allowed(), permission() else { notice("Allow the microphone and finish other dictation first."); return }
+        guard !security(), draftReady(), allowed(), permission() else { notice("Save your settings, finish dictating, leave any password field and allow the microphone first."); return }
         do {
             let saved = try store.savedRetrySnapshot(), config = Configuration(saved)
             guard saved.guidedTemplates.definitions.contains(definition), config.request.selection.engine != .invalid else { throw GuidedTemplateFailure("Settings changed. Try again.") }
@@ -178,7 +178,7 @@ final class GuidedTemplateOwner: ObservableObject {
     }
     func captureEnded(session id: UUID, capture idCapture: UUID) {
         guard identity == id, session?.take?.capture == idCapture, recording else { return }
-        discardTake(); notice("Recording stopped early. Record the field again.")
+        discardTake(); notice("Recording stopped or hit the time limit. Record the field again.")
     }
     func stop() {
         guard recording, let take = session?.take, let lease, let capture, let enqueue, let config = configuration else { return }

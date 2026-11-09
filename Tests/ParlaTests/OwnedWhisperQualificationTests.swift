@@ -874,8 +874,8 @@ private final class OwnedRejectingCredentials: CredentialBackend {
         // These exact two production wrappers keep their private guard, serializer, and writer.
         hub.audioImportExportPanel = { name in
             counts.add("destinationCalls")
-            if name == "Parla-native-segments.vtt" { return files.exports.appendingPathComponent("native.vtt") }
-            if name == "Parla-native-segments.srt" { return files.exports.appendingPathComponent("native.srt") }
+            if name == "Parla-transcript.vtt" { return files.exports.appendingPathComponent("native.vtt") }
+            if name == "Parla-transcript.srt" { return files.exports.appendingPathComponent("native.srt") }
             return nil
         }
         let factory: RecognitionFactory

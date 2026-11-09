@@ -6,7 +6,7 @@ public enum PreparationRefusal: String, Error, Sendable, CustomStringConvertible
     case paused, trackingUnavailable, unsupportedSelection, consentRequired, busy, revoked, preparedResidentRequired
     public var description: String {
         switch self {
-        case .paused: return "The speech model crashed while loading, so it’s paused. Open Safe Start."
+        case .paused: return "The speech model didn’t finish loading twice, so Safe Start paused it. Open Safe Start."
         case .trackingUnavailable: return "Safe Start can’t save its records. Open Safe Start."
         case .unsupportedSelection: return "Safe Start works only with Whisper models from the list."
         case .consentRequired: return "Turn Safe Start off and on again to continue."
@@ -30,7 +30,7 @@ public struct PreparationSnapshot: Equatable, Sendable {
         case .off: return "Safe Start is off."
         case .ready: return "Safe Start is on."
         case .preparing: return "Loading the speech model…"
-        case .paused: return "The speech model crashed while loading, so it’s paused."
+        case .paused: return "The speech model didn’t finish loading twice, so Safe Start paused it."
         case .trackingUnavailable: return "Safe Start can’t save its records."
         case .unsupportedSelection: return "Safe Start works only with Whisper models from the list."
         }

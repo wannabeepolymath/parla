@@ -25,7 +25,7 @@ enum FileRecognitionBatch {
         let samples = try read()
         guard TextRules.audioWorthTranscribing(sampleCount: samples.count, rms: AudioRecorder.rms(samples)) else {
             operation.diagnostics?.update { $0.asr = samples.count < 6400 ? .minimumDuration : .silence }
-            throw RecordingStore.Failure("The file is too short to transcribe.")
+            throw RecordingStore.Failure("No speech found — the file is too short or silent.")
         }
         if request.selection.engine == .parakeet { try validate() }
         guard !operation.shouldAbort, active() else { throw CancellationError() }

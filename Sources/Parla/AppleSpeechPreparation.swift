@@ -12,7 +12,7 @@ struct AppleSpeechSnapshot: Equatable {
     var message: String {
         if let refusal { return refusal.message }
         switch phase {
-        case .idle: return "Apple Speech: language not set up yet."
+        case .idle: return "Apple Speech: not checked yet."
         case .checking, .waiting: return "Checking Apple Speech…"
         case .reserving, .downloading, .verifying: return "Setting up the language…"
         case .ready: return "Apple Speech is ready."

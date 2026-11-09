@@ -40,6 +40,7 @@ struct OnboardingView: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    Button("Safe Start…") { model.requestedPage = .safeStart }
                     stepView
                 }
                     .padding(.horizontal, 32)

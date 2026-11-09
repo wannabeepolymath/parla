@@ -61,26 +61,6 @@ struct HubAudioImportView: View {
             }
         }
     }
-    private static func status(_ state: SavedAudioImportStore.State) -> String {
-        switch state {
-        case .staging: return "Saving…"
-        case .committed: return "Saved"
-        case .queued: return "Waiting…"
-        case .running: return "Transcribing…"
-        case .failed: return "Transcription failed"
-        case .canceled: return "Canceled"
-        case .interrupted: return "Interrupted"
-        case .deleting: return "Deleting…"
-        }
-    }
-    private static func engineName(_ raw: String) -> String {
-        switch RecognitionEngine(rawValue: raw) {
-        case .whisper: return "Whisper"
-        case .appleSpeech: return "Apple Speech"
-        case .parakeet: return "Parakeet"
-        default: return "an unknown engine"
-        }
-    }
 }
 
 
@@ -107,7 +87,7 @@ private struct SavedAudioImportView: View {
             ForEach(owner.rows) { row in
                 VStack(alignment:.leading,spacing:6) {
                     Text(verbatim:row.label).font(.headline)
-                    Text("\(row.sourceProfile == .qtPCM16kV1 ? "MOV" : "WAV") · Saved \(row.created.formatted(date: .abbreviated, time: .shortened)) · Deleted \(row.expires.formatted(date: .abbreviated, time: .omitted))").font(.caption)
+                    Text("\(row.sourceProfile == .qtPCM16kV1 ? "MOV" : "WAV") · Saved \(row.created.formatted(date: .abbreviated, time: .shortened)) · Deletes \(row.expires.formatted(date: .abbreviated, time: .omitted))").font(.caption)
                     Text(row.deleting ? "Deleting…" : Self.status(row.state))
                         .font(.caption).foregroundStyle(.secondary)
                     if !row.sourceAvailable { Text("The audio file is missing.").font(.caption) }

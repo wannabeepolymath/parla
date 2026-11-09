@@ -107,7 +107,7 @@ public func cleanupConfigurationIssue(settings: Settings, env: @autoclosure () -
 public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> String {
     if settings.usesAppleIntelligence { return "Runs on this Mac. No API key needed." }
     if environmentKey(settings: settings, env: env()) != nil {
-        return "Using the API key from an environment variable."
+        return "Using the API key from an environment variable. It overrides the key saved here."
     }
     guard let scope = try? CredentialScope.selected(settings) else { return "Choose a cleanup service and base URL first." }
     return credentials().status(scope).message

@@ -86,7 +86,7 @@ extension HubModel {
         } catch { audioImport.notice("This text can’t be exported as \(formatName). Copy or save it instead."); return }
         // Freeze bytes AND authority before the reentrant modal boundary.
         let job = review.job, resultID = review.entry.id
-        guard let url = audioImportExportPanel("Parla-native-segments.\(fileExtension)") else { return }
+        guard let url = audioImportExportPanel("Parla-transcript.\(fileExtension)") else { return }
         guard audioImportExportIsCurrent(job: job, resultID: resultID) else { return }
         do {
             let written = try withValidatedExportDestination(url,fileExtension:fileExtension,protectedFiles:[job.source.originalURL]) {

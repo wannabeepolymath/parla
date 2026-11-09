@@ -97,7 +97,7 @@ final class RecognitionAcquisitionTests: XCTestCase {
         }
         hub.settings.whisperModelPath = "/custom/ggml-base.en.bin"
         XCTAssertEqual(hub.recognitionCapabilities.modelLanguages, .unknown)
-        XCTAssertFalse(hub.recognitionCapabilityDetail.contains("English only"))
+        XCTAssertEqual(hub.recognitionCapabilityDetail, "")
         XCTAssertEqual(probe.paths.count, 1); XCTAssertEqual(probe.metadataReads, reads)
         hub.flushPendingSave()
     }

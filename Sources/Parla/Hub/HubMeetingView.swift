@@ -20,7 +20,7 @@ struct HubMeetingView: View {
         let success = Self.policyDuration(MeetingSession.RecordingPolicy.successfulAudioRetention,units:[.hour,.minute,.second])
         let failed = Self.policyDuration(MeetingSession.RecordingPolicy.failedAudioRetention)
         let transcript = Self.policyDuration(MeetingSession.RecordingPolicy.transcriptRetention)
-        return "Unless you keep a meeting, its audio is deleted \(success) after transcription (or after \(failed) if it isn’t transcribed), and its transcript after \(transcript)."
+        return "Unless you keep a meeting, its audio is deleted \(success) after transcription (or after \(failed) if it isn’t transcribed), and its transcript \(transcript) after the meeting starts. Expired files are removed the next time Parla runs."
     }
     var body: some View {
         let value = controller.model

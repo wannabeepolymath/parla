@@ -513,7 +513,7 @@ extension AudioImportTests {
         var settings = try r.store.savedRetrySnapshot(); settings.historyEnabled = false
         try r.store.save(settings); r.hub.refreshAudioImportConfiguration()
         let destination = r.root.appendingPathComponent("native.vtt")
-        r.hub.audioImportExportPanel = { name in XCTAssertEqual(name, "Parla-native-segments.vtt"); return destination }
+        r.hub.audioImportExportPanel = { name in XCTAssertEqual(name, "Parla-transcript.vtt"); return destination }
         r.hub.exportAudioImportVTT()
         XCTAssertEqual(try Data(contentsOf: destination), ImportTimedNative.expectedVTT)
         r.hub.saveAudioImport(); XCTAssertTrue(r.history.entries.isEmpty)
@@ -1088,7 +1088,7 @@ extension AudioImportTests {
         let destination = r.root.appendingPathComponent("literal.srt"), atomic = r.hub.historyExportWriter
         var panels = 0, writes = 0, fail = false
         r.hub.audioImportExportPanel = { name in
-            panels += 1; XCTAssertEqual(name, "Parla-native-segments.srt"); return destination
+            panels += 1; XCTAssertEqual(name, "Parla-transcript.srt"); return destination
         }
         r.hub.historyExportWriter = { data, url in
             writes += 1; XCTAssertEqual(data, ImportTimedNative.expectedSRT); XCTAssertEqual(data.count, 164)
@@ -1125,7 +1125,7 @@ extension AudioImportTests {
         let destination = r.root.appendingPathComponent("fallback.vtt"), atomic = r.hub.historyExportWriter
         var panels = 0, writes = 0
         r.hub.audioImportExportPanel = { name in
-            panels += 1; XCTAssertEqual(name, "Parla-native-segments.vtt"); return destination
+            panels += 1; XCTAssertEqual(name, "Parla-transcript.vtt"); return destination
         }
         r.hub.historyExportWriter = { data, url in writes += 1; try atomic(data, url) }
         r.hub.exportAudioImportSRT()

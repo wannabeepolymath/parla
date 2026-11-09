@@ -65,6 +65,10 @@ final class HubModel: ObservableObject {
     var parakeetChoiceRefusal: ParakeetInstallationRefusal? {
         MainActor.assumeIsolated { parakeetOwner?.choiceRefusal ?? (parakeetOwner == nil ? .releaseIntegrity : nil) }
     }
+    /// Only "not offered here" hides the Parakeet section; busy/transient refusals keep its progress and Cancel visible.
+    var parakeetUnavailable: Bool {
+        [.releaseIntegrity, .terms, .trustedProduct, .unsupportedHost].contains(parakeetChoiceRefusal)
+    }
     var parakeetProfileChoiceRefusal: ParakeetInstallationRefusal? {
         guard loadError == nil, saveError == nil else { return .configuration }
         return MainActor.assumeIsolated { parakeetOwner?.profileChoiceRefusal ?? (parakeetOwner == nil ? .releaseIntegrity : nil) }
@@ -300,7 +304,7 @@ final class HubModel: ObservableObject {
               settings.outputMode == .cleanup, settings.cleanupEnabled, !settings.usesAppleIntelligence,
               settings.cleanupFailover == nil else {
             surroundingReview = nil
-            surroundingMessage = "Nearby text needs an online cleanup provider, output set to Cleaned up, and no backup cleanup."
+            surroundingMessage = "Nearby text needs cleanup turned on with an online provider, output set to Cleaned up, no backup cleanup, and your changes saved."
             return false
         }
         return true
@@ -328,8 +332,15 @@ final class HubModel: ObservableObject {
     }
     func surroundingDisclosure(_ policy: SurroundingTextPolicy) -> String {
         "With each dictation in \(policy.target), Parla will send about 256 characters of text before the cursor — text you didn’t dictate — "
-        + "to \(policy.primary.provider) (\(policy.primary.endpoint), model \(policy.primary.model)). Text after the cursor is never sent, and nearby text isn’t saved. "
-        + "Changing this profile or your cleanup settings pauses this until you turn it on again."
+        + "to \(policy.primary.provider) (\(policy.primary.endpoint), model \(policy.primary.model)). Text after the cursor is never sent, and Parla doesn’t save nearby text. "
+        + Self.surroundingKeyNote(policy.primary)
+        + "Changing this profile, your cleanup settings or your dictionary pauses this until you turn it on again."
+    }
+    private static func surroundingKeyNote(_ primary: CleanupChainIdentity) -> String {
+        guard primary.source != "on-device" else { return "" }
+        let env = primary.source.components(separatedBy: "environment:").dropFirst().first?.components(separatedBy: ">").first
+        let key = env.map { "Uses the API key in \($0) if it’s set, otherwise the key saved in Parla. " } ?? "Uses the API key saved in Parla. "
+        return key + "Each request may be billed by \(primary.provider), even if Parla rejects the reply because a different model answered. "
     }
 
     @Published private(set) var failoverReview: CleanupFailoverReview?

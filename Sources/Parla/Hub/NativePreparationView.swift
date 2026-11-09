@@ -21,7 +21,7 @@ struct NativePreparationView: View {
                 AppleSpeechControls(model: model)
             }
             if model.settings.recognitionEngine != .parakeet {
-            if model.parakeetChoiceRefusal == nil {
+            if !model.parakeetUnavailable {
                 DisclosureGroup("Parakeet model") { ParakeetControls(model: model) }
             }
             Divider()

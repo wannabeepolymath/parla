@@ -84,7 +84,7 @@ struct HubRecoveryView: View {
     private func details(_ row: RecordingStore.Descriptor) -> String {
         let date = row.date?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown date"
         let duration = row.duration.map { String(format: " · %.1f s", $0) } ?? ""
-        let expiry = row.expiry.map { " · deleted " + $0.formatted(date: .abbreviated, time: .omitted) } ?? ""
+        let expiry = row.expiry.map { " · deletes " + $0.formatted(date: .abbreviated, time: .omitted) } ?? ""
         return date + duration + expiry
     }
 }
