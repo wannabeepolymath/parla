@@ -64,25 +64,25 @@ internal object WavInput {
         return parse(file.inputStream().use { it.readNBytes(MAX_BYTES+1) },admitSpeech)
     }
     fun parse(bytes: ByteArray, admitSpeech: Boolean = true): FloatArray {
-        require(bytes.size in 44..MAX_BYTES) { "Invalid WAV size" }
+        require(bytes.size in 44..MAX_BYTES) { "This recording cannot be read" }
         val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         fun tag(i: Int) = String(bytes,i,4,Charsets.US_ASCII)
         fun u32(i: Int) = b.getInt(i).toLong() and 0xffffffffL
-        require(tag(0) == "RIFF" && tag(8) == "WAVE" && u32(4) == bytes.size-8L) { "Invalid WAV container" }
+        require(tag(0) == "RIFF" && tag(8) == "WAVE" && u32(4) == bytes.size-8L) { "This recording is damaged" }
         var i = 12; var format = false; var data: IntRange? = null
         while(i+8 <= bytes.size) {
             val size = u32(i+4); val start = i+8; val end = start.toLong()+size
-            require(end <= bytes.size && size <= MAX_BYTES) { "Truncated WAV chunk" }
+            require(end <= bytes.size && size <= MAX_BYTES) { "This recording is incomplete" }
             when(tag(i)) {
                 "fmt " -> {
-                    require(!format && size >= 16 && b.getShort(start).toInt() == 1 && b.getShort(start+2).toInt() == 1 && u32(start+4) == 16000L && u32(start+8) == 32000L && b.getShort(start+12).toInt() == 2 && b.getShort(start+14).toInt() == 16) { "Expected mono PCM16 little-endian 16kHz WAV" }
+                    require(!format && size >= 16 && b.getShort(start).toInt() == 1 && b.getShort(start+2).toInt() == 1 && u32(start+4) == 16000L && u32(start+8) == 32000L && b.getShort(start+12).toInt() == 2 && b.getShort(start+14).toInt() == 16) { "This recording uses an unsupported audio format" }
                     format = true
                 }
-                "data" -> { require(data == null && size % 2 == 0L && size <= 16000*300*2) { "Invalid WAV audio" }; data = start until end.toInt() }
+                "data" -> { require(data == null && size % 2 == 0L && size <= 16000*300*2) { "This recording contains invalid audio" }; data = start until end.toInt() }
             }
             i = (end + (size and 1)).toInt()
         }
-        require(i == bytes.size && format && data != null) { "Missing WAV chunks" }
+        require(i == bytes.size && format && data != null) { "This recording is incomplete" }
         val range = data; val samples = FloatArray(range.count()/2) { index -> b.getShort(range.first+2*index)/32768f }
         var squares = 0.0; for(sample in samples) squares += sample.toDouble()*sample
         val rms = if(samples.isEmpty()) 0.0 else sqrt(squares/samples.size)

@@ -19,10 +19,10 @@ internal class LocalState(private val storage: StateStorage) {
         val result = storage.read()?.let(LocalDataCodec::decode) ?: LocalData()
         blocked = false; mutableError.value = null; result
     } catch(_: Exception) {
-        blocked = true; mutableError.value = "Local data could not be read. Writes and provider work blocked. Use Data recovery; originals remain on disk."; LocalData()
+        blocked = true; mutableError.value = "Saved data could not be read. Saving and AI cleanup are paused. Open Data recovery; your files are kept."; LocalData()
     }
     @Synchronized fun update(transform: (LocalData) -> LocalData): Boolean {
-        if(blocked) { mutableError.value = "Reload or repair local data before saving or using a provider."; return false }
+        if(blocked) { mutableError.value = "Reload or repair data before saving or using AI cleanup."; return false }
         return try {
             val next = transform(data.value).let { it.copy(history = it.history.take(it.settings.historyLimit.coerceIn(1,1000))) }
             storage.write(LocalDataCodec.encode(next)); mutableData.value = next; mutableError.value = null; true
@@ -37,5 +37,5 @@ internal class LocalState(private val storage: StateStorage) {
         val next = LocalDataCodec.decode(source)
         storage.preserveOriginal(); storage.write(LocalDataCodec.encode(next))
         mutableData.value = next; blocked = false; mutableError.value = null; true
-    } catch(_: Exception) { mutableError.value = "Repair failed. Check JSON/schema and storage. Original retained."; false }
+    } catch(_: Exception) { mutableError.value = "Repair failed. Check the JSON format and device storage. Original kept."; false }
 }

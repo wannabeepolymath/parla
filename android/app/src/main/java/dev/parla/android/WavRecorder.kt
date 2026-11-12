@@ -40,7 +40,7 @@ class WavRecorder(context: Context) {
             privatePath.startsWith(it.canonicalPath + File.separator)
         }) { "Audio must be recorded in parla's private storage." }
         val minimum = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        check(minimum > 0) { "This device cannot open a 16 kHz microphone. Check your audio device and try again." }
+        check(minimum > 0) { "This device cannot record in the required audio format. Check your microphone and try again." }
         val bufferBytes = maxOf(minimum * 2, 4096)
         var microphone: AudioRecord? = null
         var output: RandomAccessFile? = null

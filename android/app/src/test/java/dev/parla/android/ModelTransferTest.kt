@@ -34,7 +34,7 @@ class ModelTransferTest {
             resumed.download(model); resumed.waitForExit()
             assertEquals(4L,requests[2].start); assertEquals("\"revision1\"",requests[2].validator)
             assertArrayEquals(bytes,resumed.file(model).readBytes()); assertNull(resumed.storage.read(model))
-            assertTrue(resumed.transfer.value.message.contains("Select explicitly"))
+            assertTrue(resumed.transfer.value.message.contains("Tap Select"))
         } finally { root.deleteRecursively() }
     }
     @Test fun interruptedDiscardWithMissingPartialAllowsFreshDownloads() = runTest {

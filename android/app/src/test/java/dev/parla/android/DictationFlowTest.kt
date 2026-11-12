@@ -14,8 +14,8 @@ class DictationFlowTest {
             save = { row, update -> if (!update) { durable = row; true } else false },
             deliver = { _, authorize -> if (authorize()) writes++; "Inserted" }, stage = { _, _ -> })
         assertEquals(1, writes)
-        assertTrue(durable!!.note.contains("not confirmed"))
-        assertFalse(durable!!.note.contains("no insertion attempted"))
+        assertTrue(durable!!.note.contains("unconfirmed"))
+        assertFalse(durable!!.note.contains("Nothing inserted yet"))
         assertEquals("Inserted", RecoveryVault.current()?.outcome)
         RecoveryVault.clear()
     }
@@ -40,9 +40,9 @@ class DictationFlowTest {
         }
         written.await(); assertTrue(op.revoke()); job.cancelAndJoin()
         assertEquals(1,writes); assertEquals("raw 👋 नमस्ते",saved?.text)
-        assertTrue(saved!!.note.contains("Insertion may have occurred"))
+        assertTrue(saved!!.note.contains("Text may have been inserted"))
         assertEquals(saved!!.text,RecoveryVault.current()?.result)
-        assertTrue(RecoveryVault.current()!!.outcome.contains("may have occurred")); assertFalse(op.authorizeDispatch())
+        assertTrue(RecoveryVault.current()!!.outcome.contains("may have been inserted")); assertFalse(op.authorizeDispatch())
         RecoveryVault.clear()
     }
     @Test fun historySuppressionUsesOnlyBoundedTransientResultAndSaveFailureDoesNotLoseIt() = runBlocking {

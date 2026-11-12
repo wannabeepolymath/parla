@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 internal data class AudioDescriptor(val id: String, val created: Long, val expires: Long?, val bytes: Long, val seconds: Double?, val reason: String?)
 internal data class AudioRemoval(val removed: Int, val busy: Int, val failed: Int) {
-    val message get() = "Removed $removed; busy/skipped $busy; failed $failed."
+    val message get() = "Deleted: $removed · In use: $busy · Could not delete: $failed."
 }
 /** Process-owned leases outlive services/screens. No fallback settings may authorize audio use. */
 internal class RecordingStore(
@@ -72,7 +72,7 @@ internal class RecordingStore(
             val names = files.names()
             // Unknown/unfinished leaves also count toward quota; never silently evict useful failed audio.
             val total = names.sumOf { files.attributes(files.file(it),maximumTotal).size() }
-            require(names.size < 128 && total <= maximumTotal-bytes.size) { "Recovery quota reached (128MiB / 128 files). Delete or clear recordings; dictation can continue." }
+            require(names.size < 128 && total <= maximumTotal-bytes.size) { "Recovery storage is full. Delete recordings to free space. You can still dictate." }
             val file = owned("recovery-${clock()}-${UUID.randomUUID()}.wav")
             published = file
             val partial = files.create(file.name+".partial")
@@ -91,18 +91,18 @@ internal class RecordingStore(
             published?.let { file -> if(files.exists(file)) {
                 runCatching { removeOwned(file) }.onFailure { runCatching { files.atomic(files.file(file.name+".discard"),ByteArray(0)) } }
             } }
-            failure("Recovery audio was not saved. Check current settings and free storage; the private quota is 128MiB / 128 files. Dictation can continue."); return null }
+            failure("Could not save recovery audio. Check settings and free storage. The limit is 134 MB or 128 recordings. You can still dictate."); return null }
     }
     /** Durable cancellation intent blocks crash recovery without deleting a reader's leased bytes. */
     @Synchronized fun cancelCapture(lease: Lease) {
         if(owners[lease.file.name]?.lease !== lease) return
         try { files.atomic(files.file(lease.file.name+".discard"),ByteArray(0)); changed() }
-        catch(_: Exception) { failure("Canceled audio could not be marked for purge. It will be retried after the reader exits; check Recovery audio.") }
+        catch(_: Exception) { failure("Canceled audio could not be removed yet. Removal will be retried when it is no longer in use. Check Recovery audio.") }
     }
     private fun recordingNames(): List<String> = files.names().map { it.removeSuffix(".discard") }.filter { namePattern.matches(it) }.distinct()
     @Synchronized fun acquire(id: String): Lease {
         settings(); val file = owned(id)
-        check(owners[id] == null) { "Recording is busy; wait for its reader to exit." }
+        check(owners[id] == null) { "Recording in use. Stop playback or wait for transcription." }
         val meta = metadata(file)
         val lease = Lease(file); owners[id] = Owner(lease,meta.first); changed(); return lease
     }
@@ -128,7 +128,7 @@ internal class RecordingStore(
                 require(stamp(files.attributes(lease.file,WavInput.MAX_BYTES.toLong())) == owner.identity) { "Recording changed." }
                 removeOwned(lease.file)
             }
-        } catch(_: Exception) { failure(if(recognized) "Recognition succeeded, but audio disposal failed. Text remains available; delete the recording explicitly." else "Canceled/private audio purge failed. Delete the recording explicitly.") }
+        } catch(_: Exception) { failure(if(recognized) "Transcript ready, but the recording could not be removed. Your text is available. Delete the recording in Recovery audio." else "A canceled or private recording could not be removed. Delete it in Recovery audio.") }
         finally { release(lease) }
     }
     @Synchronized fun descriptors(): List<AudioDescriptor> {
@@ -140,7 +140,7 @@ internal class RecordingStore(
                 val a = runCatching { files.attributes(file,WavInput.MAX_BYTES.toLong()) }.getOrNull()
                 val meta = runCatching { metadata(file) }
                 AudioDescriptor(id,created,s?.takeIf { created > 0 }?.let { created+it.recoveryAudioDays*86_400_000L },a?.size() ?: 0,meta.getOrNull()?.second,
-                    if(owners[id] != null) "Busy: recording/recognition/playback owns this file." else if(meta.isFailure) "Unavailable: settings, expiry, unsafe file or invalid WAV. Delete explicitly." else null)
+                    if(owners[id] != null) "Recording in use. Stop playback or wait for transcription." else if(meta.isFailure) "Recording unavailable. It may have expired or be damaged. Check settings or delete it." else null)
             }
         } catch(_: Exception) { failure("Recovery folder could not be read. Files were preserved."); emptyList() }
     }

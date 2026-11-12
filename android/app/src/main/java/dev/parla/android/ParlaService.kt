@@ -71,7 +71,7 @@ class ParlaService : Service() {
             scope.launch { status.collect { bubble?.render(it); updateNotification() } }
             true
         } catch (_: Exception) {
-            fail("Android could not show the bubble. Open parla and check permissions, then try again.")
+            fail("Could not show the voice control. Open parla to check permissions, then try again.")
             stopSelf()
             false
         }
@@ -107,7 +107,7 @@ class ParlaService : Service() {
         val model = manager.selected(settings)
         if (model == null || !manager.file(model).isFile) {
             owner.release(anchor); capturedAnchor = null; anchorOwner = null
-            fail("The effective speech model is missing. Open Models to download it."); openApp(); return
+            fail("Your speech model is missing. Download it in Models."); openApp(); return
         }
         val op = PendingOperation(); operation = op
         op.advance(PendingOperation.Stage.recording)

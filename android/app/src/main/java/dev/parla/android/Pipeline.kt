@@ -14,8 +14,8 @@ class Pipeline(private val api: ApiClient = ApiClient()) {
         return try {
             val transform = s.outputMode == "selectedPreset"
             val instruction = if(transform) {
-                outputCheck(raw.isNotEmpty(), "Transform source is empty")
-                outputCheck(s.cleanupEnabled, "Cleanup off — intentional transform refused")
+                outputCheck(raw.isNotEmpty(), "There is no text to change")
+                outputCheck(s.cleanupEnabled, "Turn on AI cleanup in Output settings to use a preset")
                 val matches = data.presets.filter { it.id == s.selectedPresetID }
                 outputCheck(matches.size == 1, "Choose a saved preset in Output settings.")
                 val preset = matches.single()
@@ -27,7 +27,7 @@ class Pipeline(private val api: ApiClient = ApiClient()) {
             val output = api.generate(raw, data, category, singleLine, instruction, key())
             val result = if(transform) output.trim() else PromptBuilder.sanitize(output)
             outputCheck(result.isNotEmpty(), "Cleanup returned no text")
-            if(transform) outputCheck(result.countCharacters() <= maxOf(2000, 6 * raw.countCharacters()), "Transform returned oversized text")
+            if(transform) outputCheck(result.countCharacters() <= maxOf(2000, 6 * raw.countCharacters()), "The preset returned too much text")
             else {
                 fun folded(text: String) = java.text.Normalizer.normalize(text.lowercase(java.util.Locale.ROOT), java.text.Normalizer.Form.NFC)
                 val lower = folded(raw)

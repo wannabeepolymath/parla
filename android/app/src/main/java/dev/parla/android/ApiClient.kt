@@ -23,8 +23,8 @@ class ApiClient(client: OkHttpClient = OkHttpClient(), private val allowInsecure
 
     suspend fun generate(source: String, data: LocalData, category: AppCategory, singleLine: Boolean, instruction: String?, key: String): String {
         val s = data.settings
-        if (s.provider == "apple-intelligence") throw ApiFailure("Apple Intelligence is unavailable on Android. Choose a remote text provider explicitly.")
-        if (s.provider == "anthropic" && key.isBlank()) throw ApiFailure("Optional text cleanup needs a saved key for this provider endpoint.")
+        if (s.provider == "apple-intelligence") throw ApiFailure("Apple Intelligence is unavailable on Android. Choose a provider in API connection.")
+        if (s.provider == "anthropic" && key.isBlank()) throw ApiFailure("Save an API key in API connection to use AI cleanup.")
         validateProviderKey(key)
         val anthropic = s.provider == "anthropic"
         if (!anthropic && s.provider != "openai-compatible") throw ApiFailure("Unsupported text provider.")
@@ -68,7 +68,7 @@ class ApiClient(client: OkHttpClient = OkHttpClient(), private val allowInsecure
                         if (!it.isSuccessful) throw ApiFailure(when (it.code) {
                             401, 403 -> "API authorization failed. Check your key and model access."
                             404 -> "API endpoint or model was not found. Check API settings."
-                            413 -> "Recording is too large for the provider. Try a shorter dictation."
+                            413 -> "Text is too long for the provider. Try a shorter dictation."
                             429 -> "Provider limit reached. Check quota or retry later."
                             in 300..399 -> "The provider redirected the request. Save its direct HTTPS API URL."
                             else -> "Provider request failed (HTTP ${it.code}). Try again or check API settings."

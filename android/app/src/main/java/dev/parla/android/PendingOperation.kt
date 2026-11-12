@@ -46,11 +46,11 @@ internal class HistoryRetry {
     @Synchronized fun clear() { owners.clear() }
     @Synchronized fun valid(token: String, source: HistoryEntry, rows: List<HistoryEntry>) = owners[source.id] == token && rows.any { it == source }
     suspend fun propose(token: String, source: HistoryEntry, frozen: LocalData, key: () -> String, applyPreset: Boolean = false, pipeline: Pipeline = Pipeline()): RetryProposal {
-        require(source.raw.isNotEmpty()) { "Original source is empty." }
+        require(source.raw.isNotEmpty()) { "There is no original text to retry." }
         val settings = frozen.settings.copy(outputMode = if(applyPreset) "selectedPreset" else "cleanup")
         val result = pipeline.clean(source.raw,frozen.copy(settings = settings),key = key)
         require(result.warning == null) { result.warning.orEmpty() }
-        return RetryProposal(token,source,result.text,"Current frozen global settings · destination unknown · no speech recognition or insertion · ${settings.provider} · ${settings.cleanupModel} · ${settings.style}" )
+        return RetryProposal(token,source,result.text,"Uses your current settings for general text. Nothing inserted into an app. Style: ${styleLabel(settings.style)}." )
     }
 }
 internal fun exportHistory(rows: List<HistoryEntry>, markdown: Boolean): String = rows.joinToString("\n\n") { row ->

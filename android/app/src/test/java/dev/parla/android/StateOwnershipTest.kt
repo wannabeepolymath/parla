@@ -77,7 +77,7 @@ class StateOwnershipTest {
         assertFalse(retry.valid(old,row,listOf(row)))
         assertTrue(retry.valid(current,row,listOf(row)))
         val proposed = retry.propose(current,row,LocalData(Settings(cleanupEnabled = false),replacements = listOf(LiteralReplacement("cat","dog"))),{ error("no key") })
-        assertEquals("dog",proposed.result); assertEquals("old",row.text); assertTrue(proposed.summary.contains("destination unknown"))
+        assertEquals("dog",proposed.result); assertEquals("old",row.text); assertTrue(proposed.summary.contains("general text"))
         assertFalse(retry.valid(current,row,listOf(row.copy(text = "newer",revision = 1))))
         retry.invalidate(row.id); assertFalse(retry.valid(current,row,listOf(row))); assertFalse(retry.valid(current,row,emptyList()))
         val next = retry.begin(row); retry.clear(); assertFalse(retry.valid(next,row,listOf(row)))

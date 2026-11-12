@@ -76,11 +76,11 @@ class AudioRecoveryTest {
     @Test fun quotaAndStorageFailuresAreExplicitAndSuccessfulRawSurvivesPurgeFailure() = runBlocking {
         val f = Fixture()
         try {
-            val quota = f.store(10); assertNull(quota.stash(f.audio,false)); assertTrue(quota.error.value!!.contains("quota"))
+            val quota = f.store(10); assertNull(quota.stash(f.audio,false)); assertTrue(quota.error.value!!.contains("limit"))
             val store = f.store(remover = { error("synthetic disk refusal") })
             val capture = CaptureRecovery(store); capture.prepare(f.audio,false) { false }; capture.recognized("raw held")
             capture.finish(false)
-            assertTrue(store.error.value!!.startsWith("Recognition succeeded")); assertEquals(1,store.descriptors().size)
+            assertTrue(store.error.value!!.startsWith("Transcript ready")); assertEquals(1,store.descriptors().size)
             assertEquals(1,store.clear().failed)
         } finally { f.close() }
     }

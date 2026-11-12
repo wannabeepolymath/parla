@@ -130,19 +130,19 @@ class ParlaAccessibilityService : AccessibilityService() {
                 val editor = current?.takeIf { it.refresh() }?.let(::snapshot)
                 if (anchor == null || current == null || editor == null || anchor.serviceSession != session || inputGeneration != anchor.inputGeneration ||
                     !InsertionPolicy.allows(anchor.snapshot, editor, current == anchor.node, anchor.valid)) {
-                    return@withLock recovery(text, "The original editor changed or isn't available.")
+                    return@withLock recovery(text, "The text field changed or is no longer available.")
                 }
                 val expected = InsertionPolicy.replacement(editor, text)
-                    ?: return@withLock recovery(text, "This editor can't accept the dictation safely.")
+                    ?: return@withLock recovery(text, "This field cannot accept dictation safely.")
                 // A second use of an anchor is never permitted, including after a failed verification.
-                if (!anchor.lease.consume()) return@withLock recovery(text, "The original editor changed.")
+                if (!anchor.lease.consume()) return@withLock recovery(text, "The text field changed.")
                 val ime = inputMethod
                 val connection = ime?.currentInputConnection
                 val imeEditor = ime?.currentInputEditorInfo
                 val canCommit = connection != null && ime.currentInputStarted &&
                     imeEditor?.packageName == editor.packageName &&
                     imeEditor.inputType == editor.inputType && inputGeneration == anchor.inputGeneration
-                if (!authorizeWrite()) return@withLock recovery(text, "Delivery canceled before writing.")
+                if (!authorizeWrite()) return@withLock recovery(text, "Canceled before inserting text.")
                 if (canCommit) {
                     // This API has no success return. Once invoked, never perform a second write.
                     connection.commitText(text, 1, null)
@@ -151,7 +151,7 @@ class ParlaAccessibilityService : AccessibilityService() {
                         putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected)
                     }
                     if (!current.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                        return@withLock recovery(text, "The editor declined text insertion.")
+                        return@withLock recovery(text, "The app did not accept the text.")
                     }
                 }
                 if (verify(anchor, expected)) {
@@ -162,12 +162,12 @@ class ParlaAccessibilityService : AccessibilityService() {
                             putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
                         })
                     }
-                    "Inserted into your original editor."
-                } else recovery(text, "Insertion couldn't be confirmed; check the editor before pasting.")
+                    "Text inserted."
+                } else recovery(text, "Text insertion is unconfirmed. Check the field before pasting.")
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                recovery(text, "The editor connection became unavailable; check before pasting.")
+                recovery(text, "The text field disconnected. Check it before pasting.")
             } finally {
                 if (anchor != null) release(anchor)
             }

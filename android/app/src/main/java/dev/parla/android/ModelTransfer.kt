@@ -204,8 +204,8 @@ class ModelManager internal constructor(
     init {
         require(chunkBytes > 0 && catalog.size in 1..3 && catalog.map { it.id }.distinct().size == catalog.size)
         require(catalog.all { Regex("[a-zA-Z0-9._-]{1,64}").matches(it.id) && it.bytes > 0 && Regex("[0-9a-f]{64}").matches(it.sha256) })
-        for(m in catalog) try { storage.read(m)?.let { publish(ModelTransfer(m.id,it.offset,message = "Paused after interruption. Resume explicitly.",paused = true)) } }
-        catch(_: Exception) { publish(ModelTransfer(m.id,message = "Checkpoint unavailable. Installed model preserved; repair private transfer storage before retrying.")) }
+        for(m in catalog) try { storage.read(m)?.let { publish(ModelTransfer(m.id,it.offset,message = "Download interrupted. Tap Resume to continue.",paused = true)) } }
+        catch(_: Exception) { publish(ModelTransfer(m.id,message = "Saved download could not be read. Any installed model is safe. Check device storage.")) }
     }
     @Synchronized private fun publish(row: ModelTransfer) { state.value = row; rowState.value = rowState.value + (row.id to row) }
     fun file(model: SpeechModel): File { require(model in catalog); return File(directory,model.filename) }
@@ -218,23 +218,23 @@ class ModelManager internal constructor(
         var failure: String? = null; var installed = false
         val work = scope.launch(start = CoroutineStart.LAZY) {
             try { transfer(model,g,p); installed = true }
-            catch(_: CancellationException) { failure = "Paused. Installed model preserved." }
-            catch(_: Exception) { failure = "Transfer failed validation or storage/network access. Installed model preserved. Resume retries from the last checkpoint; Discard removes only partial bytes." }
+            catch(_: CancellationException) { failure = "Download paused. Any installed model is kept." }
+            catch(_: Exception) { failure = "Download failed. Check your connection and device storage, then tap Resume. Discard removes the unfinished download; any installed model is kept." }
         }
         task = work
         work.invokeOnCompletion {
             synchronized(this@ModelManager) {
                 // Sole settlement point, including cancellation before coroutine entry. Ownership remains
                 // reserved through actual completion, so a concurrent Discard cannot fall between two finalizers.
-                if(generation == g) settle(model,p,installed,failure ?: "Paused before transfer started. Resume explicitly.")
+                if(generation == g) settle(model,p,installed,failure ?: "Download paused before starting. Tap Resume to continue.")
             }
         }
         work.start()
     }
     private fun settle(m: SpeechModel, p: TransferPermit, installed: Boolean, failure: String?) {
         if(permit !== p) return
-        var message = if(installed) "SHA-256 verified and installed. Select explicitly." else failure.orEmpty()
-        if(discardOnExit) try { storage.discard(m); message = "Partial transfer discarded. Installed model preserved." } catch(_: Exception) { message = "Could not discard private checkpoint. Installed model preserved." }
+        var message = if(installed) "Download checked and ready. Tap Select to use it." else failure.orEmpty()
+        if(discardOnExit) try { storage.discard(m); message = "Unfinished download discarded. Any installed model is kept." } catch(_: Exception) { message = "Could not discard the download. Any installed model is kept." }
         val c = runCatching { storage.read(m) }.getOrNull()
         publish(ModelTransfer(m.id,if(installed) m.bytes else c?.offset ?: 0,false,message,c != null))
         generation = null; permit = null; discardOnExit = false
@@ -242,14 +242,14 @@ class ModelManager internal constructor(
     @Synchronized fun pause() {
         if(generation == null) return
         permit?.revoke(); task?.cancel()
-        if(state.value.active) publish(state.value.copy(message = "Pausing · waiting for writer/native exit…"))
+        if(state.value.active) publish(state.value.copy(message = "Pausing download…"))
     }
     fun cancel() = pause()
     @Synchronized fun discard(model: SpeechModel) {
         if(deleting) return
         if(generation != null || task?.isCompleted == false) { if(state.value.id == model.id) { discardOnExit = true; pause() }; return }
-        try { storage.discard(model); publish(ModelTransfer(model.id,message = "Partial transfer discarded. Installed model preserved.")) }
-        catch(_: Exception) { publish(ModelTransfer(model.id,message = "Could not discard checkpoint. Unsafe files were preserved.")) }
+        try { storage.discard(model); publish(ModelTransfer(model.id,message = "Unfinished download discarded. Any installed model is kept.")) }
+        catch(_: Exception) { publish(ModelTransfer(model.id,message = "Could not discard the download. Files were kept.")) }
     }
     private suspend fun transfer(m: SpeechModel, g: String, p: TransferPermit) {
         p.check()
@@ -278,7 +278,7 @@ class ModelManager internal constructor(
                     else -> error("Unexpected model response")
                 }
                 c = storage.append(c,m,chunk,n,validator,p)
-                synchronized(this) { if(generation == g) publish(ModelTransfer(m.id,c.offset,true,"Downloading · durable checkpoint saved")) }
+                synchronized(this) { if(generation == g) publish(ModelTransfer(m.id,c.offset,true,"Downloading…")) }
             } finally { storage.files.remove(chunk) }
         }
         p.check()
@@ -298,7 +298,7 @@ class ModelManager internal constructor(
         synchronized(this) {
             check(!deleting && generation == null && task?.isCompleted != false) { "Wait for the model operation to finish." }
             deleting = true
-            publish(ModelTransfer(model.id,active = true,message = "Deleting · waiting for native readers to exit…",pausable = false))
+            publish(ModelTransfer(model.id,active = true,message = "Deleting model when it is no longer in use…",pausable = false))
         }
         var removed = false
         try {
@@ -306,7 +306,7 @@ class ModelManager internal constructor(
         } finally {
             synchronized(this) {
                 val c = runCatching { storage.read(model) }.getOrNull()
-                publish(ModelTransfer(model.id,c?.offset ?: 0,message = if(removed) "Installed model deleted. Selection unchanged." else "Model deletion failed. Check private storage.",paused = c != null))
+                publish(ModelTransfer(model.id,c?.offset ?: 0,message = if(removed) "Model deleted. Select another downloaded model to dictate." else "Could not delete the model. Check device storage.",paused = c != null))
                 deleting = false
             }
         }

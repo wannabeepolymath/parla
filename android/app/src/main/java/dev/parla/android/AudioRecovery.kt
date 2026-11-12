@@ -71,12 +71,12 @@ internal class AudioRecovery(
     private var lease: RecordingStore.Lease? = null
     fun transcribe(id: String) {
         if(job?.isCompleted == false) return
-        val frozen = current() ?: run { value.value = value.value.copy(message = "Repair current settings before retranscription. No fallback request ran."); return }
+        val frozen = current() ?: run { value.value = value.value.copy(message = "Repair settings in Data recovery before transcribing. Nothing was sent."); return }
         val model = catalog.firstOrNull { it.id == frozen.settings.localModel }
-            ?: run { value.value = value.value.copy(message = "Choose an installed global speech model in Models."); return }
+            ?: run { value.value = value.value.copy(message = "Select a downloaded speech model in Models."); return }
         val owned = try { recordings.acquire(id) } catch(_: Exception) { value.value = value.value.copy(message = "Recording is busy, expired or unavailable. Refresh and check settings."); return }
         lease = owned
-        value.value = AudioRecoveryState(activeID = id,message = "Transcribing locally with current global model, language and priority vocabulary…")
+        value.value = AudioRecoveryState(activeID = id,message = "Transcribing on device with your current settings…")
         val work = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val raw = recognizer.recognize(owned.file,modelFile(model),model,frozen) {
@@ -85,11 +85,11 @@ internal class AudioRecovery(
                 ensureActive(); recordings.validate(owned)
                 check(raw.isNotBlank())
                 // Preview belongs to this screen; retain its source across navigation/recreation.
-                value.value = AudioRecoveryState(activeID = id,preview = AudioPreview(id,raw),message = "Original transcript ready. No cleanup, provider or insertion ran. Source audio remains until explicit deletion or retention expiry.")
+                value.value = AudioRecoveryState(activeID = id,preview = AudioPreview(id,raw),message = "Transcript ready. Nothing was uploaded or inserted. Recording kept until deletion or expiry.")
             } catch(_: CancellationException) {
-                value.value = AudioRecoveryState(activeID = id,stopping = true,message = "Canceling · waiting for local reader to exit. Original audio preserved.")
+                value.value = AudioRecoveryState(activeID = id,stopping = true,message = "Stopping… Original recording kept.")
             } catch(_: Exception) {
-                value.value = AudioRecoveryState(activeID = id,message = "Local recognition failed. Original audio preserved; no provider or insertion ran.")
+                value.value = AudioRecoveryState(activeID = id,message = "Could not transcribe. Original recording kept. Nothing was uploaded or inserted.")
             } finally {
                 withContext(NonCancellable) {
                     drain()
@@ -110,17 +110,17 @@ internal class AudioRecovery(
     }
     fun cancel() {
         lease?.let(recordings::revoke); job?.cancel()
-        value.value = value.value.copy(preview = null,message = "Preview canceled. Original audio preserved when still available.")
+        value.value = value.value.copy(preview = null,message = "Preview dismissed. Any remaining recording is kept.")
     }
     fun savePreview() {
         val p = value.value.preview ?: return
         val settings = current()?.settings
         if(settings == null || settings.noHistory) {
-            value.value = value.value.copy(message = "Repair current settings and enable text history before Save. Copy remains available."); return
+            value.value = value.value.copy(message = "Check settings and enable text history before saving. You can still copy this text."); return
         }
         if(p.saved) return
-        if(save(HistoryEntry(raw = p.text,text = p.text,note = "Explicitly saved local audio recovery; no insertion attempted."))) {
-            value.value = value.value.copy(preview = p.copy(saved = true),message = "Raw transcript saved under the current history count limit.")
+        if(save(HistoryEntry(raw = p.text,text = p.text,note = "Saved from recovery audio. Nothing inserted into an app."))) {
+            value.value = value.value.copy(preview = p.copy(saved = true),message = "Transcript saved to history.")
         } else value.value = value.value.copy(message = "Text was not saved. Preview remains available to copy or retry Save.")
     }
     fun close() { cancel(); scope.cancel() }

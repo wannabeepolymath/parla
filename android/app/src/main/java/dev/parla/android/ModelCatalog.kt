@@ -17,7 +17,7 @@ object ModelCatalog {
         SpeechModel("small.en-q5_1","Small (English, quantized)",190098681,"bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30"),
         SpeechModel("large-v3-turbo-q5_0","Large v3 Turbo (quantized)",574041195,"394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"))
     fun verify(file: File, model: SpeechModel) {
-        require(Files.isRegularFile(file.toPath(),java.nio.file.LinkOption.NOFOLLOW_LINKS) && (Files.getAttribute(file.toPath(),"unix:nlink",java.nio.file.LinkOption.NOFOLLOW_LINKS) as Number).toLong() == 1L && file.length() == model.bytes) { "${model.id}: expected ${model.bytes} bytes; missing or damaged model. Open Models to download again." }
+        require(Files.isRegularFile(file.toPath(),java.nio.file.LinkOption.NOFOLLOW_LINKS) && (Files.getAttribute(file.toPath(),"unix:nlink",java.nio.file.LinkOption.NOFOLLOW_LINKS) as Number).toLong() == 1L && file.length() == model.bytes) { "This speech model is missing or damaged. Download it again in Models." }
         val hash = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { stream ->
             val first = stream.readNBytes(512)
@@ -27,7 +27,7 @@ object ModelCatalog {
             while(true) { val n = stream.read(buf); if(n < 0) break; hash.update(buf,0,n) }
         }
         val actual = hash.digest().joinToString("") { "%02x".format(it) }
-        require(actual == model.sha256) { "${model.id}: checksum failed. Original installed model is unchanged; download again." }
+        require(actual == model.sha256) { "The download could not be verified. Any installed model is kept. Download again." }
     }
     /** Same-directory atomic rename. Failure never deletes the previous usable model. */
     fun install(part: File, dest: File, model: SpeechModel, allowed: () -> Boolean = { true }) {
@@ -47,6 +47,6 @@ object ModelCatalog {
             }
             out.fd.sync()
         }
-        require(count == model.bytes) { "Incomplete model: expected ${model.bytes}, got $count bytes. Download again." }
+        require(count == model.bytes) { "The model download is incomplete. Download again." }
     }
 }

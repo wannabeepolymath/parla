@@ -28,12 +28,12 @@ class Store private constructor(context: Context) {
     fun recoverySource() = local.original()
     fun repair(json: String) = local.repair(json)
     @Synchronized fun saveConnection(settings: Settings, enteredKey: String) {
-        check(ready) { "Reload or repair local data before changing provider settings." }
+        check(ready) { "Reload or repair data before changing your API connection." }
         val scope = credentialScope(settings)
         // Blank explicitly rebinds the existing key only from this user-invoked save action.
         val value = if(enteredKey.isBlank() && hasKey) decryptKey().second else enteredKey.trim()
         validateProviderKey(value)
-        check(update { it.copy(settings = settings) }) { "Provider settings were not saved." }
+        check(update { it.copy(settings = settings) }) { "API settings were not saved." }
         if(value.isNotEmpty()) saveBoundKey(value, scope)
     }
     @Synchronized fun saveKey(value: String) {
@@ -52,10 +52,10 @@ class Store private constructor(context: Context) {
         } catch(_: Exception) { throw IllegalStateException("Key was not saved securely. Re-enter it and save again.") }
     }
     @Synchronized fun readKey(settings: Settings = data.value.settings): String {
-        check(ready) { "Provider work blocked: reload or repair unreadable local data." }
+        check(ready) { "AI cleanup is paused. Reload or repair saved data." }
         if(!hasKey) return ""
         val (scope,key) = decryptKey()
-        check(scope == credentialScope(settings)) { "Saved key is not bound to this endpoint. Review and Save API settings explicitly." }
+        check(scope == credentialScope(settings)) { "This API address is not authorized to use your saved key. Review and save API settings." }
         return key
     }
     private fun decryptKey(): Pair<String,String> {
