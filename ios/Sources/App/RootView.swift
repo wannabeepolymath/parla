@@ -63,7 +63,7 @@ struct RootView: View {
                 .fullScreenCover(isPresented: Binding(get: { !store.library.preferences.onboarded || setup }, set: { setup = $0 })) { OnboardingView() }
                 .alert("Parla", isPresented: Binding(get: { coordinator.message != nil || store.error != nil || settings.error != nil }, set: { if !$0 { dismissAlert() } })) {
                     Button("OK") { dismissAlert() }
-                } message: { Text(coordinator.message ?? store.error ?? settings.error ?? "") }
+                } message: { Text(ConsumerCopy.message(coordinator.message ?? store.error ?? settings.error ?? "")) }
         }
     }
     func dismissAlert() { coordinator.message = nil; store.error = nil; settings.error = nil }
@@ -79,7 +79,7 @@ struct SessionBanner: View {
                 Button("Cancel", role: .cancel) { coordinator.cancel() }
             }
             if coordinator.session?.phase == .requested && !coordinator.isStarting {
-                Text("Start the microphone here, then return to your previous app manually. Parla can record for up to 5 minutes; iOS may interrupt it.").font(.footnote)
+                Text("Start the microphone here, then return to the app you were using. Parla can record for up to 5 minutes; iOS may interrupt it.").font(.footnote)
                 Button("Start microphone") { coordinator.start(pending: coordinator.session) }.buttonStyle(ParlaButtonStyle())
             } else if coordinator.recording {
                 HStack { Waveform(active: true); Spacer(); Button("Stop & transcribe") { coordinator.stop() }.fontWeight(.semibold) }

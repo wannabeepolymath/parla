@@ -59,7 +59,7 @@ struct HistoryView: View {
                         }
                     }
                 }
-                Text("Retention: \(store.library.preferences.retention.title). Usage totals describe retained history only.").font(.caption).foregroundStyle(.secondary)
+                Text("Keep history: \(store.library.preferences.retention.title). Totals include saved dictations only.").font(.caption).foregroundStyle(.secondary)
             }.padding(24)
         }.sheet(item: $detail) { TranscriptDetail(transcript: $0) }
             .confirmationDialog("Delete this dictation and its audio?", isPresented: Binding(get: { delete != nil }, set: { if !$0 { delete = nil } }), titleVisibility: .visible) {
@@ -87,9 +87,9 @@ struct TranscriptDetail: View {
                 VStack(alignment: .leading, spacing: 22) {
                     if let item = current {
                         Text(item.date.formatted(date: .long, time: .shortened)).font(.caption).foregroundStyle(.secondary)
-                        Picker("Transcript version", selection: $raw) { Text("Final").tag(false); Text("Raw").tag(true) }.pickerStyle(.segmented)
+                        Picker("Transcript version", selection: $raw) { Text("Final").tag(false); Text("As spoken").tag(true) }.pickerStyle(.segmented)
                         Text(text.isEmpty ? "No text available." : text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        if let error = item.error { Label(error, systemImage: "exclamationmark.circle").font(.footnote).foregroundStyle(.secondary) }
+                        if let error = item.error { Label(ConsumerCopy.message(error), systemImage: "exclamationmark.circle").font(.footnote).foregroundStyle(.secondary) }
                         HStack {
                             Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = text }
                             Spacer(); ShareLink(item: text) { Label("Share", systemImage: "square.and.arrow.up") }
@@ -108,7 +108,7 @@ struct TranscriptDetail: View {
                             }
                         }
                         Button("Retry transcription / cleanup", systemImage: "arrow.clockwise") { stopPlayback(); coordinator.retry(item); dismiss() }.disabled(coordinator.busy)
-                        Text("Retry creates a separate attempt with your current settings. Retained audio is transcribed again on this iPhone; text-only attempts retry cleanup.").font(.caption).foregroundStyle(.secondary)
+                        Text("Retry saves a new dictation using your current settings. Saved audio is transcribed again on this iPhone. Without audio, only text cleanup is retried.").font(.caption).foregroundStyle(.secondary)
                         Button("Delete dictation", role: .destructive) { confirmDelete = true }
                     } else { Text("This dictation is no longer retained.") }
                 }.padding(24)

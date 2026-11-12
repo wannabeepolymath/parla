@@ -26,10 +26,10 @@ struct OnboardingView: View {
                         case 1:
                             Text("Your voice,\ninside your apps.").font(.custom("EBGaramond-Regular", size: 43))
                             setupRow("1", "Add Parla", "iPhone Settings → General → Keyboard → Keyboards → Add New Keyboard → Parla.")
-                            setupRow("2", "Allow Full Access", "Tap Parla in Keyboards, enable Allow Full Access, and confirm. This permits the shared dictation handoff; it does not give the keyboard a microphone.")
-                            setupRow("3", "Open Parla & return", "Request dictation from the keyboard. Open Parla manually, tap Start microphone, and return to your previous app. Stop from the keyboard, review, then tap Insert.")
+                            setupRow("2", "Allow Full Access", "Tap Parla in Keyboards, enable Allow Full Access, and confirm. This lets the keyboard share dictation requests and results with Parla. It does not give the keyboard a microphone or send what you type.")
+                            setupRow("3", "Dictate in another app", "Request dictation from the keyboard. Open Parla, tap Start microphone, then return to the app you were using. Stop from the keyboard, review, then tap Insert.")
                             Button("Open Parla’s Settings") { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }.buttonStyle(ParlaButtonStyle(dark: false))
-                            Text("The Settings link opens Parla’s app settings; navigate manually if the keyboard controls are elsewhere. Secure and excluded fields use Apple’s keyboard.").font(.footnote).foregroundStyle(.secondary)
+                            Text("The Settings link opens Parla’s app settings; navigate manually if the keyboard controls are elsewhere. Password fields and apps that block other keyboards use Apple’s keyboard.").font(.footnote).foregroundStyle(.secondary)
                             Button(permission == .granted ? "Microphone allowed" : "Allow microphone") {
                                 Task { let allowed = await AVAudioApplication.requestRecordPermission(); permission = AVAudioApplication.shared.recordPermission; if !allowed { permissionMessage = "Enable Microphone in iPhone Settings → Parla when you are ready. You can continue without it." } }
                             }.buttonStyle(ParlaButtonStyle()).disabled(permission == .granted)
@@ -37,16 +37,16 @@ struct OnboardingView: View {
                             Text("A little more\nyou.").font(.custom("EBGaramond-Regular", size: 45))
                             NavigationLink { ModelsView() } label: { Label("Choose a speech model", systemImage: "cpu").frame(maxWidth: .infinity, alignment: .leading).padding(20).background(.white).clipShape(RoundedRectangle(cornerRadius: 18)) }
                             Text("On-device speech, local history").font(.headline)
-                            Text("Audio never leaves this iPhone. Optional cleanup runs with Apple Intelligence on this iPhone, or sends the transcript to the provider you set up with your own key. Parla reads no host text, contacts or analytics.")
+                            Text("Audio never leaves this iPhone. Optional AI cleanup runs with Apple Intelligence on this iPhone, or sends your transcript, dictionary and snippets to your chosen provider. Online providers use your API key and may charge for use; their data policies apply. Parla does not read surrounding text or contacts, or collect analytics.")
                             Picker("Keep text & audio", selection: Binding(get: { store.library.preferences.retention }, set: { policy in var preferences = store.library.preferences; preferences.retention = policy; do { try store.savePreferences(preferences) } catch { permissionMessage = error.localizedDescription } })) {
                                 ForEach(RetentionPolicy.allCases) { Text($0.title).tag($0) }
                             }.pickerStyle(.segmented)
-                            Text("Retention applies to history and audio, not notes. Never still permits active processing and a temporary result. The delivery result becomes unusable after two minutes and is removed the next time Parla or the Parla keyboard runs. 24-hour cleanup runs while active and on the next app entry.").font(.footnote).foregroundStyle(.secondary)
+                            Text("This controls saved dictations and recordings, not notes. Never still lets Parla process your speech and keep the latest result for two minutes. After that, the result cannot be used and is deleted when Parla or its keyboard next opens. With 24 hours, older dictations are deleted while Parla is open or when you next open it.").font(.footnote).foregroundStyle(.secondary)
                         default:
                             Text("Your turn.").font(.custom("EBGaramond-Regular", size: 50))
-                            Text("Practice typing here, or switch to the Parla keyboard using the globe. Download a speech model in Models to try real dictation; no sample transcription is inserted for you.")
+                            Text("Practice typing here, or switch to the Parla keyboard using the globe. Download a speech model in Models to try dictation.")
                             TextEditor(text: $practice).frame(minHeight: 160).padding(12).background(.white).clipShape(RoundedRectangle(cornerRadius: 18)).overlay(alignment: .topLeading) { if practice.isEmpty { Text("Try your keyboard here…").foregroundStyle(.secondary).padding(20).allowsHitTesting(false) } }
-                            Text("When using voice: request → open Parla → start → return → stop → review → insert. Always review names and punctuation before sending.").font(.footnote).foregroundStyle(.secondary)
+                            Text("To dictate, request from the keyboard, open Parla and start the microphone. Return to your app, stop, review and insert. Always review names and punctuation before sending.").font(.footnote).foregroundStyle(.secondary)
                         }
                     }
                 }

@@ -107,7 +107,7 @@ struct DictionaryView: View {
                 }
                 if words.isEmpty { Text("Names, product terms and spellings you use.").foregroundStyle(.secondary) }
             } header: { Text("Priority order") } footer: {
-                Text("Words guide recognition and cleanup. Earlier words win when the \(VocabularyHints.asrBytes)-byte recognition hint or \(VocabularyHints.cleanupBytes)-byte cleanup budget is full; one word may use up to \(VocabularyHints.maxHintBytes) bytes. Swipe right to move a word, left to delete.")
+                Text("Add short words, names and spellings to help Parla recognize and clean up speech. Space is limited, so words at the top have priority. Apple Speech does not use this dictionary. Swipe right to move a word, left to delete.")
             }
         }.scrollContentBackground(.hidden).background(Color.paper).navigationTitle("Dictionary")
     }
@@ -147,8 +147,8 @@ struct PairsView: View {
                 Button("Add", systemImage: "plus") { editing = Pair() }
             } footer: {
                 Text(kind == .snippets
-                     ? "When a whole dictation is just the trigger, its text is inserted exactly. A trigger inside a longer dictation goes to cleanup as a hint."
-                     : "Exact, case-sensitive swaps after cleanup, matched at word edges. Longer text wins; earlier rows break ties. Swipe right to reorder.")
+                     ? "Say only the shortcut phrase to insert its saved text exactly. In a longer dictation, AI cleanup may use it as a suggestion."
+                     : "Replace whole words or phrases after cleanup. Capitalization must match. Longer matches have priority, then words higher in the list. Swipe right to reorder.")
             }
         }.scrollContentBackground(.hidden).background(Color.paper).navigationTitle(kind == .snippets ? "Snippets" : "Replacements")
             .sheet(item: $editing) { PairEditor(pair: $0, kind: kind) { pair in save(pair) } }

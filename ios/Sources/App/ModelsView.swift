@@ -36,15 +36,15 @@ private final class CatalogRedirects: NSObject, URLSessionTaskDelegate, @uncheck
         let task = session.downloadTask(with: model.url) { [weak self] location, response, failure in
             // Session queue, off main. URLSession deletes `location` when this returns, so stage it first.
             var message: String?
-            if let failure { message = (failure as? URLError)?.code == .cancelled ? nil : "\(model.displayName) download failed. Check your connection and retry." }
-            else if (response as? HTTPURLResponse)?.statusCode != 200 { message = "\(model.displayName) download was refused by the server." }
+            if let failure { message = (failure as? URLError)?.code == .cancelled ? nil : "\(ConsumerCopy.modelName(model)) download failed. Check your connection and retry." }
+            else if (response as? HTTPURLResponse)?.statusCode != 200 { message = "\(ConsumerCopy.modelName(model)) download was refused by the server." }
             else if let location {
                 do {
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     try? FileManager.default.removeItem(at: staged)
                     try FileManager.default.moveItem(at: location, to: staged)
                     try ModelCatalog.install(staged: staged, as: model, at: URL(fileURLWithPath: ModelCatalog.path(for: model)))
-                } catch { message = "\(model.displayName) was not installed: " + ((error as? ModelFileError)?.description ?? "storage error.") }
+                } catch { message = "\(ConsumerCopy.modelName(model)) could not be installed. Check available storage and try downloading again." }
                 try? FileManager.default.removeItem(at: staged)
             }
             Task { @MainActor in self?.finished(model, message) }
@@ -59,7 +59,7 @@ private final class CatalogRedirects: NSObject, URLSessionTaskDelegate, @uncheck
     func cancel(_ model: ModelCatalog.Model) { tasks[model.id]?.cancel() }
     func delete(_ model: ModelCatalog.Model) {
         do { try FileManager.default.removeItem(atPath: ModelCatalog.path(for: model)); objectWillChange.send() }
-        catch { self.error = "\(model.displayName) could not be deleted." }
+        catch { self.error = "\(ConsumerCopy.modelName(model)) could not be deleted." }
     }
     private func finished(_ model: ModelCatalog.Model, _ message: String?) {
         tasks[model.id] = nil; observations[model.id] = nil; progress[model.id] = nil
@@ -80,10 +80,10 @@ struct ModelsView: View {
     var s: Settings { settings.current }
     static func selectionLabel(_ settings: Settings) -> String {
         switch RecognitionRequest(settings: settings).selection {
-        case .appleSpeech(let locale): return "Apple Speech · \(locale)"
+        case .appleSpeech(let locale): return "Apple Speech · \(ConsumerCopy.language(locale))"
         case .whisper(let path):
             guard let model = ModelCatalog.model(atPath: path) else { return "None" }
-            return model.displayName + (ModelCatalog.isInstalled(model) ? "" : " · not downloaded")
+            return ConsumerCopy.modelName(model) + (ModelCatalog.isInstalled(model) ? "" : " · not downloaded")
         case .parakeet, .invalid: return "None"
         }
     }
@@ -91,8 +91,8 @@ struct ModelsView: View {
         Form {
             Section {
                 ForEach(ModelCatalog.all) { model in row(model) }
-            } header: { Text("On-device Whisper") } footer: {
-                Text("Models download from Hugging Face over HTTPS. Each file is checked against its pinned size and SHA-256 before it is installed, is kept only on this iPhone and is excluded from backups. English-only models ignore the language setting; Large v3 Turbo is multilingual and slow on iPhone. Parla never switches models on its own.")
+            } header: { Text("Whisper · on this iPhone") } footer: {
+                Text("Models download securely from Hugging Face and are checked before installation. They stay on this iPhone and are not backed up. English models only transcribe English. Large v3 Turbo supports multiple languages and can be slow on iPhone. You choose which model to use.")
             }
             if SpeechTranscriber.isAvailable { appleSpeech }
         }.scrollContentBackground(.hidden).background(Color.paper).navigationTitle("Models")
@@ -111,9 +111,9 @@ struct ModelsView: View {
     func row(_ model: ModelCatalog.Model) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                VStack(alignment: .leading, spacing: 4) { Text(model.displayName).fontWeight(.semibold); Text(model.sizeLabel).font(.caption).foregroundStyle(.secondary) }
+                VStack(alignment: .leading, spacing: 4) { Text(ConsumerCopy.modelName(model)).fontWeight(.semibold); Text(model.sizeLabel).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
-                if selected(model) { Label(downloads.isInstalled(model) ? "Selected" : "Selected · missing", systemImage: "checkmark.circle.fill").font(.caption) }
+                if selected(model) { Label(downloads.isInstalled(model) ? "Selected" : "Download needed", systemImage: "checkmark.circle.fill").font(.caption) }
             }
             if let fraction = downloads.progress[model.id] {
                 ProgressView(value: fraction) { Text(fraction >= 1 ? "Verifying…" : "Downloading…").font(.caption) }
@@ -133,7 +133,7 @@ struct ModelsView: View {
         Section {
             Picker("Language", selection: $locale) { ForEach(locales, id: \.self) { Text(Locale.current.localizedString(forIdentifier: $0) ?? $0).tag($0) } }
             if case .some(let fraction) = preparing {
-                ProgressView(value: fraction ?? 0) { Text("Preparing \(locale)…").font(.caption) }
+                ProgressView(value: fraction ?? 0) { Text("Preparing \(ConsumerCopy.language(locale))…").font(.caption) }
             } else {
                 Button("Prepare language") { prepare() }.disabled(locale.isEmpty || releasing || coordinator.busy || coordinator.isManagingSpeechAssets)
                 if s.recognitionEngine == .appleSpeech, s.appleSpeechLocale == locale { Label("Selected", systemImage: "checkmark.circle.fill").font(.caption) }
@@ -143,24 +143,24 @@ struct ModelsView: View {
                 HStack {
                     Text(Locale.current.localizedString(forIdentifier: language) ?? language)
                     Spacer()
-                    Button("Release", role: .destructive) { release(language) }
+                    Button("Remove language", role: .destructive) { release(language) }
                         .disabled(!AppleSpeechSetup.canRelease(busy: coordinator.busy, preparing: preparing != nil || releasing || coordinator.isManagingSpeechAssets))
                 }.buttonStyle(.borderless)
             }
             if let speechMessage { Text(speechMessage).font(.footnote).foregroundStyle(.secondary) }
         } header: { Text("Apple Speech") } footer: {
-            Text("Apple's on-device recognizer. Prepare downloads the system language assets; dictation refuses to start recognition until they are installed. Dictionary words are not used as hints. Reserved languages stay until you release them here. Release is unavailable while Parla is busy.")
+            Text("Apple Speech recognizes speech on this iPhone. Prepare downloads the language needed before you can dictate. It does not use your dictionary. Prepared languages stay until you remove them here. Finish dictation before removing a language.")
         }
     }
     func refreshReservations() async {
         do { reserved = try await AppleSpeechNative.assets.observe(locale).reserved.sorted() }
-        catch { speechMessage = (error as? AppleSpeechRefusal)?.message ?? "Reserved languages could not be read." }
+        catch { speechMessage = (error as? AppleSpeechRefusal)?.message ?? "Prepared languages could not be loaded. Try again." }
     }
     func release(_ language: String) {
         guard AppleSpeechSetup.canRelease(busy: coordinator.busy, preparing: preparing != nil || releasing || coordinator.isManagingSpeechAssets) else { return }
         releasing = true; coordinator.isManagingSpeechAssets = true
         Task {
-            speechMessage = await AppleSpeechNative.assets.release(language) ? "Released \(language). Prepare it again before dictating." : "This language could not be released. Try again when Parla is idle."
+            speechMessage = await AppleSpeechNative.assets.release(language) ? "Removed \(ConsumerCopy.language(language)). Prepare it again before dictating." : "This language could not be removed. Finish dictation and try again."
             await refreshReservations(); releasing = false; coordinator.isManagingSpeechAssets = false
         }
     }
@@ -172,8 +172,8 @@ struct ModelsView: View {
         Task {
             do {
                 try await AppleSpeechSetup.prepare(target) { fraction in Task { @MainActor in preparing = .some(fraction) } }
-                speechMessage = "\(target) is ready on this iPhone."
-            } catch { speechMessage = (error as? AppleSpeechRefusal)?.message ?? "Language assets could not be prepared." }
+                speechMessage = "\(ConsumerCopy.language(target)) is ready on this iPhone."
+            } catch { speechMessage = (error as? AppleSpeechRefusal)?.message ?? "This language could not be prepared. Check your connection and try again." }
             await refreshReservations()
             preparing = nil; coordinator.isManagingSpeechAssets = false
         }

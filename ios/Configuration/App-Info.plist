@@ -37,7 +37,7 @@
 	<key>UIUserInterfaceStyle</key>
 	<string>Light</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Parla records only when you start dictation. Speech is recognized on this iPhone.</string>
+	<string>Parla uses the microphone when you start dictation. Your audio stays on this iPhone and is turned into text here.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
