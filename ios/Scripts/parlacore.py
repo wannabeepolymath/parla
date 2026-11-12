@@ -4,7 +4,8 @@ The desktop Swift files are referenced unmodified from ../Sources/ParlaCore. The
 AudioRecorder, ClipboardDelivery, Inserter, Hotkey, ShortcutDisplay and ParakeetTrust are excluded;
 Sources/Core/ParlaCoreIOS.swift supplies the few declarations the shared files name.
 whisper.cpp v1.9.1 is the copy the Android app vendors; this list mirrors its static CPU-only build
-(ggml-base + ggml + ggml-cpu with the ARM arch files + whisper; no Metal, BLAS, OpenMP, KleidiAI or parakeet)."""
+(ggml-base + ggml + ggml-cpu + whisper; no Metal, BLAS, OpenMP, KleidiAI or parakeet).
+Local dispatch files select ARM kernels on iPhone/Apple Silicon and x86 kernels on Intel Simulator."""
 CORE_SWIFT = '''ActivityShadow AppleIntelligenceCleanup AppleSpeechAssets AppleSpeechNative AppleSpeechRecognition Cleanup
 CleanupFactory CleanupFailover Credentials Diagnostics Eval GuidedTemplate History HistoryRetry HistoryRetryHTTP HistoryRetrySegmentation
 ModelCatalog MouseInput OpenAICompatClient ParakeetInstallation ParakeetModelManifest ParakeetProcess ParakeetRecognition
@@ -23,8 +24,8 @@ WHISPER_SOURCES = [
     'ggml/src/ggml-cpu/ggml-cpu.c', 'ggml/src/ggml-cpu/ggml-cpu.cpp', 'ggml/src/ggml-cpu/repack.cpp', 'ggml/src/ggml-cpu/hbm.cpp',
     'ggml/src/ggml-cpu/quants.c', 'ggml/src/ggml-cpu/traits.cpp', 'ggml/src/ggml-cpu/amx/amx.cpp', 'ggml/src/ggml-cpu/amx/mmq.cpp',
     'ggml/src/ggml-cpu/binary-ops.cpp', 'ggml/src/ggml-cpu/unary-ops.cpp', 'ggml/src/ggml-cpu/vec.cpp', 'ggml/src/ggml-cpu/ops.cpp',
-    'ggml/src/ggml-cpu/arch/arm/quants.c', 'ggml/src/ggml-cpu/arch/arm/repack.cpp',
 ]
+CPU_DISPATCH = ['Sources/Core/CPUQuants.c', 'Sources/Core/CPURepack.cpp']
 # Swift's clang importer sees only these (whisper.h and the ggml headers it includes).
 PUBLIC_INCLUDES = ['include', 'ggml/include']
 PRIVATE_INCLUDES = ['ggml/src', 'ggml/src/ggml-cpu', 'src']
@@ -40,3 +41,6 @@ def core_paths():
 
 def vendor_paths():
     return [f'{VENDOR}/{path}' for path in WHISPER_SOURCES]
+
+def native_paths():
+    return vendor_paths() + CPU_DISPATCH

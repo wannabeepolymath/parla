@@ -34,8 +34,9 @@ def run(name,cmd,checks):
 for name,flags,files in jobs:
  if not run(name,base+flags+[str(p) for p in sorted(set(files))],'semantic Swift check; no object code or linking') and name.startswith('parlacore'):break
 cflags=['-fsyntax-only','-isysroot',sdk,'-target',target,'-Werror=implicit-function-declaration']+['-I'+str(vendor/d) for d in core.PUBLIC_INCLUDES+core.PRIVATE_INCLUDES]+['-D'+d for d in core.DEFINES]
-failed=[p for p in core.WHISPER_SOURCES if subprocess.run((['xcrun','clang','-std='+core.C_STANDARD] if p.endswith('.c') else ['xcrun','clang++','-std='+core.CXX_STANDARD])+cflags+[str(vendor/p)],capture_output=True,text=True).returncode]
-results.append({'target':'whisper-ggml-syntax','sources':len(core.WHISPER_SOURCES),'failed':failed,'exit':int(bool(failed)),'checks':'clang -fsyntax-only for '+target+'; no object code'})
-print('whisper-ggml-syntax','PASS' if not failed else 'FAIL '+' '.join(failed),f'({len(core.WHISPER_SOURCES)} sources)',flush=True)
+native=core.native_paths()
+failed=[p for p in native if subprocess.run((['xcrun','clang','-std='+core.C_STANDARD] if p.endswith('.c') else ['xcrun','clang++','-std='+core.CXX_STANDARD])+cflags+[str((r/p).resolve())],capture_output=True,text=True).returncode]
+results.append({'target':'whisper-ggml-syntax','sources':len(native),'failed':failed,'exit':int(bool(failed)),'checks':'clang -fsyntax-only for '+target+'; no object code'})
+print('whisper-ggml-syntax','PASS' if not failed else 'FAIL '+' '.join(failed),f'({len(native)} sources)',flush=True)
 (out/'typecheck-results.json').write_text(json.dumps(results,indent=2)+'\n')
 sys.exit(0 if all(x['exit']==0 for x in results) and len(results)==len(jobs)+1 else 1)

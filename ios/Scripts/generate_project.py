@@ -33,7 +33,7 @@ kinds={'.swift':'sourcecode.swift','.c':'sourcecode.c.c','.cpp':'sourcecode.cpp.
 files={}
 for p in sorted((ROOT/'Sources').rglob('*.swift')):files[str(p.relative_to(ROOT))]=ref(str(p.relative_to(ROOT)),'sourcecode.swift')
 for p in sorted((ROOT/'Tests').glob('*.swift')):files[str(p.relative_to(ROOT))]=ref(str(p.relative_to(ROOT)),'sourcecode.swift')
-for p in core.core_paths()+core.vendor_paths():files[p]=ref(p,kinds[Path(p).suffix])
+for p in core.core_paths()+core.native_paths():files[p]=ref(p,kinds[Path(p).suffix])
 modulemap=core.MODULE_MAP_DIR+'/module.modulemap';files[modulemap]=ref(modulemap,'sourcecode.module-map')
 resource_paths=['Resources/Assets.xcassets']+[str(p.relative_to(ROOT)) for p in sorted((ROOT/'Resources').glob('*.ttf'))]+['Resources/dictation-start.wav','Resources/dictation-stop.wav']
 resource_paths += [str(p.relative_to(ROOT)) for p in sorted((ROOT/'Resources/FontLicenses').glob('*.txt'))]
@@ -56,7 +56,7 @@ def depend(name,child):
  return add(name+':dependency:'+child,isa='PBXTargetDependency',target=targetIDs[child],targetProxy=proxy)
 for name in products:
  kind={'Parla':'App','ParlaKeyboard':'Keyboard','ParlaWidgets':'Widgets','ParlaTests':'Tests','ParlaCore':'Core'}[name]
- if kind=='Core':source=[core.SHIM]+core.core_paths()+core.vendor_paths()
+ if kind=='Core':source=[core.SHIM]+core.core_paths()+core.native_paths()
  elif kind=='Tests':source=[p for p in files if p.startswith('Tests/')]
  else:
   source=[p for p in files if p.startswith('Sources/Shared/')]

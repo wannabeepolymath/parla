@@ -40,7 +40,7 @@ def project():
    check(name+' catalog, fonts and cues','Resources/Assets.xcassets' in resources and len([p for p in resources if p.endswith('.ttf')])==5 and 'Resources/dictation-start.wav' in resources)
   check(name+' at least one source',len(paths)>0)
  # ParlaCore: exactly the shim, the listed unmodified desktop files and the whisper/ggml CPU sources.
- expected=sorted([core.SHIM]+core.core_paths()+core.vendor_paths())
+ expected=sorted([core.SHIM]+core.core_paths()+core.native_paths())
  check('ParlaCore sources',target_sources['ParlaCore']==expected,str(set(expected)^set(target_sources['ParlaCore'])))
  check('ParlaCore static library',targets['ParlaCore']['productType']=='com.apple.product-type.library.static' and obj[targets['ParlaCore']['productReference']]['path']=='libParlaCore.a')
  check('ParlaCore excludes macOS-only files',not any(Path(p).stem in ['AudioRecorder','ClipboardDelivery','Inserter','Hotkey','ShortcutDisplay','ParakeetTrust'] for p in target_sources['ParlaCore']))
@@ -55,7 +55,7 @@ def project():
  check('app depends on ParlaCore and extensions',{obj[obj[d]['target']]['name'] for d in targets['Parla']['dependencies']}=={'ParlaCore','ParlaKeyboard','ParlaWidgets'})
  for name in ['ParlaKeyboard','ParlaWidgets']:
   check(name+' does not link ParlaCore',not links[name] and not targets[name]['dependencies'] and not any(p.startswith('../') or '/Core/' in p or '/App/' in p for p in target_sources[name]))
- all_files={str(p.relative_to(r)) for p in (r/'Sources').rglob('*.swift')}
+ all_files={str(p.relative_to(r)) for p in (r/'Sources').rglob('*') if p.suffix in ['.swift','.c','.cpp']}
  check('all source files included',all_files==set(p for paths in target_sources.values() for p in paths if p.startswith('Sources/')))
  check('keyboard has no app/intents sources',not any(p.endswith('SystemIntents.swift') for p in target_sources['ParlaKeyboard']))
  embed=[obj[x] for x in targets['Parla']['buildPhases'] if obj[x]['isa']=='PBXCopyFilesBuildPhase']
