@@ -221,7 +221,7 @@ struct LocalAccountView: View {
                 Text("Parla has no sign-in, subscription, backup or sync service. Notes, history, settings and models stay in local storage. Reinstalling or losing this iPhone can lose your data.")
             }
             Section("Export") {
-                ShareLink(item: store.exportText(settings: settings.current)) { Label("Export notes, history & settings", systemImage: "square.and.arrow.up") }
+                ShareLink(item: store.exportText(settings: settings.current), preview: SharePreview("Parla data export")) { Label("Export notes, history & settings", systemImage: "square.and.arrow.up") }
                 Text("Export includes saved text, vocabulary and preferences. API keys and recordings are excluded. The file uses a structured format for keeping a copy of your data; it may show technical setting names. Only share it with someone you trust.").font(.footnote).foregroundStyle(.secondary)
             }
             Section("Delete") {
