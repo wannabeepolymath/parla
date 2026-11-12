@@ -41,7 +41,7 @@ struct OnboardingView: View {
                             Picker("Keep text & audio", selection: Binding(get: { store.library.preferences.retention }, set: { policy in var preferences = store.library.preferences; preferences.retention = policy; do { try store.savePreferences(preferences) } catch { permissionMessage = error.localizedDescription } })) {
                                 ForEach(RetentionPolicy.allCases) { Text($0.title).tag($0) }
                             }.pickerStyle(.segmented)
-                            Text("Retention applies to history and audio, not notes. Never still permits active processing and a temporary result for up to two minutes. 24-hour cleanup runs while active and on the next app entry.").font(.footnote).foregroundStyle(.secondary)
+                            Text("Retention applies to history and audio, not notes. Never still permits active processing and a temporary result. The delivery result becomes unusable after two minutes and is removed the next time Parla or the Parla keyboard runs. 24-hour cleanup runs while active and on the next app entry.").font(.footnote).foregroundStyle(.secondary)
                         default:
                             Text("Your turn.").font(.custom("EBGaramond-Regular", size: 50))
                             Text("Practice typing here, or switch to the Parla keyboard using the globe. Download a speech model in Models to try real dictation; no sample transcription is inserted for you.")

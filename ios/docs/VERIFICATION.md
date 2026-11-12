@@ -1,6 +1,6 @@
 # Verification
 
-Date: 2026-10-29. Static checks only. Nothing was built, linked, installed, run on a simulator or device, downloaded or decoded.
+Date: 2026-11-05. Static checks only. Nothing was built, linked, installed, run on a simulator or device, downloaded or decoded.
 
 ## Run
 
@@ -21,6 +21,10 @@ Date: 2026-10-29. Static checks only. Nothing was built, linked, installed, run 
 6. `whisper-ggml-syntax`: `clang -fsyntax-only` / `clang++ -fsyntax-only` over all 26 whisper/ggml sources with the project's defines and include paths.
 
 Logs and results are written to `evidence/implementation/` (git-ignored).
+
+## Focused regression sources
+
+`Tests/ParlaTests.swift` includes storage-failure delivery and local retention before a failed shared write; cancellation/replacement ownership; exact UTF-8 result limits, oversized-file refusal and worst-case JSON escaping; background-task completion/expiration; cancelled/dismissed editor drafts; Apple Speech capacity and refused reservations; and synthetic URLProtocol fixtures for chunked/declared response limits, `/models` GET discovery and credential-bearing 307/308 redirects. These tests are type-checked only, not executed. Keyboard view teardown, clipboard delivery, Speech asset release and real iOS background expiration still require runtime verification.
 
 ## Not verified
 

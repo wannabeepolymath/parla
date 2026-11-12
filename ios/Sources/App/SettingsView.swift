@@ -175,7 +175,7 @@ struct SettingsView: View {
                     Picker("Keep text & audio", selection: Binding(get: { store.library.preferences.retention }, set: { retention = $0 })) {
                         ForEach(RetentionPolicy.allCases) { policy in Text(policy.title).tag(policy) }
                     }
-                    Text("History keeps the raw, cleaned and final text, plus 16 kHz audio for Retry. Never keeps no dictation history or audio after processing; an active dictation and a temporary delivery result (up to two minutes) still exist. 24-hour deletion runs while Parla is active and at next entry. Notes and vocabulary stay until you delete them.").font(.footnote).foregroundStyle(.secondary)
+                    Text("History keeps the raw, cleaned and final text, plus 16 kHz audio for Retry. Never keeps no dictation history or audio after processing; an active dictation and a temporary delivery result still exist. The delivery result becomes unusable after two minutes and is removed the next time Parla or the Parla keyboard runs. 24-hour deletion runs while Parla is active and at next entry. Notes and vocabulary stay until you delete them.").font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Privacy & help") {
                     Text("Speech is recognized on this iPhone. Text leaves it only when you choose a network cleanup provider. Per-app profiles are not available: an iOS keyboard cannot tell Parla which app you are typing in. No contacts or surrounding text are read.").font(.footnote)
@@ -228,7 +228,7 @@ struct LocalAccountView: View {
                         try store.mutate { $0 = Library() }; try store.sweepAudio()
                         try? FileManager.default.removeItem(at: settings.store.url)
                         settings.reset()
-                        coordinator.lastResult = ""; coordinator.noteDraft = ""; coordinator.route = "Home"
+                        coordinator.lastResult = ""; coordinator.closeNoteEditor(); coordinator.route = "Home"
                     } catch { store.error = error.localizedDescription }
                 }
             }

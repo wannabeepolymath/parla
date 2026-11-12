@@ -70,17 +70,17 @@ struct NoteEditor: View {
                 }.padding(.vertical, 12)
             }.padding(24).background(Color.paper).navigationTitle("Scratchpad").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { cancelOwnedRecording(); dismiss() } }
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { cancelOwnedRecording(); coordinator.closeNoteEditor(); dismiss() } }
                     ToolbarItem(placement: .confirmationAction) { Button("Save") {
                         do { try coordinator.saveDraft(); dismiss() } catch { self.error = error.localizedDescription }
                     }.disabled(coordinator.busy) }
-                }.onAppear { coordinator.noteDraft = note.text; coordinator.draftNoteID = note.id }
+                }.onAppear { coordinator.openNoteEditor(note) }
                 .onChange(of: coordinator.session) { _, session in
                     guard !insertionDone, let session, session.id == dictationID, session.phase == .completed, let text = session.result else { return }
                     coordinator.noteDraft += (coordinator.noteDraft.isEmpty ? "" : "\n") + text
                     insertionDone = true
                 }
-                .onDisappear { cancelOwnedRecording() }
+                .onDisappear { cancelOwnedRecording(); coordinator.closeNoteEditor() }
                 .interactiveDismissDisabled(coordinator.busy)
         }
     }

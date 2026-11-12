@@ -72,6 +72,8 @@ struct ModelsView: View {
     @EnvironmentObject private var downloads: ModelDownloads
     @EnvironmentObject private var coordinator: DictationCoordinator
     @State private var locales: [String] = []
+    @State private var reserved: [String] = []
+    @State private var releasing = false
     @State private var locale = ""
     @State private var preparing: Double??
     @State private var speechMessage: String?
@@ -99,6 +101,7 @@ struct ModelsView: View {
                 guard SpeechTranscriber.isAvailable else { return }
                 locales = await SpeechTranscriber.supportedLocales.map(\.identifier).sorted()
                 locale = s.appleSpeechLocale ?? locales.first { $0 == Locale.current.identifier } ?? locales.first ?? ""
+                await refreshReservations()
             }
     }
     func selected(_ model: ModelCatalog.Model) -> Bool {
@@ -132,24 +135,47 @@ struct ModelsView: View {
             if case .some(let fraction) = preparing {
                 ProgressView(value: fraction ?? 0) { Text("Preparing \(locale)…").font(.caption) }
             } else {
-                Button("Prepare language") { prepare() }.disabled(locale.isEmpty)
+                Button("Prepare language") { prepare() }.disabled(locale.isEmpty || releasing || coordinator.busy || coordinator.isManagingSpeechAssets)
                 if s.recognitionEngine == .appleSpeech, s.appleSpeechLocale == locale { Label("Selected", systemImage: "checkmark.circle.fill").font(.caption) }
                 else { Button("Use Apple Speech") { settings.update { $0.recognitionEngine = .appleSpeech; $0.appleSpeechLocale = locale } }.disabled(!AppleSpeechLocale.isValid(locale)) }
             }
+            ForEach(reserved, id: \.self) { language in
+                HStack {
+                    Text(Locale.current.localizedString(forIdentifier: language) ?? language)
+                    Spacer()
+                    Button("Release", role: .destructive) { release(language) }
+                        .disabled(!AppleSpeechSetup.canRelease(busy: coordinator.busy, preparing: preparing != nil || releasing || coordinator.isManagingSpeechAssets))
+                }.buttonStyle(.borderless)
+            }
             if let speechMessage { Text(speechMessage).font(.footnote).foregroundStyle(.secondary) }
         } header: { Text("Apple Speech") } footer: {
-            Text("Apple's on-device recognizer. Prepare downloads the system language assets; dictation refuses to start recognition until they are installed. Dictionary words are not used as hints.")
+            Text("Apple's on-device recognizer. Prepare downloads the system language assets; dictation refuses to start recognition until they are installed. Dictionary words are not used as hints. Reserved languages stay until you release them here. Release is unavailable while Parla is busy.")
+        }
+    }
+    func refreshReservations() async {
+        do { reserved = try await AppleSpeechNative.assets.observe(locale).reserved.sorted() }
+        catch { speechMessage = (error as? AppleSpeechRefusal)?.message ?? "Reserved languages could not be read." }
+    }
+    func release(_ language: String) {
+        guard AppleSpeechSetup.canRelease(busy: coordinator.busy, preparing: preparing != nil || releasing || coordinator.isManagingSpeechAssets) else { return }
+        releasing = true; coordinator.isManagingSpeechAssets = true
+        Task {
+            speechMessage = await AppleSpeechNative.assets.release(language) ? "Released \(language). Prepare it again before dictating." : "This language could not be released. Try again when Parla is idle."
+            await refreshReservations(); releasing = false; coordinator.isManagingSpeechAssets = false
         }
     }
     func prepare() {
+        guard !coordinator.busy, !coordinator.isManagingSpeechAssets else { return }
         let target = locale
+        coordinator.isManagingSpeechAssets = true
         preparing = .some(nil); speechMessage = nil
         Task {
             do {
                 try await AppleSpeechSetup.prepare(target) { fraction in Task { @MainActor in preparing = .some(fraction) } }
                 speechMessage = "\(target) is ready on this iPhone."
             } catch { speechMessage = (error as? AppleSpeechRefusal)?.message ?? "Language assets could not be prepared." }
-            preparing = nil
+            await refreshReservations()
+            preparing = nil; coordinator.isManagingSpeechAssets = false
         }
     }
 }

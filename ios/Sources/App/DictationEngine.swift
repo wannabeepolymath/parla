@@ -62,7 +62,7 @@ enum DictationEngine {
     }
     static func pipeline(_ settings: Settings, credentials: CredentialStore) -> Pipeline {
         Pipeline(outputSettings: settings, bundleID: nil, failureLogging: .contentFree) {
-            try makeCleanupClient(settings: $0, env: [:], credentials: credentials)
+            try makeCleanupClient(settings: $0, env: [:], credentials: credentials, http: CleanupHTTP())
         }
     }
     /// Desktop floor first (no model load for silence), then `Pipeline.transcript` with its vocabulary hints.
@@ -102,11 +102,105 @@ enum AppleSpeechSetup {
         guard observation.reserved.contains(locale) else { throw AppleSpeechRefusal.reservationUnavailable }
         return AppleSpeechLease(operation: operation ?? PendingOperation(name: "Apple Speech recognition")) {}
     }
-    static func prepare(_ locale: String, progress: @escaping (Double?) -> Void) async throws {
-        let assets = AppleSpeechNative.assets
-        let reserved = try await assets.observe(locale).reserved
-        if !reserved.contains(locale) { _ = try await assets.reserve(locale) }
+    static func prepare(_ locale: String, assets: AppleSpeechAssets = AppleSpeechNative.assets, progress: @escaping (Double?) -> Void) async throws {
+        let observation = try await assets.observe(locale)
+        try observation.validate()
+        if !observation.reserved.contains(locale) {
+            guard observation.reserved.count < observation.capacity else { throw AppleSpeechRefusal.capacity }
+            do {
+                guard try await assets.reserve(locale) else { throw AppleSpeechRefusal.reservationUnavailable }
+            } catch {
+                // Capacity may change between observation and reserve; retain a useful recovery message.
+                if let latest = try? await assets.observe(locale), latest.reserved.count >= latest.capacity { throw AppleSpeechRefusal.capacity }
+                throw error
+            }
+        }
         if let installation = try await assets.installation(locale) { try await installation.download { progress($0.fraction) } }
-        _ = try await installedUse(locale, nil)
+        let ready = try await assets.observe(locale)
+        try ready.validateInstalled()
+        guard ready.reserved.contains(locale) else { throw AppleSpeechRefusal.reservationUnavailable }
+    }
+    static func canRelease(busy: Bool, preparing: Bool) -> Bool { !busy && !preparing }
+}
+
+/// Both completion POSTs and optional /models GETs use the same bounded, redirect-refusing transport.
+struct CleanupHTTP: HTTPPosting {
+    static let maximumResponseBytes = 256 * 1024
+    var configuration: () -> URLSessionConfiguration = { .ephemeral }
+    func post(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        let transfer = CleanupTransfer()
+        var request = request; request.timeoutInterval = min(15, request.timeoutInterval)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { transfer.start(request, configuration: configuration(), continuation: $0) }
+        } onCancel: { transfer.cancel() }
+    }
+}
+
+final class CleanupTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var task: URLSessionDataTask?
+    private var session: URLSession?
+    private var response: HTTPURLResponse?
+    private var body = Data()
+    private var failure: Error?
+    private var cancelled = false
+    func start(_ request: URLRequest, configuration: URLSessionConfiguration, continuation: CheckedContinuation<(Data, URLResponse), Error>) {
+        configuration.httpShouldSetCookies = false; configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil; configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = request.timeoutInterval; configuration.timeoutIntervalForResource = request.timeoutInterval
+        let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
+        let task = lock.withLock {
+            self.continuation = continuation
+            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+            self.session = session
+            let task = session.dataTask(with: request); self.task = task
+            if cancelled { task.cancel() }
+            return task
+        }
+        task.resume()
+    }
+    func cancel() {
+        let task = lock.withLock { cancelled = true; return self.task }
+        task?.cancel()
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        failure = URLError(.httpTooManyRedirects); completionHandler(nil); task.cancel()
+    }
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        completionHandler(challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        self.urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let response = response as? HTTPURLResponse, response.expectedContentLength <= Int64(CleanupHTTP.maximumResponseBytes) else {
+            failure = URLError(.dataLengthExceedsMaximum); completionHandler(.cancel); return
+        }
+        self.response = response; completionHandler(.allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard failure == nil, data.count <= CleanupHTTP.maximumResponseBytes - body.count else {
+            failure = URLError(.dataLengthExceedsMaximum); dataTask.cancel(); return
+        }
+        body.append(data)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if failure == nil { failure = error }
+        session.finishTasksAndInvalidate()
+    }
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        let continuation = lock.withLock { self.task = nil; self.session = nil; defer { self.continuation = nil }; return self.continuation }
+        defer { body = Data() }
+        if lock.withLock({ cancelled }) { continuation?.resume(throwing: CancellationError()) }
+        else if let error = failure ?? error { continuation?.resume(throwing: error) }
+        else if let response { continuation?.resume(returning: (body, response)) }
+        else { continuation?.resume(throwing: URLError(.badServerResponse)) }
     }
 }

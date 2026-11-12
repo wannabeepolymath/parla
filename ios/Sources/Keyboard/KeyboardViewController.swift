@@ -60,6 +60,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated); timer?.invalidate(); timer = nil; deleteTimer?.invalidate(); deleteTimer = nil
+        transcript.text = nil; currentSession = nil; lastRender = ""
     }
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
@@ -76,8 +77,8 @@ final class KeyboardViewController: UIInputViewController {
     }
     private func poll() {
         guard hasFullAccess else { currentSession = nil; render(); return }
-        do { currentSession = try SessionStore().read(); render() }
-        catch { sessionError = "Shared session unavailable. Check Full Access and Parla signing."; render() }
+        do { currentSession = try SessionStore().read(); sessionError = nil; render() }
+        catch { currentSession = nil; sessionError = error.localizedDescription; render() }
     }
     private func button(_ title: String, special: Bool = false, action: @escaping () -> Void) -> UIButton {
         let button = UIButton(type: .system)
@@ -91,9 +92,10 @@ final class KeyboardViewController: UIInputViewController {
         return button
     }
     private func render(force: Bool = false) {
-        let signature = "\(voice)|\(symbols)|\(moreSymbols)|\(shift)|\(caps)|\(hasFullAccess)|\(needsInputModeSwitchKey)|\(textDocumentProxy.documentIdentifier)|\(currentSession?.id.uuidString ?? "")|\(currentSession?.phase.rawValue ?? "")|\(currentSession?.result ?? "")|\(sessionError ?? "")"
+        let signature = "\(voice)|\(symbols)|\(moreSymbols)|\(shift)|\(caps)|\(hasFullAccess)|\(needsInputModeSwitchKey)|\(textDocumentProxy.documentIdentifier)|\(currentSession?.id.uuidString ?? "")|\(currentSession?.phase.rawValue ?? "")|\(currentSession?.generation.uuidString ?? "")|\(currentSession?.result?.utf8.count ?? 0)|\(currentSession?.result?.hashValue ?? 0)|\(currentSession?.error ?? "")|\(sessionError ?? "")"
         guard force || signature != lastRender else { return }; lastRender = signature
         for stack in [panel, keys, actions] { for child in stack.arrangedSubviews { stack.removeArrangedSubview(child); child.removeFromSuperview() } }
+        transcript.text = nil
         if voice { renderVoice() } else { renderTyping() }
         let bottom = UIStackView(); bottom.axis = .horizontal; bottom.spacing = 6; bottom.distribution = .fillProportionally
         let mode = button(voice ? "ABC" : symbols ? "ABC" : "123", special: true) { [weak self] in
@@ -183,6 +185,11 @@ final class KeyboardViewController: UIInputViewController {
                 let progress = UIActivityIndicatorView(style: .medium); progress.startAnimating(); panel.addArrangedSubview(progress)
                 addAction("Cancel") { [weak self] in self?.send(.cancel) }
             case .completed:
+                guard session.result != nil else {
+                    status.text = "Text is ready in Parla"; detail.text = session.error ?? "Open Parla and copy from the app."
+                    addAction("Discard") { [weak self] in self?.discard() }
+                    panel.addArrangedSubview(actions); return
+                }
                 status.text = "Review your dictation"
                 let sameDocument = session.documentID == textDocumentProxy.documentIdentifier
                 detail.text = sameDocument ? "Check the text and cursor. Insert adds text at your current selection." : "The field identity changed. Cancel and request dictation again from this field."
