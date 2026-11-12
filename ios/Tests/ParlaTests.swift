@@ -38,6 +38,7 @@ final class SessionStorageTests: XCTestCase {
     override func setUpWithError() throws {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("parla-unit-tests", isDirectory: true)
         directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         store = SessionStore(file: ProtectedFile(url: directory.appendingPathComponent("session.json"), initial: { SessionEnvelope() }))
     }
     override func tearDownWithError() throws { if let directory { try FileManager.default.removeItem(at: directory) } }
