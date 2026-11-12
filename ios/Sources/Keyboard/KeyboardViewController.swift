@@ -35,6 +35,7 @@ final class KeyboardViewController: UIInputViewController {
     private var sessionError: String?
     private var lastRender = ""
     private var heightConstraint: NSLayoutConstraint?
+    private var isVisible = false
     override func viewDidLoad() {
         super.viewDidLoad()
         hasDictationKey = true
@@ -50,13 +51,20 @@ final class KeyboardViewController: UIInputViewController {
         transcript.font = .systemFont(ofSize: 16); transcript.isEditable = false; transcript.isSelectable = false
         transcript.backgroundColor = UIColor(named: "keyboardKey"); transcript.layer.cornerRadius = 12
         actions.axis = .horizontal; actions.spacing = 10; actions.distribution = .fillEqually
-        render(force: true)
+        // The host's document UUID is not available yet. viewWillAppear's poll renders
+        // after UIKit connects the proxy; reading documentIdentifier here traps.
     }
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        isVisible = true
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in self?.poll() }
         poll()
+    }
+    override func viewWillDisappear(_ animated: Bool) {
+        isVisible = false
+        timer?.invalidate(); timer = nil; deleteTimer?.invalidate(); deleteTimer = nil
+        super.viewWillDisappear(animated)
     }
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated); timer?.invalidate(); timer = nil; deleteTimer?.invalidate(); deleteTimer = nil
@@ -64,6 +72,7 @@ final class KeyboardViewController: UIInputViewController {
     }
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        guard isVisible else { return }
         // Traits and the public document identifier are used; surrounding/selected text is never read.
         if sensitive {
             if let currentSession, currentSession.id == requestID, currentSession.active { send(.cancel) }
@@ -76,6 +85,7 @@ final class KeyboardViewController: UIInputViewController {
         [UITextContentType.password, .newPassword, .oneTimeCode, .creditCardNumber].contains(textDocumentProxy.textContentType ?? UITextContentType(rawValue: ""))
     }
     private func poll() {
+        guard isVisible else { return }
         guard hasFullAccess else { currentSession = nil; render(); return }
         do { currentSession = try SessionStore().read(); sessionError = nil; render() }
         catch { currentSession = nil; sessionError = error.localizedDescription; render() }
@@ -92,7 +102,10 @@ final class KeyboardViewController: UIInputViewController {
         return button
     }
     private func render(force: Bool = false) {
-        let signature = "\(voice)|\(symbols)|\(moreSymbols)|\(shift)|\(caps)|\(hasFullAccess)|\(needsInputModeSwitchKey)|\(textDocumentProxy.documentIdentifier)|\(currentSession?.id.uuidString ?? "")|\(currentSession?.phase.rawValue ?? "")|\(currentSession?.generation.uuidString ?? "")|\(currentSession?.result?.utf8.count ?? 0)|\(currentSession?.result?.hashValue ?? 0)|\(currentSession?.error ?? "")|\(sessionError ?? "")"
+        guard isVisible else { return }
+        // textDidChange forces a redraw for document changes. Reading the host UUID
+        // just to build this cache key can trap during UIKit's disconnect callback.
+        let signature = "\(voice)|\(symbols)|\(moreSymbols)|\(shift)|\(caps)|\(hasFullAccess)|\(needsInputModeSwitchKey)|\(currentSession?.id.uuidString ?? "")|\(currentSession?.phase.rawValue ?? "")|\(currentSession?.generation.uuidString ?? "")|\(currentSession?.result?.utf8.count ?? 0)|\(currentSession?.result?.hashValue ?? 0)|\(currentSession?.error ?? "")|\(sessionError ?? "")"
         guard force || signature != lastRender else { return }; lastRender = signature
         for stack in [panel, keys, actions] { for child in stack.arrangedSubviews { stack.removeArrangedSubview(child); child.removeFromSuperview() } }
         transcript.text = nil
