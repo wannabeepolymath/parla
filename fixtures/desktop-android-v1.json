@@ -18,6 +18,11 @@
     {"input":"a\r\nb", "expected":3}
   ],
   "literal": [
+    {"source":"cat","replacement":"dog","input":"cat❤️","expected":"cat❤️"},
+    {"source":"cat","replacement":"dog","input":"cat❤","expected":"dog❤"},
+    {"source":"cat","replacement":"dog","input":"cat.","expected":"dog."},
+    {"source":"cat","replacement":"dog","input":"cat\u00b2 cat\u2163 cat","expected":"cat\u00b2 cat\u2163 dog"},
+    {"source":"cát́","replacement":"dog","input":"cát́❤️","expected":"cát́❤️"},
     {"source":"café","replacement":"coffee","input":"café cafés","expected":"coffee cafés"},
     {"source":"cat","replacement":"dog","input":"cat cats bob_cat cat!","expected":"dog cats bob_cat dog!"},
     {"source":"e","replacement":"X","input":"é e","expected":"é X"},

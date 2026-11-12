@@ -44,7 +44,10 @@ object TextRules {
         if (key.isEmpty()) return null
         return snippets.filter { WER.normalize(it.trigger) == key }.sortedWith(compareByDescending<Snippet> { it.trigger.countCharacters() }.thenBy { it.trigger.canonical() }).firstOrNull()?.expansion
     }
-    private fun word(cp: Int) = Character.isLetterOrDigit(cp) || Character.getType(cp) in setOf(Character.NON_SPACING_MARK.toInt(), Character.COMBINING_SPACING_MARK.toInt(), Character.ENCLOSING_MARK.toInt(), Character.CONNECTOR_PUNCTUATION.toInt())
+    // Swift's CharacterSet.alphanumerics is L*, M* and N*, plus connector punctuation in Vocabulary.isWord.
+    private val wordTypes = setOf(Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER, Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.ENCLOSING_MARK, Character.CONNECTOR_PUNCTUATION).map { it.toInt() }.toSet()
+    private fun word(cp: Int) = Character.isLetter(cp) || Character.getType(cp) in wordTypes
+    private fun word(grapheme: String) = grapheme.codePoints().anyMatch { word(it) }
     fun replace(text: String, rules: List<LiteralReplacement>): String {
         val sorted = rules.filter { it.source.isNotEmpty() }.sortedByDescending { it.source.countCharacters() }
             .map { it to graphemes.findAll(it.source).map { part -> part.value }.toList() }
@@ -56,8 +59,8 @@ object TextRules {
                 if (i + parts.size > characters.size) false else {
                     val end = characters[i + parts.size - 1].range.last + 1
                     text.substring(start, end).canonical() == r.source.canonical() &&
-                        (!parts.first().codePoints().anyMatch { word(it) } || start == 0 || !word(text.codePointBefore(start))) &&
-                        (!parts.last().codePoints().anyMatch { word(it) } || end == text.length || !word(text.codePointAt(end)))
+                        (!word(parts.first()) || i == 0 || !word(characters[i-1].value)) &&
+                        (!word(parts.last()) || i+parts.size == characters.size || !word(characters[i+parts.size].value))
                 }
             }
             if (match != null) { out.append(match.first.replacement); i += match.second.size }

@@ -32,7 +32,7 @@ internal class LocalState(private val storage: StateStorage) {
         val next = read(); if(blocked) return false
         mutableData.value = next; return true
     }
-    fun original() = storage.read().orEmpty()
+    @Synchronized fun original() = storage.read().orEmpty()
     @Synchronized fun repair(source: String): Boolean = try {
         val next = LocalDataCodec.decode(source)
         storage.preserveOriginal(); storage.write(LocalDataCodec.encode(next))

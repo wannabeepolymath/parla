@@ -57,7 +57,8 @@ class LocalSpeechModelTest {
     @Test fun cancellationSignalsImmediatelyButNativeExitOwnsResourcesAndBlocksNextCall() = runBlocking {
         val dir = Files.createTempDirectory("parla-native-test").toFile()
         val entered = CountDownLatch(1); val exit = CountDownLatch(1); val released = CountDownLatch(1)
-        val canceled = AtomicBoolean(false); val secondStarted = AtomicBoolean(false)
+        val canceled = AtomicBoolean(false); val secondStarted = CountDownLatch(1)
+        val secondSubmitted = CountDownLatch(1); val secondFinished = CompletableDeferred<Unit>()
         val bytes = "fake model".toByteArray(); val m = model(bytes)
         val model = File(dir,"fake.bin").apply { writeBytes(bytes) }; val wav = File(dir,"audio.wav").apply { writeBytes(wav()) }
         val fake = object : SpeechNative {
@@ -74,10 +75,19 @@ class LocalSpeechModelTest {
             val job = launch(Dispatchers.Default) { LocalSpeech(fake).transcribe(wav,model,m,listOf("👋 नमस्ते"),"hi"); published = true }
             assertTrue(withContext(Dispatchers.IO) { entered.await(5,TimeUnit.SECONDS) })
             job.cancelAndJoin(); assertTrue(canceled.get()); assertEquals(1L,released.count)
-            val next = async(Dispatchers.Default) { NativeTasks.run { secondStarted.set(true) } }
-            assertFalse(secondStarted.get()); exit.countDown(); next.await()
+            val next = launch(Dispatchers.Default) {
+                NativeTasks.submit {
+                    secondStarted.countDown()
+                    try { assertEquals("First token must be released before the next native call",0L,released.count); secondFinished.complete(Unit) }
+                    catch(t: Throwable) { secondFinished.completeExceptionally(t) }
+                }
+                secondSubmitted.countDown()
+            }
+            assertTrue(withContext(Dispatchers.IO) { secondSubmitted.await(2,TimeUnit.SECONDS) })
+            assertFalse("A submitted native call must wait for actual exit",withContext(Dispatchers.IO) { secondStarted.await(1,TimeUnit.SECONDS) })
+            exit.countDown(); next.join(); withTimeout(2000) { secondFinished.await() }
             assertTrue(released.await(5,TimeUnit.SECONDS)); assertFalse(published)
-            assertTrue(secondStarted.get())
+            assertEquals(0L,secondStarted.count)
         } finally { exit.countDown(); released.await(5,TimeUnit.SECONDS); dir.deleteRecursively() }
     }
     @Test fun successfulNativeSeamDeliversUnicodeAndStripsMarkersWithoutProvider() = runBlocking {

@@ -3,7 +3,6 @@ package dev.parla.android
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.AtomicFile
 import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -17,16 +16,9 @@ import org.json.JSONObject
 
 /** Successful durable write precedes publication. A failed load gates all writes and provider access. */
 class Store private constructor(context: Context) {
-    private val stateFile = AtomicFile(File(context.filesDir, "parla-data.json"))
-    private val keyFile = AtomicFile(File(context.noBackupFilesDir, "provider-key.enc"))
-    private val local = LocalState(object : StateStorage {
-        override fun read(): String? = if(!stateFile.baseFile.exists() && !File(stateFile.baseFile.path+".bak").exists()) null else stateFile.openRead().bufferedReader().use { it.readText() }
-        override fun write(value: String) { write(stateFile,value.toByteArray()) }
-        override fun preserveOriginal() {
-            val original = stateFile.baseFile
-            if(original.exists()) original.copyTo(File(original.parentFile,"parla-data.pre-repair-${System.currentTimeMillis()}.json"),overwrite = false)
-        }
-    })
+    private val stateFile = DurableFile(File(context.filesDir, "parla-data.json"))
+    private val keyFile = DurableFile(File(context.noBackupFilesDir, "provider-key.enc"))
+    private val local = LocalState(FileStateStorage(stateFile))
     val persistenceError = local.error
     val data = local.data
     val hasKey: Boolean get() = keyFile.baseFile.exists()
@@ -56,7 +48,7 @@ class Store private constructor(context: Context) {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, secretKey())
             val payload = JSONObject().put("scope",scope).put("key",value).toString().toByteArray()
             val encrypted = cipher.doFinal(payload)
-            write(keyFile, byteArrayOf(2, cipher.iv.size.toByte()) + cipher.iv + encrypted)
+            keyFile.write(byteArrayOf(2, cipher.iv.size.toByte()) + cipher.iv + encrypted)
         } catch(_: Exception) { throw IllegalStateException("Key was not saved securely. Re-enter it and save again.") }
     }
     @Synchronized fun readKey(settings: Settings = data.value.settings): String {
@@ -68,7 +60,7 @@ class Store private constructor(context: Context) {
     }
     private fun decryptKey(): Pair<String,String> {
         try {
-            val bytes = keyFile.openRead().use { it.readNBytes(32769) }
+            val bytes = keyFile.read(32769) ?: error("Saved key missing")
             require(bytes.size in 30..32768 && bytes[0].toInt() in 1..2)
             val ivSize = bytes[1].toInt(); require(ivSize == 12 && bytes.size > 2+ivSize+16)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -88,10 +80,6 @@ class Store private constructor(context: Context) {
         }.generateKey()
     }
 
-    private fun write(file: AtomicFile, bytes: ByteArray) {
-        val stream = file.startWrite()
-        try { stream.write(bytes); file.finishWrite(stream) } catch(e: Exception) { file.failWrite(stream); throw e }
-    }
     companion object {
         private const val KEY_ALIAS = "parla-provider-key-v1"
         @Volatile private var instance: Store? = null

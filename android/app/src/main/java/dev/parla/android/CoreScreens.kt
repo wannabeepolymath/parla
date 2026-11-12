@@ -151,10 +151,10 @@ import kotlinx.coroutines.*
     var exportStatus by remember { mutableStateOf("") }
     var markdown by remember { mutableStateOf(false) }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if(uri != null) try {
+        if(uri != null) exportStatus = writeHistoryExport(pending) { payload ->
             val output = context.contentResolver.openOutputStream(uri) ?: error("No writable destination")
-            output.bufferedWriter().use { it.write(pending) }; exportStatus = "History exported"
-        } catch(_: Exception) { exportStatus = "Export failed. Saved history is unchanged; choose a writable destination." }
+            output.bufferedWriter().use { it.write(payload) }
+        }
         pending = ""
     }
     Column {
@@ -162,8 +162,10 @@ import kotlinx.coroutines.*
         Row { Text("Markdown export"); Switch(markdown,{ markdown = it }) }
         Row {
             TextButton(onClick = {
-                val intent = Intent(Intent.ACTION_SEND).setType(if(markdown) "text/markdown" else "text/plain").putExtra(Intent.EXTRA_TEXT,exportHistory(rows,markdown))
-                context.startActivity(Intent.createChooser(intent,"Share text history"))
+                exportStatus = shareHistory(exportHistory(rows,markdown)) { text ->
+                    val intent = Intent(Intent.ACTION_SEND).setType(if(markdown) "text/markdown" else "text/plain").putExtra(Intent.EXTRA_TEXT,text)
+                    context.startActivity(Intent.createChooser(intent,"Share text history"))
+                }
             }) { Text("Share history") }
             TextButton(onClick = { pending = exportHistory(rows,markdown); export.launch(if(markdown) "parla-history.md" else "parla-history.txt") }) { Text("Export file") }
         }

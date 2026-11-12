@@ -107,7 +107,7 @@ internal class TransferStorage(directory: File, private val catalog: List<Speech
     val files by lazy { PrivateFiles(directory) }
     var fault: (String) -> Unit = {}
     fun journal(m: SpeechModel) = files.file("${m.id}.transfer.json")
-    fun read(m: SpeechModel): TransferCheckpoint? {
+    fun read(m: SpeechModel, allowMissingStage: Boolean = false): TransferCheckpoint? {
         require(m in catalog)
         if(!files.exists(journal(m))) return null
         val j = JSONObject(files.read(journal(m),4096).toString(Charsets.UTF_8))
@@ -118,7 +118,7 @@ internal class TransferStorage(directory: File, private val catalog: List<Speech
         require(c.matches(m) && c.offset in 0..m.bytes && Regex("part-[0-9a-f-]{36}").matches(c.stage)) { "Checkpoint identity is invalid; installed model preserved." }
         UUID.fromString(c.stage.removePrefix("part-")); UUID.fromString(c.generation)
         if(files.exists(files.file(c.stage))) require(files.attributes(files.file(c.stage),m.bytes).size() >= c.offset) { "Checkpoint is incomplete; installed model preserved." }
-        else require(c.offset == m.bytes) { "Partial model missing; installed model preserved." }
+        else require(allowMissingStage || c.offset == m.bytes) { "Partial model missing; installed model preserved." }
         return c
     }
     fun save(c: TransferCheckpoint, m: SpeechModel, permit: TransferPermit, previousGeneration: String? = c.generation) {
@@ -132,7 +132,7 @@ internal class TransferStorage(directory: File, private val catalog: List<Speech
     }
     private fun cleanupScratch(permit: TransferPermit) {
         // Only after the previous writer drains, on an explicit action. Preserve unknown/invalid provenance.
-        val referenced = catalog.mapNotNull { read(it)?.stage }.toSet()
+        val referenced = catalog.mapNotNull { read(it,allowMissingStage = true)?.stage }.toSet()
         val scratch = Regex("(?:chunk-[0-9a-f-]{36}\\.tmp|journal-[0-9a-f-]{36}\\.tmp|part-[0-9a-f-]{36})")
         val maximum = catalog.maxOf { it.bytes }
         for(name in files.names()) if(scratch.matches(name) && name !in referenced) {
@@ -142,7 +142,9 @@ internal class TransferStorage(directory: File, private val catalog: List<Speech
     }
     fun prepare(m: SpeechModel, generation: String, permit: TransferPermit): TransferCheckpoint {
         cleanupScratch(permit)
-        val old = read(m)
+        var old = read(m,allowMissingStage = true)
+        // A valid journal whose incomplete partial is gone (e.g. an older Discard ordering died midway) has nothing to resume.
+        if(old != null && old.offset < m.bytes && !files.exists(files.file(old.stage))) { permit.commit { finish(m) }; old = null }
         if(old != null) {
             val c = old.copy(generation = generation)
             if(files.exists(files.file(c.stage))) files.channel(files.file(c.stage),m.bytes,true).use { it.truncate(c.offset); it.force(true) }
@@ -173,8 +175,8 @@ internal class TransferStorage(directory: File, private val catalog: List<Speech
     }
     fun finish(m: SpeechModel) { files.remove(journal(m)) }
     fun discard(m: SpeechModel) {
-        val c = read(m) ?: return
-        files.remove(files.file(c.stage)); finish(m)
+        val c = read(m,allowMissingStage = true) ?: return
+        finish(m); fault("discard"); files.remove(files.file(c.stage))
     }
 }
 data class ModelTransfer(val id: String = "", val bytes: Long = 0, val active: Boolean = false, val message: String = "", val paused: Boolean = false, val pausable: Boolean = true)

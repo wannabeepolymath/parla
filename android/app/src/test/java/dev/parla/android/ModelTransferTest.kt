@@ -37,6 +37,36 @@ class ModelTransferTest {
             assertTrue(resumed.transfer.value.message.contains("Select explicitly"))
         } finally { root.deleteRecursively() }
     }
+    @Test fun interruptedDiscardWithMissingPartialAllowsFreshDownloads() = runTest {
+        val root = dir(); val other = model.copy(id = "other")
+        try {
+            val storage = TransferStorage(root,listOf(model,other))
+            val legacy = { // Old discard died after deleting the partial but before its journal.
+                val c = storage.prepare(model,UUID.randomUUID().toString(),TransferPermit())
+                storage.files.atomic(storage.journal(model),c.copy(offset = 4,validator = TransferValidator("etag","\"revision1\"")).encode())
+                storage.files.remove(storage.files.file(c.stage)); c
+            }
+            val checkpoint = legacy()
+            assertTrue(runCatching { storage.read(model) }.isFailure)
+            val m = ModelManager(root,ModelTransport { q,f,_ -> partial(q,f) },StandardTestDispatcher(testScheduler),listOf(model,other),4)
+            m.discard(model); assertNull(storage.read(model))
+            legacy() // Without an explicit Discard, other downloads and Resume/Download of the same model still proceed.
+            m.download(other); m.waitForExit(); assertArrayEquals(bytes,m.file(other).readBytes())
+            m.download(model); m.waitForExit(); assertArrayEquals(bytes,m.file(model).readBytes())
+            // A new interrupted discard leaves only an orphan, which explicit scratch cleanup removes.
+            val orphaned = storage.prepare(model,UUID.randomUUID().toString(),TransferPermit())
+            storage.fault = { if(it == "discard") error("Interrupted discard") }
+            assertTrue(runCatching { storage.discard(model) }.isFailure)
+            assertFalse(storage.journal(model).exists()); assertTrue(File(root,orphaned.stage).exists())
+            storage.fault = {}
+            m.download(other); m.waitForExit(); assertFalse(File(root,orphaned.stage).exists())
+            // Unknown provenance is deliberately preserved, even during explicit Discard.
+            val unknown = checkpoint.copy(hash = "0".repeat(64))
+            storage.files.atomic(storage.journal(model),unknown.encode())
+            assertTrue(runCatching { storage.discard(model) }.isFailure)
+            assertTrue(storage.journal(model).exists())
+        } finally { root.deleteRecursively() }
+    }
     @Test fun cancellationBeforeDispatchSettlesAndNeverCallsTransport() = runTest {
         val root = dir(); var calls = 0
         try {

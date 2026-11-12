@@ -11,6 +11,8 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.UUID
 
+internal fun syncDirectory(directory: File) { FileChannel.open(directory.toPath(),READ).use { it.force(true) } }
+
 /** Only app-private, regular, singly linked leaves. Unknown files are never swept. */
 internal class PrivateFiles(val root: File) {
     private val path = root.toPath().toAbsolutePath().normalize()
@@ -53,7 +55,7 @@ internal class PrivateFiles(val root: File) {
     fun read(file: File, maximum: Int): ByteArray = channel(file,maximum.toLong()).use { c ->
         val b = ByteBuffer.allocate(c.size().toInt()); while(b.hasRemaining()) require(c.read(b) >= 0); b.array()
     }
-    fun syncDirectory() { FileChannel.open(path,READ).use { it.force(true) } }
+    fun syncDirectory() = syncDirectory(root)
     fun publish(temp: File, destination: File) {
         attributes(temp,Long.MAX_VALUE)
         if(exists(destination)) attributes(destination,Long.MAX_VALUE)
