@@ -174,7 +174,7 @@ final class KeyboardViewController: UIInputViewController {
         panel.addArrangedSubview(status); panel.addArrangedSubview(detail)
         status.textColor = UIColor(named: "keyboardText"); detail.textColor = UIColor(named: "keyboardText")
         if sensitive {
-            status.text = "Use Apple’s keyboard for this field"; detail.text = "Voice handoff is unavailable for sensitive input."; return
+            status.text = "Use Apple’s keyboard for this field"; detail.text = "Dictation is unavailable in password and payment fields."; return
         }
         guard hasFullAccess else {
             status.text = "Allow Full Access for voice"
@@ -185,16 +185,16 @@ final class KeyboardViewController: UIInputViewController {
             switch session.phase {
             case .requested:
                 status.text = "Open Parla to start"
-                detail.text = "Open Parla manually, tap Start microphone, then return here. No automatic app switch or return is promised."
+                detail.text = "Open Parla, tap Start microphone, then return to this app."
                 addAction("Cancel") { [weak self] in self?.send(.cancel) }
             case .recording:
                 panel.insertArrangedSubview(waveform, at: 0)
                 status.text = "Listening"
-                detail.text = "Parla owns the microphone · Up to 5 minutes"
+                detail.text = "Recording in Parla · Up to 5 minutes"
                 addAction("Cancel") { [weak self] in self?.send(.cancel) }
                 addAction("✓ Stop") { [weak self] in self?.send(.stop) }
             case .processing:
-                status.text = "Transcribing on iPhone…"; detail.text = "Waiting for the app. If it was suspended, open Parla."
+                status.text = "Transcribing on iPhone…"; detail.text = "Open Parla if your text is taking too long."
                 let progress = UIActivityIndicatorView(style: .medium); progress.startAnimating(); panel.addArrangedSubview(progress)
                 addAction("Cancel") { [weak self] in self?.send(.cancel) }
             case .completed:
@@ -205,7 +205,7 @@ final class KeyboardViewController: UIInputViewController {
                 }
                 status.text = "Review your dictation"
                 let sameDocument = session.documentID == textDocumentProxy.documentIdentifier
-                detail.text = sameDocument ? "Check the text and cursor. Insert adds text at your current selection." : "The field identity changed. Cancel and request dictation again from this field."
+                detail.text = sameDocument ? "Check the text and cursor. Insert adds text at your current selection." : "You are in a different text field. Cancel and start dictation again here."
                 transcript.text = session.result; transcript.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true; panel.addArrangedSubview(transcript)
                 addAction("Discard") { [weak self] in self?.discard() }
                 if sameDocument { addAction("Insert once") { [weak self] in self?.insertReviewed() } }
@@ -219,12 +219,12 @@ final class KeyboardViewController: UIInputViewController {
                 addAction("New dictation") { [weak self] in self?.request() }
             }
         } else if let session = currentSession, session.active {
-            status.text = "Another session is active"
-            detail.text = "Open Parla to manage it, or cancel it here. This keyboard will not insert another request’s text."
-            addAction("Cancel session") { [weak self] in self?.send(.cancel, session: session) }
+            status.text = "Another dictation is active"
+            detail.text = "Finish the other dictation in Parla, or cancel it here. Its text will not be inserted here."
+            addAction("Cancel dictation") { [weak self] in self?.send(.cancel, session: session) }
         } else {
             status.text = "Think it. Speak it."
-            detail.text = sessionError ?? "Request dictation, then open Parla manually to activate the microphone. Return here to stop and review."
+            detail.text = sessionError ?? "Request dictation, then open Parla and tap Start microphone. Return here to stop and review."
             addAction("Request dictation") { [weak self] in self?.request() }
         }
         panel.addArrangedSubview(actions)

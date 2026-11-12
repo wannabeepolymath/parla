@@ -19,24 +19,24 @@ final class ProtectedFile<Value: Codable> {
         let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else { throw ParlaError.message("Local storage is unavailable.") }
         defer { flock(descriptor, LOCK_UN); close(descriptor) }
-        guard flock(descriptor, LOCK_EX) == 0 else { throw ParlaError.message("Could not coordinate local storage.") }
+        guard flock(descriptor, LOCK_EX) == 0 else { throw ParlaError.message("Could not access saved data. Try again.") }
         var value: Value
         var previous: Data?
         if FileManager.default.fileExists(atPath: url.path) {
             let size = maximumBytes == nil ? nil : try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
             if let maximumBytes, (size ?? .max) > maximumBytes {
-                guard replacesOversized else { throw ParlaError.message("Shared result is too large. Open Parla and copy from the app.") }
+                guard replacesOversized else { throw ParlaError.message("This text is too long for the keyboard. Open Parla and copy from the app.") }
                 try FileManager.default.removeItem(at: url); value = initial()
             } else {
                 let data = try Data(contentsOf: url); previous = data
-                if let maximumBytes, data.count > maximumBytes { throw ParlaError.message("Shared result is too large. Open Parla and copy from the app.") }
+                if let maximumBytes, data.count > maximumBytes { throw ParlaError.message("This text is too long for the keyboard. Open Parla and copy from the app.") }
                 value = try JSONDecoder().decode(Value.self, from: data)
             }
         } else { value = initial() }
         let result = try body(&value)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(value)
-        if let maximumBytes, data.count > maximumBytes { throw ParlaError.message("Shared session is too large. Open Parla and copy from the app.") }
+        if let maximumBytes, data.count > maximumBytes { throw ParlaError.message("This dictation is too long for the keyboard. Open Parla and copy from the app.") }
         guard previous != data else { return result }
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         var protectedURL = url
@@ -49,7 +49,7 @@ enum SharedContainer {
     static var groupID: String { Bundle.main.object(forInfoDictionaryKey: "ParlaAppGroup") as? String ?? "group.dev.parla.ios" }
     static func file() throws -> ProtectedFile<SessionEnvelope> {
         guard let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) else {
-            throw ParlaError.message("App Group unavailable. Check signing and Full Access in Settings.")
+            throw ParlaError.message("Parla and its keyboard could not connect. If you are using the keyboard, enable Allow Full Access in iPhone Settings → General → Keyboard → Keyboards → Parla, then reopen Parla.")
         }
         return ProtectedFile(url: root.appendingPathComponent("session-v1.json"), maximumBytes: SharedResult.maximumEnvelopeBytes,
                             replacesOversized: !Bundle.main.bundlePath.hasSuffix(".appex"), initial: { SessionEnvelope() })

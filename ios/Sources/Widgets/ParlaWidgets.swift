@@ -29,7 +29,7 @@ struct ParlaWidget: Widget {
                 }
                 if entry.session?.phase == .recording { Text("Open Parla for current status").font(.caption2) }
             }.containerBackground(Color("hexF8F6FF"), for: .widget).widgetURL(URL(string: "parla://home"))
-        }.configurationDisplayName("Parla").description("Open Parla or stop the recording session shown here. Widget status may be delayed.").supportedFamilies([.systemSmall, .systemMedium])
+        }.configurationDisplayName("Parla").description("Open Parla or stop the recording shown here. Widget status may be delayed.").supportedFamilies([.systemSmall, .systemMedium])
     }
 }
 struct ParlaLiveActivity: Widget {
@@ -66,7 +66,7 @@ struct ParlaRecordingControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: "dev.parla.ios.recording-control") {
             ControlWidgetButton(action: StartRecordingIntent()) { Label("Record with Parla", systemImage: "mic") }
-        }.displayName("Start Parla").description("Opens Parla and starts a recording with an active Live Activity.")
+        }.displayName("Start Parla").description("Opens Parla and starts recording. Requires Live Activities to be enabled.")
     }
 }
 @main struct ParlaWidgetBundle: WidgetBundle {

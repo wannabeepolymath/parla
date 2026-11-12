@@ -40,14 +40,14 @@ import ParlaCore
             try library.prepareDirectories(); try library.sweepAudio()
             if let stale = try SessionStore().read(), [.recording, .processing].contains(stale.phase) {
                 try SessionStore().update(id: stale.id, generation: stale.generation) {
-                    $0.phase = .failed; $0.error = "The previous session ended when Parla stopped. Start a new dictation."; $0.result = nil
+                    $0.phase = .failed; $0.error = "The previous dictation ended when Parla closed. Start a new dictation."; $0.result = nil
                 }
             }
             session = try SessionStore().read()
         } catch { message = error.localizedDescription }
         let staleActivities = Activity<RecordingActivity>.activities
         Task { for activity in staleActivities { await activity.end(nil, dismissalPolicy: .immediate) } }
-        capture.onInvalidated = { [weak self] in self?.cancel(reason: "Recording stopped because the audio route changed or was interrupted. Start again when ready.") }
+        capture.onInvalidated = { [weak self] in self?.cancel(reason: "Recording stopped because the microphone changed or another app interrupted it. Start again when ready.") }
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
     }
     func foreground() {
@@ -265,7 +265,7 @@ import ParlaCore
             if !busy { session = current }
             maintenanceCounter += 1
             if maintenanceCounter >= 150 { maintenanceCounter = 0; try library.reload(); try library.sweepAudio() }
-        } catch { if busy { cancel(reason: "Shared session storage became unavailable. Recording was cancelled.") } }
+        } catch { if busy { cancel(reason: "Parla could not save this dictation. Recording was cancelled. Please try again.") } }
     }
     private func endActivity() {
         activityMonitor?.cancel(); activityMonitor = nil

@@ -7,7 +7,7 @@ private enum IntentExecution {
 
 struct StopRecordingIntent: LiveActivityIntent {
     static var title: LocalizedStringResource = "Stop Parla recording"
-    static var description = IntentDescription("Stop the active Parla session and transcribe it. Open Parla if iOS has suspended processing.")
+    static var description = IntentDescription("Stop recording and turn your speech into text. Open Parla if your text is taking too long.")
     @Parameter(title: "Session ID") var sessionID: String?
     @Parameter(title: "Generation") var generation: String?
     init() {}
@@ -44,7 +44,7 @@ struct CancelRecordingIntent: LiveActivityIntent {
 }
 struct StartRecordingIntent: AudioRecordingIntent {
     static var title: LocalizedStringResource = "Start Parla recording"
-    static var description = IntentDescription("Open Parla and start a foreground recording. Requires microphone permission, a downloaded speech model, and Live Activities.")
+    static var description = IntentDescription("Open Parla and start recording. Requires microphone permission, a downloaded speech model, and Live Activities.")
     static var openAppWhenRun: Bool { true }
     @MainActor func perform() async throws -> some IntentResult {
         #if PARLA_APP
@@ -71,7 +71,7 @@ struct ToggleRecordingIntent: AudioRecordingIntent {
 }
 struct DictateToClipboardIntent: AudioRecordingIntent {
     static var title: LocalizedStringResource = "Quick dictation to clipboard"
-    static var description = IntentDescription("Open Parla to record. Stop in Parla or its Live Activity. Text is copied while the app is foreground; otherwise open Parla and tap Copy.")
+    static var description = IntentDescription("Open Parla to record. Stop in Parla or its Live Activity. Text is copied while Parla is open. Otherwise, open Parla and tap Copy.")
     static var openAppWhenRun: Bool { true }
     @MainActor func perform() async throws -> some IntentResult {
         #if PARLA_APP
@@ -122,7 +122,7 @@ struct TextToNoteIntent: AppIntent {
 }
 struct SaveNoteIntent: AppIntent {
     static var title: LocalizedStringResource = "Save current Parla note"
-    static var description = IntentDescription("Save the current unsaved editor draft in Parla. A draft must already be open in this app process.")
+    static var description = IntentDescription("Save the current unsaved editor draft in Parla. Open a note in Parla first.")
     static var openAppWhenRun: Bool { true }
     @MainActor func perform() async throws -> some IntentResult {
         #if PARLA_APP

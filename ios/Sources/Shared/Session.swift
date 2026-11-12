@@ -55,7 +55,7 @@ struct SessionStore {
     init(file: ProtectedFile<SessionEnvelope>) { self.file = file }
     func read(now: Date = Date()) throws -> DictationSession? {
         try file.transaction { state in
-            guard state.schema == 1 else { throw ParlaError.message("Shared session format is unsupported. Update all Parla targets together.") }
+            guard state.schema == 1 else { throw ParlaError.message("Parla and its keyboard need the same app version. Update Parla and try again.") }
             state.session?.expire(now: now)
             if var session = state.session { SharedResult.limit(&session); state.session = session }
             return state.session
