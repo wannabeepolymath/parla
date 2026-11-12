@@ -1,0 +1,6 @@
+// Swift `import whisper` for the ParlaCore target. Relative to this directory:
+// the pinned whisper.cpp v1.9.1 sources the Android app vendors (read-only here).
+module whisper {
+  header "../../../../android/native/vendor/whisper/include/whisper.h"
+  export *
+}

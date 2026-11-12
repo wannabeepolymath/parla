@@ -1,0 +1,15 @@
+# Optional text cleanup contract
+
+Speech recognition is local whisper.cpp v1.9.1. There is no cloud-ASR endpoint, multipart audio upload, transcription model setting, API-key recording prerequisite or cloud fallback.
+
+`ApiClient.generate` is text-only. `Pipeline.clean` first handles raw, locked whole-utterance snippets and cleanup-off locally, so those paths never read a key or construct a provider request. Settings are frozen before capture. Package-to-category classification happens locally and only fixed category instructions reach the provider. Arbitrary editor contents, package IDs and browser URLs are absent.
+
+- Anthropic uses fixed `https://api.anthropic.com/v1/messages`, `x-api-key`, `anthropic-version: 2023-06-01`, desktop `PromptBuilder` system/user messages and 4096 max tokens (8192 for explicit transforms). New settings default to desktop `claude-haiku-4-5`.
+- OpenAI-compatible uses `{canonical HTTPS base}/chat/completions`, optional Bearer key, explicit model, `max_completion_tokens: 4096`, system/user messages and server-default sampling. Android requires an explicit model; desktop's optional `/models` discovery and HTTP/keyless localhost support are not implemented. HTTPS keyless endpoints are usable without an Authorization header.
+- Apple Intelligence is explicitly unavailable, never replaced silently by a remote call.
+
+The canonical credential scope includes provider and full endpoint base; userinfo, query, fragment and non-HTTPS production endpoints are rejected. Redirects are disabled. Saving a new endpoint explicitly rebinds a surviving key after local review; a load error or an unbound legacy key cannot authorize a request. Requests have a cancellable 15-second total deadline. Response bodies are bounded at 2MiB. Provider error bodies are not displayed or logged.
+
+Anthropic `max_tokens`, `model_context_window_exceeded`, `refusal`, and OpenAI-compatible `length`, `content_filter` or nonempty refusal metadata reject even nonempty output. Ordinary cleanup strips one unambiguous wrapping quote pair, rejects empty text, applies the snippet-aware 2×+200 ceiling and the ≥80-character shortening floor, then applies one-pass literal replacements. Cleanup failure preserves original words and shows a warning. Explicit transforms trim only, use no snippets/literal replacements and enforce a max(2000,6×source) limit. No provider requests are made in automated verification except local mock responses.
+
+Model downloads use a completely separate fresh unauthenticated HTTPS client. They never receive provider credentials or shared provider interceptors. Allowlisted HTTPS redirects rebuild requests without Authorization/cookies/credentials. Private transfer checkpoints, bounded Range/If-Range and exact Content-Range/validator checks support explicit Pause/Resume/Discard. Their exact size/hash gate and atomic replacement are independent of text-provider configuration. Recovery playback/retranscription is local-only and never calls this text client.

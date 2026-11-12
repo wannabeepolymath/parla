@@ -1,0 +1,39 @@
+{
+  "product": "parla",
+  "package": "dev.parla.android",
+  "versionName": "1.2.0",
+  "versionCode": 3,
+  "file": "parla-android-1.2.0-debug.apk",
+  "sha256": "4aa1e4711e27fed141bbc99c2bc14a8764e27189cfefa2613277ec231aa74ebf",
+  "size": 29608493,
+  "signature": "Android debug APK; v2 verified",
+  "checks": {
+    "unitTests": {
+      "tests": 44,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "lint": {
+      "Error": 0,
+      "Fatal": 0,
+      "Warning": 15
+    },
+    "build": "BUILD SUCCESSFUL; debug assembly and androidTest Kotlin compilation pass",
+    "devices": "NOT RUN; testing stopped",
+    "liveApi": "NOT RUN"
+  },
+  "solReview": {
+    "verdict": "APPROVE",
+    "rounds": 2,
+    "provider": "codex-snabbit",
+    "model": "gpt-6.1-sol",
+    "reasoningEffort": "high",
+    "resolved": [
+      "S1 error-state Cancel dispatch"
+    ],
+    "openFindings": [],
+    "usage": "not exposed"
+  },
+  "runtime": "NOT TESTED; Gboard coexistence, microphone and insertion unverified"
+}

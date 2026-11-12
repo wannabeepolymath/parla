@@ -1,0 +1,4 @@
+// Set these three values for your provisioning team. All targets inherit them.
+DEVELOPMENT_TEAM =
+PARLA_BUNDLE_PREFIX = dev.parla.ios
+PARLA_APP_GROUP = group.dev.parla.ios

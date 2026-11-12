@@ -1,0 +1,11 @@
+Original embedded font metadata: eb_garamond_italic_variable_font_wght.ttf
+
+Copyright 2017 The EB Garamond Project Authors (https://github.com/octaviopardo/EBGaramond12)
+
+Georg Duffner
+
+Georg Duffner and Octavio Pardo
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: http://scripts.sil.org/OFL
+
+http://scripts.sil.org/OFL

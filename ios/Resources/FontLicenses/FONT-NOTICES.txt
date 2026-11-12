@@ -1,0 +1,31 @@
+Font attribution from each bundled font file's name table. The three SIL Open Font License texts are included alongside this notice. Fonts are unmodified.
+
+EBGaramond-Italic-VariableFont_wght.ttf
+SHA256 2c1f95cd8d40451838b7b091f4e4e177c263ae2cff0fd9839dae22d5e74cf1f7
+Copyright 2017 The EB Garamond Project Authors (https://github.com/octaviopardo/EBGaramond12)
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: http://scripts.sil.org/OFL
+http://scripts.sil.org/OFL
+
+EBGaramond-VariableFont_wght.ttf
+SHA256 34e2fe3366a93e503f3d2f3388de811ba208cbd62c298daa9f97ed114f5c9c5b
+Copyright 2017 The EB Garamond Project Authors (https://github.com/octaviopardo/EBGaramond12)
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: http://scripts.sil.org/OFL
+http://scripts.sil.org/OFL
+
+Figtree-Italic-VariableFont_wght.ttf
+SHA256 94bda60cfc0df1ae1142b01c813ef900fdc8cde11ca5bd62082dfb22ef8b2816
+Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://openfontlicense.org
+https://openfontlicense.org
+
+Figtree-VariableFont_wght.ttf
+SHA256 1851150b35645dab3a4ef935a349a2d1f5373221c0d5b6993d145210766c54de
+Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://openfontlicense.org
+https://openfontlicense.org
+
+Manrope-VariableFont_wght.ttf
+SHA256 42814a407491bfe54e4bfbc51ff6500d39445e49cc3feedea984cb5a768b04aa
+Copyright 2019 The Manrope Project Authors (https://github.com/sharanda/manrope)
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: http://scripts.sil.org/OFL
+http://scripts.sil.org/OFL

@@ -1,0 +1,28 @@
+{
+  "package": "dev.flow.android",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "file": "flow-android-1.0.0-debug.apk",
+  "sha256": "c3eea5a79a13f7100eaecf97ae4309729ed0fa5ef004c83ec9fab3c0d37c4ed1",
+  "size": 29688428,
+  "signature": "Android debug APK; v2 signature verified",
+  "unitTests": 35,
+  "lintWarnings": 15,
+  "solReview": {
+    "verdict": "APPROVE",
+    "rounds": 2,
+    "provider": "codex-snabbit",
+    "model": "gpt-6.1-sol",
+    "reasoningEffort": "high",
+    "usage": "not exposed",
+    "resolved": [
+      "S1",
+      "S2",
+      "S3",
+      "S4"
+    ],
+    "declined": []
+  },
+  "runtimeParity": "unverified; original Google Play launch error",
+  "installation": "Play Protect block unresolved; screenshot confirms sensitive-data warning; device details unknown"
+}

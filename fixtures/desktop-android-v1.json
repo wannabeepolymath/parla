@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "normalization": [
+    {"input":"Four hundred and twenty dollars", "expected":"420 dollar"},
+    {"input":"$420", "expected":"420 dollar"},
+    {"input":"the twenty first", "expected":"the 21"},
+    {"input":"1,250 pounds", "expected":"1250 pound"},
+    {"input":"nine thirty", "expected":"9 30"},
+    {"input":"twenty twenty four", "expected":"20 24"},
+    {"input":"Don’t STOP!", "expected":"don't stop"},
+    {"input":"नमस्ते दुनिया", "expected":"नमस्ते दुनिया"}
+  ],
+  "length": [
+    {"input":"é", "expected":1},
+    {"input":"👨‍👩‍👧‍👦", "expected":1},
+    {"input":"🇮🇳", "expected":1},
+    {"input":"👍🏽", "expected":1},
+    {"input":"a\r\nb", "expected":3}
+  ],
+  "literal": [
+    {"source":"café","replacement":"coffee","input":"café cafés","expected":"coffee cafés"},
+    {"source":"cat","replacement":"dog","input":"cat cats bob_cat cat!","expected":"dog cats bob_cat dog!"},
+    {"source":"e","replacement":"X","input":"é e","expected":"é X"},
+    {"source":"क","replacement":"X","input":"कि क","expected":"कि X"},
+    {"source":"hello","replacement":"👋 नमस्ते","input":"hello Hello","expected":"👋 नमस्ते Hello"}
+  ],
+  "snippets": [
+    {"trigger":"twenty one","expansion":"Locked 👋","input":"21!","expected":"Locked 👋"},
+    {"trigger":"my email","expansion":"me@example.test","input":"MY EMAIL.","expected":"me@example.test"}
+  ]
+}

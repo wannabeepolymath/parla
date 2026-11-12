@@ -1,0 +1,39 @@
+{
+  "product": "parla",
+  "package": "dev.parla.android",
+  "versionName": "1.1.0",
+  "versionCode": 2,
+  "file": "parla-android-1.1.0-debug.apk",
+  "sha256": "7a63ee7822de538f028a4e0ea99c7aded42fdbb14ce8d24ecb49885eee8bd54b",
+  "size": 29431947,
+  "signature": "Android debug APK; v2 verified",
+  "checks": {
+    "unitTests": {
+      "tests": 43,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "lint": {
+      "Error": 0,
+      "Fatal": 0,
+      "Warning": 13
+    },
+    "checks": "BUILD SUCCESSFUL; unit tests, lint, debug assembly and androidTest Kotlin compilation",
+    "deviceTests": "NOT RUN; testing remains stopped",
+    "liveApi": "NOT RUN"
+  },
+  "solReview": {
+    "verdict": "APPROVE",
+    "rounds": 2,
+    "provider": "codex-snabbit",
+    "model": "gpt-6.1-sol",
+    "reasoningEffort": "high",
+    "resolved": [
+      "S1 microphone eligibility refresh"
+    ],
+    "openFindings": [],
+    "usage": "not exposed"
+  },
+  "runtime": "keyboard has not been installed/tested on a device"
+}

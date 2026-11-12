@@ -1,0 +1,16 @@
+.gradle/
+.kotlin/
+local.properties
+**/build/
+*.hprof
+.cxx/
+native/whisper-v1.9.1.tar.gz
+
+# Local records and binaries; never committed (incl. third-party reference APKs).
+evidence/
+releases/
+*.apk
+tools/reference-installer/
+.idea/workspace.xml
+.idea/caches/
+.idea/deviceManager.xml

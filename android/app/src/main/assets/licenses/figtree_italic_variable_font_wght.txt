@@ -1,0 +1,9 @@
+Original embedded font metadata: figtree_italic_variable_font_wght.ttf
+
+Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)
+
+Erik Kennedy
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://openfontlicense.org
+
+https://openfontlicense.org
