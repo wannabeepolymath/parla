@@ -91,6 +91,9 @@ final class UpdateController {
             switch outcome {
             case .upToDate: hud.show(.notice("You're up to date"))
             case .failed: hud.show(.error("Couldn't check for updates"))
+            // The update line only appears in the menu; say so, or the click looks like it did nothing.
+            case .available(let update) where !isBusy:
+                hud.show(.notice("Parla \(update.version) is available — open the Parla menu to update"))
             case .available, .throttled: break
             }
         }
