@@ -27,6 +27,22 @@ class AudioRecoveryTest {
         fun store(limit: Long = 128L*1024*1024, remover: (File) -> Unit = { Files.delete(it.toPath()) }) = RecordingStore(File(root,"recordings"),{ data },{ now },limit,remover)
         fun close() { root.deleteRecursively() }
     }
+    @Test fun recoveryStorageWorksThroughParentAlias() {
+        val f = Fixture()
+        try {
+            val target = File(f.root,"actual").apply { mkdir() }
+            val alias = File(f.root,"alias")
+            Files.createSymbolicLink(alias.toPath(),target.toPath())
+            val store = RecordingStore(File(alias,"recordings"),{ f.data },{ f.now })
+            assertTrue(store.descriptors().isEmpty()); assertNull(store.error.value)
+            val capture = store.stash(f.audio,false)!!; store.release(capture)
+            assertNull(store.descriptors().single().reason)
+            val reader = store.acquire(capture.file.name)
+            store.validate(reader); store.release(reader)
+            assertEquals(1,store.clear().removed)
+            assertTrue(store.descriptors().isEmpty()); assertNull(store.error.value)
+        } finally { f.close() }
+    }
     @Test fun migrationRequiresExistingUsersToOptInAndRetentionIsIndependentOfTextHistory() {
         assertTrue(Settings().recoveryAudioEnabled); assertEquals(7,Settings().recoveryAudioDays)
         for(version in 1..2) {

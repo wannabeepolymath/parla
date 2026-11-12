@@ -18,6 +18,21 @@ class ModelTransferTest {
     private val bytes = "synthetic-model!".toByteArray()
     private val model = SpeechModel("synthetic","Synthetic",bytes.size.toLong(),MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
     private fun dir() = Files.createTempDirectory("parla-transfer-test").toFile().canonicalFile
+    @Test fun downloadsAndVerifiesThroughParentAlias() = runTest {
+        val parent = dir()
+        try {
+            val target = File(parent,"actual").apply { mkdir() }
+            val alias = File(parent,"alias")
+            Files.createSymbolicLink(alias.toPath(),target.toPath())
+            val root = File(alias,"models")
+            val manager = ModelManager(root,ModelTransport { r,f,_ -> partial(r,f) },StandardTestDispatcher(testScheduler),listOf(model),4)
+            assertNull(manager.storage.read(model))
+            manager.download(model); manager.waitForExit()
+            assertArrayEquals(bytes,manager.file(model).readBytes())
+            assertNull(manager.storage.read(model))
+            assertTrue(manager.transfer.value.message.contains("Tap Select"))
+        } finally { parent.deleteRecursively() }
+    }
     private fun partial(request: TransferRequest, chunk: File, tag: String = "\"revision1\""): TransferResponse {
         chunk.writeBytes(bytes.copyOfRange(request.start.toInt(),request.end.toInt()+1))
         return TransferResponse(206,mapOf("Content-Range" to "bytes ${request.start}-${request.end}/${model.bytes}","ETag" to tag))

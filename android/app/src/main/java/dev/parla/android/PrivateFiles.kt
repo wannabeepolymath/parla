@@ -19,13 +19,14 @@ internal class PrivateFiles(val root: File) {
     private val identity: Any?
     init {
         Files.createDirectories(path)
-        require(path == path.toRealPath()) { "Private folder aliases are refused." }
+        // System aliases above the private folder are allowed; the folder itself must not be a link.
+        require(!Files.isSymbolicLink(path)) { "Private folder aliases are refused." }
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwx------"))
         identity = Files.readAttributes(path,BasicFileAttributes::class.java,NOFOLLOW_LINKS).fileKey()
     }
     fun checkRoot() {
         val a = Files.readAttributes(path,BasicFileAttributes::class.java,NOFOLLOW_LINKS)
-        require(a.isDirectory && a.fileKey() == identity && path == path.toRealPath()) { "Private folder changed." }
+        require(a.isDirectory && a.fileKey() == identity) { "Private folder changed." }
     }
     fun file(name: String): File {
         checkRoot(); require(Regex("[A-Za-z0-9._-]{1,120}").matches(name) && name !in setOf(".","..")) { "Unexpected private filename." }
