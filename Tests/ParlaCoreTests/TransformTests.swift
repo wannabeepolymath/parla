@@ -131,7 +131,7 @@ final class TransformTests: XCTestCase {
                 XCTAssertEqual(result.text, "cat\nnext"); XCTAssertNil(result.failure); XCTAssertEqual(calls, 0)
                 let m = DictationSession(), (session, landed) = try pending(m, s, target: target)
                 let fx = m.handle(.cleanReady(session, landed, text: result.text, failure: nil, focus: target.focus))
-                XCTAssertTrue(fx.contains(.insertText("cat next", historyEnabled: true)))
+                XCTAssertTrue(inserts(fx, "cat next", history: true))
             }
         }
     }
@@ -433,7 +433,7 @@ final class TransformTests: XCTestCase {
             for mode in [DictationOutputMode.raw, .selectedPreset] {
                 let machine = DictationSession(), (dictation, landed) = try pending(machine, settings(mode: mode, history: enabled))
                 let result = machine.handle(.cleanReady(dictation, landed, text: "result", failure: nil, focus: .editable))
-                XCTAssertTrue(result.contains(.insertText("result", historyEnabled: enabled)))
+                XCTAssertTrue(inserts(result, "result", history: enabled))
             }
         }
     }
@@ -448,4 +448,8 @@ final class TransformTests: XCTestCase {
         XCTAssertEqual(snapshot?.promptTokens, 4); XCTAssertEqual(snapshot?.completionTokens, 5)
     }
 
+    /// Undo attaches the original words to typed dictations; these tests check only text and History policy.
+    private func inserts(_ fx: [DictationSession.Effect], _ text: String, history: Bool) -> Bool {
+        fx.contains { if case .insertText(let t, let h, _) = $0 { return t == text && h == history }; return false }
+    }
 }

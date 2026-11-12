@@ -8,7 +8,7 @@ struct NativePreparationView: View {
             Picker("Speech engine", selection: $model.settings.recognitionEngine) {
                 Text("Whisper").tag(RecognitionEngine.whisper)
                 Text("Apple Speech").tag(RecognitionEngine.appleSpeech)
-                if model.settings.recognitionEngine == .parakeet || model.parakeetChoiceRefusal == nil {
+                if model.settings.recognitionEngine == .parakeet || (!model.parakeetUnavailable && model.parakeetChoiceRefusal == nil) {
                     Text("Parakeet").tag(RecognitionEngine.parakeet)
                 }
                 if model.settings.recognitionEngine == .invalid { Text("Choose an engine").tag(RecognitionEngine.invalid) }

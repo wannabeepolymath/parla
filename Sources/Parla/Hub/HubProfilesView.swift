@@ -120,7 +120,7 @@ private struct ProfileEditor: View {
                         Text("Same as global").tag(Optional<RecognitionEngine>.none)
                         Text("Whisper").tag(Optional(RecognitionEngine.whisper))
                         Text("Apple Speech").tag(Optional(RecognitionEngine.appleSpeech))
-                        if profile.recognitionEngine == .parakeet || model.parakeetProfileChoiceRefusal == nil {
+                        if profile.recognitionEngine == .parakeet || (!model.parakeetUnavailable && model.parakeetProfileChoiceRefusal == nil) {
                             Text("Parakeet").tag(Optional(RecognitionEngine.parakeet))
                         }
                         if profile.recognitionEngine == .invalid { Text("Choose an engine").tag(Optional(RecognitionEngine.invalid)) }

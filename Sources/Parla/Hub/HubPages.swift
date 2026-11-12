@@ -34,7 +34,7 @@ struct GeneralPage: View {
                     Picker("", selection: $model.settings.recognitionEngine) {
                         Text("Whisper").tag(RecognitionEngine.whisper)
                         Text("Apple Speech").tag(RecognitionEngine.appleSpeech)
-                        if model.settings.recognitionEngine == .parakeet || model.parakeetChoiceRefusal == nil {
+                        if model.settings.recognitionEngine == .parakeet || (!model.parakeetUnavailable && model.parakeetChoiceRefusal == nil) {
                     Text("Parakeet").tag(RecognitionEngine.parakeet)
                 }
                 if model.settings.recognitionEngine == .invalid { Text("Choose an engine").tag(RecognitionEngine.invalid) }
@@ -845,6 +845,8 @@ struct PrivacyPage: View {
                 }
             }.disabled(model.loadError != nil)
 
+            // Release builds ship without App Intents metadata, so Shortcuts can't see Parla's actions.
+            if Bundle.main.url(forResource: "Metadata", withExtension: "appintents") != nil {
             HubSection("Shortcuts app") {
                 HubRow("Allow Shortcuts to dictate", detail: "Shortcuts receive the text; nothing is pasted. The last result is kept in memory for up to 5 minutes.") {
                     Toggle("", isOn: $model.settings.automationEnabled).toggleStyle(.switch).labelsHidden()
@@ -854,6 +856,7 @@ struct PrivacyPage: View {
                     Button("Clear") { model.onClearAutomationResult() }.buttonStyle(HubButtonStyle())
                 }
             }.disabled(model.loadError != nil)
+            }
 
             HubRecoveryView(model: model)
             HubDiagnosticsView(model: model)

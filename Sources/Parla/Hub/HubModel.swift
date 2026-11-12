@@ -67,7 +67,8 @@ final class HubModel: ObservableObject {
     }
     /// Only "not offered here" hides the Parakeet section; busy/transient refusals keep its progress and Cancel visible.
     var parakeetUnavailable: Bool {
-        [.releaseIntegrity, .terms, .trustedProduct, .unsupportedHost].contains(parakeetChoiceRefusal)
+        // Builds without the Parakeet product (every normal release) never offer it.
+        ParakeetProductBuildInput.expected == nil || [.releaseIntegrity, .terms, .trustedProduct, .unsupportedHost].contains(parakeetChoiceRefusal)
     }
     var parakeetProfileChoiceRefusal: ParakeetInstallationRefusal? {
         guard loadError == nil, saveError == nil else { return .configuration }

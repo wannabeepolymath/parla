@@ -71,6 +71,7 @@ import XCTest
         ParakeetAudioEntry.reconcile(r.settings, valid: true, owner: r.owner)
         await r.wait()
         XCTAssertNil(hub.parakeetChoiceRefusal, "A real Install attempt is meaningful before ready")
+        if ParakeetProductBuildInput.expected == nil { XCTAssertTrue(hub.parakeetUnavailable, "Builds without the Parakeet product never show its section") }
         let id: ParakeetPreparation.TargetID
         if profile {
             var value = DictationProfile(); value.name = "PRIVATE_PROFILE"; value.target = "com.g2b.editor"
