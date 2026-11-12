@@ -16,6 +16,19 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     ndkVersion = "27.1.12297006"
+    val uploadKeystore = System.getenv("PARLA_UPLOAD_KEYSTORE")
+    val uploadPassword = System.getenv("PARLA_UPLOAD_PASSWORD")
+    if (!uploadKeystore.isNullOrBlank() && !uploadPassword.isNullOrBlank()) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(uploadKeystore)
+                storePassword = uploadPassword
+                keyAlias = "upload"
+                keyPassword = uploadPassword
+            }
+        }
+        buildTypes.getByName("release").signingConfig = signingConfigs.getByName("release")
+    }
     externalNativeBuild { cmake { path = file("../native/CMakeLists.txt"); version = "3.22.1" } }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
