@@ -153,7 +153,12 @@ public final class SecurityCredentialBackend: CredentialBackend {
     /// LAContext/kSecUseAuthenticationUIFail do not stop the login-keychain
     /// "wants to access key" dialog (an item saved by a differently signed build).
     /// This process-wide switch does: such reads fail as .denied instead of prompting.
-    static let keychainUIDisabled: Void = { _ = SecKeychainSetUserInteractionAllowed(false) }()
+    /// macOS only: iOS has no login-keychain access dialog (and no such API).
+    static let keychainUIDisabled: Void = {
+        #if os(macOS)
+        _ = SecKeychainSetUserInteractionAllowed(false)
+        #endif
+    }()
     private func query(_ scope: CredentialScope, interactive: Bool) -> [String: Any] {
         Self.keychainUIDisabled
         let context = LAContext(); context.interactionNotAllowed = !interactive

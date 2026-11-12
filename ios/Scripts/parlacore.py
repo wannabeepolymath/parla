@@ -10,7 +10,7 @@ CleanupFactory CleanupFailover Credentials Diagnostics Eval GuidedTemplate Histo
 ModelCatalog MouseInput OpenAICompatClient ParakeetInstallation ParakeetModelManifest ParakeetProcess ParakeetRecognition
 ParakeetWire ParakeetWorker PendingOperation Pipeline PreparationBuild Profiles RecognitionFactory RecognitionIdentity
 RecognitionPreparation RecognitionPreviewPlan RecognitionRequest RecognitionSegments RecordingStore
-ScratchpadDictionaryConfiguration Settings Streaming TextRules Trace Transcriber Transforms Vocabulary VocabularyTransfer'''.split()
+ScratchpadDictionaryConfiguration Settings Streaming TextRules Trace Transcriber SurroundingTextContext Transforms Vocabulary VocabularyTransfer'''.split()
 CORE_DIR = '../Sources/ParlaCore'
 SHIM = 'Sources/Core/ParlaCoreIOS.swift'
 MODULE_MAP_DIR = 'Sources/Core/whisper'

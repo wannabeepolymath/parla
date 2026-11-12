@@ -335,7 +335,7 @@ public final class SettingsStore {
         }
     }
     private func decodeSavedSnapshot() throws -> Settings {
-        if let documentIO {
+        if documentIO != nil {
             guard let data = try optionalSettingsBytes() else { throw SavedSnapshotFailure.missing }
             return try JSONDecoder().decode(Settings.self, from: data)
         }
