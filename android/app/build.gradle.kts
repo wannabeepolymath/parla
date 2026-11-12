@@ -10,7 +10,7 @@ android {
         minSdk = 33
         targetSdk = 36
         versionCode = 4
-        versionName = "1.3.0-dev"
+        versionName = "1.3.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild { cmake { arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON" } }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
