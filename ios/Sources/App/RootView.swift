@@ -79,7 +79,7 @@ struct SessionBanner: View {
                 Button("Cancel", role: .cancel) { coordinator.cancel() }
             }
             if coordinator.session?.phase == .requested && !coordinator.isStarting {
-                Text("Start the microphone here, then return to the app you were using. Parla can record for up to 5 minutes; iOS may interrupt it.").font(.footnote)
+                Text("Start here, then return to your app. Up to 5 minutes.").font(.footnote)
                 Button("Start microphone") { coordinator.start(pending: coordinator.session) }.buttonStyle(ParlaButtonStyle())
             } else if coordinator.recording {
                 HStack { Waveform(active: true); Spacer(); Button("Stop & transcribe") { coordinator.stop() }.fontWeight(.semibold) }
