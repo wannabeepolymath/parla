@@ -27,18 +27,18 @@ data class Snippet(val id: String = UUID.randomUUID().toString(), val trigger: S
 data class LiteralReplacement(val source: String, val replacement: String)
 data class TransformPreset(val id: String = UUID.randomUUID().toString(), val name: String, val kind: String = "rewrite", val instruction: String = "", val targetLanguage: String = "") {
     fun validate() {
-        require(name.trim().toByteArray().size in 1..120) { "Preset name must contain 1–120 UTF-8 bytes." }
+        require(name.trim().toByteArray().size in 1..120) { "Enter a short preset name (up to 120 English characters; fewer for some languages)." }
         require(kind in setOf("rewrite", "translation"))
-        require((if (kind == "rewrite") instruction.trim() else targetLanguage.trim()).toByteArray().size in 1..(if (kind == "rewrite") 8192 else 120)) { "Enter a valid rewrite instruction (8192 bytes) or translation target (120 bytes)." }
+        require((if (kind == "rewrite") instruction.trim() else targetLanguage.trim()).toByteArray().size in 1..(if (kind == "rewrite") 8192 else 120)) { "Enter rewrite instructions or a language to translate into. Shorten the text if it is too long." }
     }
     val intent get() = if (kind == "translation") "Translate the source text into this explicitly chosen target language: ${targetLanguage.trim()}. Preserve its meaning." else instruction.trim()
 }
 data class AppProfile(val id: String = UUID.randomUUID().toString(), val name: String, val target: String, val enabled: Boolean = true, val cleanup: String = "inherit", val style: String = "", val language: String = "", val localModel: String = "", val cleanupModel: String = "", val vocabulary: List<String> = emptyList()) {
     fun validate() {
-        require(name.isNotBlank() && Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+").matches(target)) { "Enter a name and exact Android package ID." }
+        require(name.isNotBlank() && Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+").matches(target)) { "Enter a name and an app package name, such as com.whatsapp." }
         require(cleanup in setOf("inherit", "on", "off") && style in setOf("", "standard", "conversational", "formal"))
-        require(vocabulary.all { it.toByteArray().size <= 256 })
-        require(language.isEmpty() || language == "auto" || language in SpeechLanguages.codes) { "Choose a supported spoken language code." }
+        require(vocabulary.all { it.toByteArray().size <= 256 }) { "A priority word is too long. Shorten it and try again." }
+        require(language.isEmpty() || language == "auto" || language in SpeechLanguages.codes) { "Enter a supported language code, such as en, or auto to detect it." }
         require(localModel.isEmpty() || ModelCatalog.all.any { it.id == localModel })
     }
 }

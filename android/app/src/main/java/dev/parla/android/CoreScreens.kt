@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -16,7 +17,7 @@ import kotlinx.coroutines.*
 @Composable private fun CorePage(content: @Composable ColumnScope.() -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(24.dp),verticalArrangement = Arrangement.spacedBy(14.dp),content = content)
 }
-@Composable private fun Choice(label: String, selected: Boolean, select: () -> Unit) { Row { RadioButton(selected,select); TextButton(onClick = select) { Text(label) } } }
+@Composable private fun Choice(label: String, selected: Boolean, select: () -> Unit) { Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(selected,select); TextButton(onClick = select) { Text(label) } } }
 @Composable private fun Field(value: String, change: (String) -> Unit, label: String) { OutlinedTextField(value,change,label = { Text(label) },modifier = Modifier.fillMaxWidth()) }
 
 @Composable internal fun ModelsScreen(store: Store) {
@@ -29,38 +30,37 @@ import kotlinx.coroutines.*
     var error by remember { mutableStateOf("") }
     var revision by remember { mutableIntStateOf(0) }
     CorePage {
-        Text("On-device speech",style = MaterialTheme.typography.headlineMedium)
-        Text("Choose a model and download it explicitly. No provider key is used. English models only recognize English; Large v3 Turbo supports multiple languages. Downloads are file sizes, not runtime memory requirements. Compatibility, speed, memory use and accuracy depend on your device; these models are not qualified on Android hardware yet.")
+        Text("Speech models",style = MaterialTheme.typography.headlineMedium)
+        Text("Download a model to transcribe on your device. No API key is needed. Base and Small support English; Large v3 Turbo supports multiple languages. Speed and accuracy vary by device, and Android compatibility is still being tested.")
         Text(state.message)
         if(error.isNotEmpty()) Text(error,color = MaterialTheme.colorScheme.error)
         if(state.active && state.pausable) {
             val total = ModelCatalog.all.firstOrNull { it.id == state.id }?.bytes ?: 1
             LinearProgressIndicator(progress = { (state.bytes.toFloat()/total).coerceIn(0f,1f) },modifier = Modifier.fillMaxWidth())
-            Text("${state.bytes} / $total bytes")
+            Text("${fileSizeLabel(state.bytes)} of ${fileSizeLabel(total)}")
             Button(onClick = manager::pause) { Text("Pause") }
-            TextButton(onClick = { ModelCatalog.all.firstOrNull { it.id == state.id }?.let(manager::discard) }) { Text("Discard after writer stops") }
+            TextButton(onClick = { ModelCatalog.all.firstOrNull { it.id == state.id }?.let(manager::discard) }) { Text("Discard download") }
         }
         for(model in ModelCatalog.all) {
             val installed = revision.let { state.let { manager.file(model).isFile } }
             val row = rows[model.id]
-            HorizontalDivider(); Text(model.name,style = MaterialTheme.typography.titleMedium)
-            Text("${model.bytes} bytes · ${if(model.id == data.settings.localModel) "Selected" else "Not selected"} · ${if(installed) "On disk (verified before use)" else "Not installed"}")
-            Text("SHA-256: ${model.sha256}",style = MaterialTheme.typography.bodySmall)
-            if(row != null) Text("${row.message} · ${row.bytes} / ${model.bytes} committed bytes")
+            HorizontalDivider(); Text(speechModelLabel(model.id),style = MaterialTheme.typography.titleMedium)
+            Text("${fileSizeLabel(model.bytes)} · ${if(model.id == data.settings.localModel) "Selected" else "Not selected"} · ${if(installed) "Downloaded" else "Not downloaded"}")
+            if(row != null) Text("${row.message} · ${fileSizeLabel(row.bytes)} of ${fileSizeLabel(model.bytes)}")
             Row {
                 Button(onClick = { manager.download(model) },enabled = !state.active) { Text(if(row?.paused == true) "Resume" else if(installed) "Download again" else "Download") }
                 if(row?.paused == true) TextButton(onClick = { manager.discard(model) },enabled = !state.active) { Text("Discard") }
                 TextButton(onClick = { scope.launch {
-                    error = "Verifying…"
+                    error = "Checking model…"
                     try {
                         NativeTasks.run { ModelCatalog.verify(manager.file(model),model) }
-                        if(store.update { it.copy(settings = it.settings.copy(localModel = model.id)) }) error = "Verified and selected" else error = "Selection was not saved"
-                    } catch(e: Exception) { error = e.message.orEmpty() }
+                        if(store.update { it.copy(settings = it.settings.copy(localModel = model.id)) }) error = "Model selected" else error = "Selection was not saved"
+                    } catch(e: Exception) { error = "Could not update this model. Check storage or download it again." }
                 } },enabled = installed && !state.active) { Text("Select") }
-                TextButton(onClick = { scope.launch { try { manager.delete(model); revision++ } catch(e: Exception) { error = e.message.orEmpty() } } },enabled = installed && !state.active) { Text("Delete") }
+                TextButton(onClick = { scope.launch { try { manager.delete(model); revision++ } catch(e: Exception) { error = "Could not update this model. Check storage or download it again." } } },enabled = installed && !state.active) { Text("Delete") }
             }
         }
-        Text("Pause waits for the writer/native operation to exit. Private checkpoints survive process death as paused; Resume and Discard are explicit. Range/validator changes may require a safe full restart. Installed bytes are replaced only after exact size and SHA-256 verification. Selection never changes automatically.",style = MaterialTheme.typography.bodySmall)
+        Text("Downloads use storage and may use mobile data. Models need extra memory while running. Interrupted downloads stay paused until you resume them. Discard removes an unfinished download, keeping any installed model. After downloading, tap Select to use it.",style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -72,11 +72,13 @@ import kotlinx.coroutines.*
     fun save(settings: Settings) { if(!store.update { it.copy(settings = settings) }) message("Settings were not saved") }
     CorePage {
         Text("Output settings",style = MaterialTheme.typography.headlineMedium)
-        listOf("cleanup","raw","selectedPreset").forEach { mode -> Choice(mode,data.settings.outputMode == mode) { save(data.settings.copy(outputMode = mode)) } }
-        Text("Raw bypasses AI, snippets and literal rules. Cleanup-off still uses locked snippets and local literal rules. Presets are explicit transforms: no snippets or literal rules.")
-        Row { Text("Optional AI cleanup"); Switch(data.settings.cleanupEnabled,{ save(data.settings.copy(cleanupEnabled = it)) }) }
-        listOf("standard","conversational","formal").forEach { style -> Choice(style,data.settings.style == style) { save(data.settings.copy(style = style)) } }
-        HorizontalDivider(); Text("Saved rewrite / translation presets",style = MaterialTheme.typography.titleMedium)
+        listOf("cleanup","raw","selectedPreset").forEach { mode -> Choice(outputLabel(mode),data.settings.outputMode == mode) { save(data.settings.copy(outputMode = mode)) } }
+        Text("Clean up speech uses snippets and word replacements, even with AI cleanup off. As spoken skips these changes. Saved presets rewrite or translate without snippets or replacements.")
+        Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) { Text("AI cleanup",Modifier.weight(1f)); Switch(data.settings.cleanupEnabled,{ save(data.settings.copy(cleanupEnabled = it)) }) }
+        Text("AI cleanup and presets send text to your chosen provider. Set up an API connection to use them.")
+        Text("Writing style",style = MaterialTheme.typography.titleMedium)
+        listOf("standard","conversational","formal").forEach { style -> Choice(styleLabel(style),data.settings.style == style) { save(data.settings.copy(style = style)) } }
+        HorizontalDivider(); Text("Saved presets",style = MaterialTheme.typography.titleMedium)
         data.presets.forEach { preset ->
             Choice(preset.name,data.settings.selectedPresetID == preset.id) { save(data.settings.copy(selectedPresetID = preset.id)) }
             Row {
@@ -85,17 +87,17 @@ import kotlinx.coroutines.*
             }
         }
         Button(onClick = { editing = null; name = ""; instruction = ""; target = ""; kind = "rewrite"; adding = true }) { Text("Add preset") }
-        HorizontalDivider(); Text("Literal replacements",style = MaterialTheme.typography.titleMedium)
-        Text("Exact, case-sensitive, word boundaries, longest match, one pass. Locked whole-utterance snippets bypass these rules.")
+        HorizontalDivider(); Text("Word replacements",style = MaterialTheme.typography.titleMedium)
+        Text("Replace whole words or phrases with matching capitalization. Longer matches take priority. Snippets used on their own stay unchanged.")
         data.replacements.forEachIndexed { index,rule -> Row { Text("${rule.source} → ${rule.replacement}",Modifier.weight(1f)); TextButton(onClick = { store.update { it.copy(replacements = it.replacements.filterIndexed { i,_ -> i != index }) } }) { Text("Delete") } } }
-        Field(source,{ source = it },"Exact source"); Field(replacement,{ replacement = it },"Replacement (may be empty)")
+        Field(source,{ source = it },"Word or phrase"); Field(replacement,{ replacement = it },"Replace with (blank removes it)")
         Button(onClick = { if(store.update { it.copy(replacements = it.replacements + LiteralReplacement(source,replacement)) }) { source = ""; replacement = "" } },enabled = source.isNotEmpty()) { Text("Add replacement") }
     }
-    if(adding) AlertDialog(onDismissRequest = { adding = false },title = { Text("Saved explicit transform") },text = {
+    if(adding) AlertDialog(onDismissRequest = { adding = false },title = { Text("Save a preset") },text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
             Field(name,{ name = it },"Name")
-            listOf("rewrite","translation").forEach { value -> Choice(value,kind == value) { kind = value } }
-            if(kind == "rewrite") Field(instruction,{ instruction = it },"Instruction (up to 8192 UTF-8 bytes)") else Field(target,{ target = it },"Target language")
+            listOf("rewrite","translation").forEach { value -> Choice(presetLabel(value),kind == value) { kind = value } }
+            if(kind == "rewrite") Field(instruction,{ instruction = it },"How should the text change?") else Field(target,{ target = it },"Target language")
         }
     },confirmButton = { TextButton(onClick = {
         try {
@@ -110,8 +112,8 @@ import kotlinx.coroutines.*
     var name by remember { mutableStateOf("") }; var target by remember { mutableStateOf("") }; var cleanup by remember { mutableStateOf("inherit") }; var style by remember { mutableStateOf("") }; var language by remember { mutableStateOf("") }; var model by remember { mutableStateOf("") }; var cleanupModel by remember { mutableStateOf("") }; var words by remember { mutableStateOf("") }
     fun edit(p: AppProfile?) { editing = p; name = p?.name.orEmpty(); target = p?.target.orEmpty(); cleanup = p?.cleanup ?: "inherit"; style = p?.style.orEmpty(); language = p?.language.orEmpty(); model = p?.localModel.orEmpty(); cleanupModel = p?.cleanupModel.orEmpty(); words = p?.vocabulary?.joinToString("\n").orEmpty(); adding = true }
     CorePage {
-        Text("Exact-app profiles",style = MaterialTheme.typography.headlineMedium)
-        Text("The first saved enabled exact package match wins. Blank fields inherit globals. Vocabulary is prepended in saved order. Site profiles are unavailable: Android does not provide trusted URL metadata. No screen scraping is used.")
+        Text("App profiles",style = MaterialTheme.typography.headlineMedium)
+        Text("Customize dictation for an app. Blank fields use your defaults. If profiles overlap, the first enabled match is used. Profile vocabulary has priority over your dictionary. Website profiles are not available on Android.")
         data.profiles.forEach { p ->
             Text("${p.name} · ${p.target}")
             Row { Switch(p.enabled,{ enabled -> store.update { it.copy(profiles = it.profiles.map { row -> if(row.id == p.id) row.copy(enabled = enabled) else row }) } }); TextButton(onClick = { edit(p) }) { Text("Edit") }; TextButton(onClick = { store.update { it.copy(profiles = it.profiles.filterNot { row -> row.id == p.id }) } }) { Text("Delete") } }
@@ -119,13 +121,14 @@ import kotlinx.coroutines.*
         Button(onClick = { edit(null) }) { Text("Add app profile") }
     }
     if(adding) AlertDialog(onDismissRequest = { adding = false },title = { Text("App profile") },text = { Column(Modifier.verticalScroll(rememberScrollState())) {
-        Field(name,{ name = it },"Name"); Field(target,{ target = it },"Exact Android package")
-        listOf("inherit","on","off").forEach { c -> Choice("Cleanup: $c",cleanup == c) { cleanup = c } }
-        listOf("","standard","conversational","formal").forEach { c -> Choice("Style: ${c.ifEmpty { "inherit" }}",style == c) { style = c } }
-        Field(language,{ language = it },"Spoken language code; blank inherits, auto follows speaker")
-        (listOf("")+ModelCatalog.all.map { it.id }).forEach { c -> Choice("Speech model: ${c.ifEmpty { "inherit" }}",model == c) { model = c } }
-        Field(cleanupModel,{ cleanupModel = it },"Text cleanup model; blank inherits")
-        Field(words,{ words = it },"Priority vocabulary, one per line")
+        Field(name,{ name = it },"Name"); Field(target,{ target = it },"App package name (e.g. com.whatsapp)")
+        listOf("inherit","on","off").forEach { c -> Choice("AI cleanup: ${cleanupLabel(c)}",cleanup == c) { cleanup = c } }
+        listOf("","standard","conversational","formal").forEach { c -> Choice("Style: ${styleLabel(c)}",style == c) { style = c } }
+        Field(language,{ language = it },"Language code (optional)")
+        Text("For example, en for English or auto to detect the language. Leave blank to use your default.")
+        (listOf("")+ModelCatalog.all.map { it.id }).forEach { c -> Choice("Speech model: ${speechModelLabel(c)}",model == c) { model = c } }
+        Field(cleanupModel,{ cleanupModel = it },"AI model ID (optional)")
+        Field(words,{ words = it },"Priority words, one per line")
     } },confirmButton = { TextButton(onClick = {
         try {
             val p = AppProfile(id = editing?.id ?: java.util.UUID.randomUUID().toString(),name = name.trim(),target = target.trim(),enabled = editing?.enabled ?: true,cleanup = cleanup,style = style,language = language.trim(),localModel = model,cleanupModel = cleanupModel.trim(),vocabulary = words.lines().filter { it.isNotBlank() }).also { it.validate() }
@@ -138,11 +141,11 @@ import kotlinx.coroutines.*
     var source by remember { mutableStateOf("") }
     CorePage {
         Text("Data recovery",style = MaterialTheme.typography.headlineMedium)
-        Text("Unreadable settings block writes and provider requests. Reload after repairing the file externally, or load its original JSON below and explicitly repair it. Repair preserves original bytes in a private dated pre-repair file. Credentials are never included. No reset or uninstall is needed.")
-        Button(onClick = { message(if(store.reload()) "Data reloaded" else "Still unreadable; original preserved") }) { Text("Reload from disk") }
-        Button(onClick = { try { source = store.recoverySource() } catch(_: Exception) { message("Could not read original file. Check storage/access.") } }) { Text("Load original JSON for repair") }
-        Field(source,{ source = it },"Repaired local JSON")
-        Button(onClick = { message(if(store.repair(source)) "Repair saved; original copy retained" else "Repair failed; original retained") },enabled = source.isNotBlank()) { Text("Validate and save repair") }
+        Text("If saved data cannot be read, saving and AI cleanup are paused. Reload after fixing the file, or edit its JSON below. Saving a repair keeps a dated private copy of the original. API keys are not included. You do not need to uninstall.")
+        Button(onClick = { message(if(store.reload()) "Data reloaded" else "Data still cannot be read. Original kept.") }) { Text("Reload saved data") }
+        Button(onClick = { try { source = store.recoverySource() } catch(_: Exception) { message("Could not read the original file. Check device storage.") } }) { Text("Load original data") }
+        Field(source,{ source = it },"Data to repair (JSON)")
+        Button(onClick = { message(if(store.repair(source)) "Repair saved. Original copy kept." else "Repair failed. Original copy kept.") },enabled = source.isNotBlank()) { Text("Save repair") }
     }
 }
 @Composable internal fun HistoryExportControls(rows: List<HistoryEntry>) {
@@ -159,7 +162,7 @@ import kotlinx.coroutines.*
     }
     Column {
         if(exportStatus.isNotEmpty()) Text(exportStatus)
-        Row { Text("Markdown export"); Switch(markdown,{ markdown = it }) }
+        Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) { Text("Export as Markdown",Modifier.weight(1f)); Switch(markdown,{ markdown = it }) }
         Row {
             TextButton(onClick = {
                 exportStatus = shareHistory(exportHistory(rows,markdown)) { text ->
@@ -205,48 +208,48 @@ import kotlinx.coroutines.*
     fun stop() { playback.stop(); playing = null }
     CorePage {
         Text("Recovery audio",style = MaterialTheme.typography.headlineMedium)
-        Text("Failed/interrupted recognition stays local for ${data.settings.recoveryAudioDays} days; retention is ${if(data.settings.recoveryAudioEnabled) "on" else "off for new captures"}. Text history is independent. Audio is excluded from backup; maximum 300 seconds per file, 128MiB total / 128 files. Ordinary dictation success disposes its audio. Retranscription keeps its source until Delete, Clear or expiry.")
-        Text("Retranscribe freezes current global model, language and priority vocabulary. It runs local ASR only: no provider, cleanup or insertion. Save requires text history on and uses its current ${data.settings.historyLimit}-row count limit.")
+        Text("Failed or interrupted recordings are kept on this device for ${data.settings.recoveryAudioDays} days. Saving new recordings is ${if(data.settings.recoveryAudioEnabled) "on" else "off"}. Audio is never uploaded or backed up. Successful, canceled and private recordings are removed.")
+        Text("Retranscribe uses your current speech model, language and dictionary on this device. It does not use AI cleanup or insert text. Recordings stay until you delete them or they expire. Storage is limited to 5 minutes per recording and 134 MB or 128 files.")
         if(state.message.isNotEmpty()) Text(state.message)
         error?.let { Text(it,color = MaterialTheme.colorScheme.error) }
         Row {
-            TextButton(onClick = { refresh++ }) { Text("Refresh / expire") }
+            TextButton(onClick = { refresh++ }) { Text("Refresh") }
             TextButton(onClick = { stop() },enabled = playing != null) { Text("Stop playback") }
             TextButton(onClick = { clear = true }) { Text("Clear audio") }
         }
         if(state.activeID != null) {
-            Text(if(state.stopping) "Waiting for reader exit…" else "Local retranscription running…")
+            Text(if(state.stopping) "Stopping…" else "Transcribing on device…")
             Button(onClick = recovery::cancel,enabled = !state.stopping) { Text("Cancel retranscription") }
         }
-        if(rows.isEmpty()) Text("No failed recovery audio available.")
+        if(rows.isEmpty()) Text("No recordings to recover.")
         rows.forEach { row ->
             HorizontalDivider()
             Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(row.created)))
-            Text("${row.seconds?.let { "%.1f seconds".format(it) } ?: "Duration unavailable"} · ${row.bytes} bytes")
-            Text("Expires: ${row.expires?.let { java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it)) } ?: "Repair settings to determine expiry"}")
+            Text("${row.seconds?.let { "%.1f seconds".format(it) } ?: "Duration unavailable"} · ${fileSizeLabel(row.bytes)}")
+            Text("Expires: ${row.expires?.let { java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it)) } ?: "Unavailable until settings are repaired"}")
             row.reason?.let { Text(it) }
             Row {
                 TextButton(onClick = {
-                    try { stop(); playback.start(row.id) { success -> playing = null; message(if(success) "Local playback finished" else "Local playback failed; audio preserved") }; playing = playback.id }
-                    catch(_: Exception) { message("Local playback unavailable. Check settings, expiry and file availability.") }
+                    try { stop(); playback.start(row.id) { success -> playing = null; message(if(success) "Playback finished" else "Playback failed. Recording kept.") }; playing = playback.id }
+                    catch(_: Exception) { message("Could not play this recording. Refresh and try again.") }
                 },enabled = row.reason == null && state.activeID == null && status.phase != Phase.RECORDING) { Text("Play") }
                 TextButton(onClick = { stop(); recovery.transcribe(row.id) },enabled = row.reason == null && state.activeID == null && status.phase != Phase.RECORDING) { Text("Retranscribe") }
                 TextButton(onClick = { if(playing == row.id) stop(); scope.launch { message(withContext(Dispatchers.IO) { recordings.delete(row.id).message }); refresh++ } }) { Text("Delete") }
             }
         }
         state.preview?.let { preview ->
-            HorizontalDivider(); Text("Original transcript preview",style = MaterialTheme.typography.titleMedium)
+            HorizontalDivider(); Text("Transcript preview",style = MaterialTheme.typography.titleMedium)
             Text(preview.text)
-            Text("Save persists this raw text in local history (up to ${data.settings.historyLimit} rows); it never inserts into an editor.")
+            Text("Save keeps this transcript in text history, limited to ${data.settings.historyLimit} entries. It does not insert text into an app.")
             Row {
                 TextButton(onClick = { copyPrivate(context,preview.text); message("Original text copied") }) { Text("Copy") }
                 TextButton(onClick = recovery::savePreview,enabled = !preview.saved && !data.settings.noHistory && store.ready) { Text(if(preview.saved) "Saved" else "Save to history") }
                 TextButton(onClick = recovery::cancel) { Text("Dismiss preview") }
             }
-            if(data.settings.noHistory) Text("History is off. Copy now, or enable it in Privacy and retranscribe the retained source to Save. Leaving this screen clears the preview; source audio stays until deletion or expiry.")
+            if(data.settings.noHistory) Text("History is off. You can copy this text now. To save it, enable history in Privacy and transcribe the recording again. Leaving this screen clears the preview but keeps the recording.")
         }
     }
-    if(clear) AlertDialog(onDismissRequest = { clear = false },title = { Text("Clear retained audio?") },text = { Text("Deletes available recovery recordings. Active recognition readers are skipped until they exit. Saved text is independent.") },
+    if(clear) AlertDialog(onDismissRequest = { clear = false },title = { Text("Clear retained audio?") },text = { Text("Deletes recovery recordings that are not in use. Recordings being played or transcribed are kept; clear them after stopping. Saved text history is kept.") },
         confirmButton = { TextButton(onClick = { clear = false; stop(); scope.launch { message(withContext(Dispatchers.IO) { recordings.clear().message }); refresh++ } }) { Text("Clear audio") } },
         dismissButton = { TextButton(onClick = { clear = false }) { Text("Cancel") } })
 }

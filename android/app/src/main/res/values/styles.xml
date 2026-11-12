@@ -2,5 +2,5 @@
 <style name="Theme.Parla" parent="android:style/Theme.Material.Light.NoActionBar">
 <item name="android:fontFamily">sans</item><item name="android:windowLightStatusBar">true</item><item name="android:windowLightNavigationBar">true</item><item name="android:windowBackground">#FFFFEB</item><item name="android:colorAccent">#AD80D9</item>
 </style>
-<string name="accessibility_description">parla keeps your current keyboard active and inserts dictation into the original focused editor. It checks the field, text and selection, skips sensitive targets, and cancels pending dictation when the editor changes. Keyboard-window bounds position the floating voice control. Editor context is off by default. No screen images or general screen text are collected. Unconfirmed results can be copied explicitly in parla.</string>
+<string name="accessibility_description">parla inserts dictation into the text field where you started, while keeping your keyboard selected. It checks the field and cursor, skips sensitive fields, and stops if you edit or change fields. No screenshots or general screen text are collected. Audio stays on your device. If text insertion is unconfirmed, check the field before copying your result from parla.</string>
 </resources>

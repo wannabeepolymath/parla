@@ -42,7 +42,7 @@ class BubbleWindow(
     private val hold = Runnable { if (!dragging && state.phase != Phase.PROCESSING) { holding = true; holdMode = true; view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); onHold() } }
 
     init {
-        view.contentDescription = "parla dictation. Tap to start or finish. Hold to talk. Drag to move."
+        view.contentDescription = "parla voice control. Tap to start or finish. Hold to talk. Drag to move."
         view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         view.isClickable = true
         view.setOnClickListener { onTap() }
@@ -88,7 +88,7 @@ class BubbleWindow(
         applyPlacement()
         view.invalidate()
     }
-    fun render(status: DictationStatus) { state = status; if (state.phase == Phase.IDLE || state.phase == Phase.ERROR) holdMode = false; updateSize(); applyPlacement(); view.contentDescription = "parla: ${status.message}. Tap to start or finish, hold to talk, drag to move."; view.invalidate() }
+    fun render(status: DictationStatus) { state = status; if (state.phase == Phase.IDLE || state.phase == Phase.ERROR) holdMode = false; updateSize(); applyPlacement(); view.contentDescription = "parla: ${status.message}. Tap to start or finish. Hold to talk. Drag to move."; view.invalidate() }
     internal fun placeNearKeyboard(bounds: ScreenRect?) { keyboard = bounds; refreshPlacement() }
     fun refreshPlacement() { updateSize(); applyPlacement(); view.invalidate() }
     fun close() { handler.removeCallbacksAndMessages(null); if (shown) { wm.removeView(view); shown = false } }

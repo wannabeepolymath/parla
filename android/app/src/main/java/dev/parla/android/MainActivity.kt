@@ -164,7 +164,7 @@ private fun ParlaApp() {
                     navigationIcon = { IconButton(onClick = { scope.launch { drawerState.open() } }) { Icon(painterResource(R.drawable.ic_menu), "Open drawer", tint = Color(0xFF191A21)) } },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = PageGray),
                 ) else CenterAlignedTopAppBar(
-                    title = { Text(route, style = ScreenTitleStyle) },
+                    title = { Text(screenLabel(route), style = ScreenTitleStyle) },
                     navigationIcon = { IconButton(onClick = { route = if (route in listOf("Settings", "Account", "Practice", "Report an issue", "Share feedback")) "Home" else "Settings" }) { Icon(painterResource(R.drawable.ic_arrow_back), "Back", tint = Ink) } },
                     actions = {
                         if (route == "parla Bubble Size" || route == "parla Bubble Opacity") TextButton(onClick = {
@@ -233,15 +233,15 @@ private fun ParlaApp() {
             }
             if (error != null) Column(Modifier.align(Alignment.BottomCenter).background(Cream).padding(12.dp)) {
                 Text(error!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                TextButton(onClick = { setup = false; route = "Data recovery" }) { Text("Reload / repair data") }
+                TextButton(onClick = { setup = false; route = "Data recovery" }) { Text("Open data recovery") }
             }
         }
     }
     }
     retrySource?.let { source ->
         AlertDialog(onDismissRequest = { retrySource = null }, title = { Text("Retry original text") },
-            text = { Text("Use current global settings with unknown destination. No speech recognition or insertion. A proposed result is shown before saving.") },
-            confirmButton = { TextButton(onClick = { startRetry(source,false) }, enabled = !retryBusy) { Text("Cleanup original") } },
+            text = { Text("Rework the original text with your current settings. AI cleanup sends it to your chosen provider and may incur charges. Preview the result before saving. Nothing is inserted into another app.") },
+            confirmButton = { TextButton(onClick = { startRetry(source,false) }, enabled = !retryBusy) { Text("Clean up original") } },
             dismissButton = { Row { TextButton(onClick = { startRetry(source,true) }, enabled = !retryBusy && data.presets.any { it.id == data.settings.selectedPresetID }) { Text("Apply selected preset") }; TextButton(onClick = { retrySource = null }) { Text("Cancel") } } })
     }
     proposal?.let { p ->
@@ -250,9 +250,9 @@ private fun ParlaApp() {
             confirmButton = { TextButton(onClick = {
                 if(retry.valid(p.token,p.source,store.data.value.history)) {
                     if(store.update { it.copy(history = it.history.map { row -> if(row == p.source) row.copy(text = p.result,revision = row.revision+1,note = p.summary) else row }) }) { retry.invalidate(p.source.id); proposal = null; message("Proposed result saved") }
-                } else { proposal = null; message("Row changed or was deleted. Start a new retry.") }
-            }) { Text("Apply to saved row") } },
-            dismissButton = { Row { TextButton(onClick = { if(retry.valid(p.token,p.source,store.data.value.history)) { copyPrivate(context,p.result); message("Copied proposed text") } else message("Row changed or was deleted") }) { Text("Copy") }; TextButton(onClick = { retry.invalidate(p.source.id); proposal = null }) { Text("Discard") } } })
+                } else { proposal = null; message("This entry changed or was deleted. Try again.") }
+            }) { Text("Save to history") } },
+            dismissButton = { Row { TextButton(onClick = { if(retry.valid(p.token,p.source,store.data.value.history)) { copyPrivate(context,p.result); message("Copied proposed text") } else message("This entry changed or was deleted") }) { Text("Copy") }; TextButton(onClick = { retry.invalidate(p.source.id); proposal = null }) { Text("Discard") } } })
     }
 }
 
@@ -283,14 +283,14 @@ private fun SetupScreen(mic: Boolean, overlay: Boolean, access: Boolean, notify:
         Text("Keep Gboard or your usual keyboard selected. The parla voice control floats above it. Tap to speak and tap the check mark to finish, or hold to talk.", style = BodyStyle, color = Ink)
         OutlinedButton(onClick = onKeyboard, modifier = Modifier.fillMaxWidth()) { Text("Choose Gboard or your usual keyboard") }
         PermissionRow("Display over apps", "Shows the small draggable parla voice control alongside your keyboard.", overlay, "Enable", onOverlay)
-        PermissionRow("Text insertion", "Enable parla text insertion in Accessibility. It checks the original editor and selection, skips sensitive fields, and uses keyboard-window bounds for placement. No screenshots or general screen text are collected.", access, "Open settings", onAccess)
-        PermissionRow("Microphone", "Used only after an explicit tap or hold on the voice control. Speech is transcribed on device with a model you explicitly download.", mic, "Allow", onMic)
+        PermissionRow("Text insertion", "Allow parla in Accessibility to insert words into the field where you started. Sensitive fields are skipped. No screenshots or general screen text are collected.", access, "Open settings", onAccess)
+        PermissionRow("Microphone", "Records only when you tap or hold the voice control. Speech is transcribed on your device after you download a model.", mic, "Allow", onMic)
         Card {
             Row(verticalAlignment = Alignment.CenterVertically) { Text("Keep failed audio for recovery",Modifier.weight(1f)); Switch(recoveryEnabled,onRecovery) }
-            Text("When enabled, failed recognition and interrupted completed recordings remain privately on this device for 7 days by default (1–30 in Privacy), up to 128MiB total. Successful, canceled and private sessions are disposed. Audio never uploads. This is independent of text history; manage/delete audio in Settings → Recovery audio.",style = BodyStyle)
+            Text("Keep failed or interrupted recordings privately on this device for 7 days, up to 134 MB. Successful, canceled and private recordings are removed. Audio is never uploaded or backed up. Change the time in Privacy; delete recordings in Recovery audio. Text history is separate.",style = BodyStyle)
         }
         PermissionRow("Notifications", "Finish, cancel or stop parla from its ongoing notification.", notify, "Allow", onNotify)
-        Text("Download and select a local model on the next screen. An API key is optional for text cleanup. Then choose Show parla control on Home to enable it while this app is visible. Dragging switches to manual placement; turn Follow keyboard back on in Settings to dock above the keyboard again.", style = BodyStyle, color = Muted)
+        Text("Next, download and select a speech model. Then tap Show parla control on Home. An API connection is optional for AI text cleanup.", style = BodyStyle, color = Muted)
         Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(6.dp), colors = ButtonDefaults.buttonColors(containerColor = Ink)) { Text("Continue to app") }
     }
 }
@@ -311,7 +311,7 @@ private fun HomeScreen(data: LocalData, status: DictationStatus, visible: Boolea
     val words = data.history.sumOf { it.text.split(Regex("""\s+""")).count(String::isNotBlank) }
     val grouped = data.history.groupBy { SimpleDateFormat("MMMM d", Locale.getDefault()).format(Date(it.createdAt)) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        if (status.phase == Phase.ERROR) item { Card { Text(status.message, color = MaterialTheme.colorScheme.error); TextButton(onClick = onApi) { Text("Models / local speech setup") } } }
+        if (status.phase == Phase.ERROR) item { Card { Text(status.message, color = MaterialTheme.colorScheme.error); TextButton(onClick = onApi) { Text("Open speech models") } } }
         item {
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.5.dp)).background(Color.White).padding(horizontal = 48.dp, vertical = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("${java.text.NumberFormat.getIntegerInstance().format(words)} words", fontFamily = Garamond, fontSize = if (words >= 10000) 52.sp else 60.sp, lineHeight = 57.sp, color = Color(0xFF007A5A), textAlign = TextAlign.Center)
@@ -349,7 +349,7 @@ private fun HomeScreen(data: LocalData, status: DictationStatus, visible: Boolea
         recovery?.takeIf { it.expiresAt > System.currentTimeMillis() }?.let { pending -> item {
             Card {
                 Text(pending.outcome)
-                Text("Transient recovery: RAM only, expires within 5 minutes, 64KiB combined text limit.",color = Muted,fontSize = 12.sp)
+                Text("This text is available for up to 5 minutes, until parla closes, or until a newer result replaces it.",color = Muted,fontSize = 12.sp)
                 var showOriginal by remember { mutableStateOf(false) }
                 Text(if(showOriginal) pending.original else pending.result,style = TranscriptStyle)
                 Row { TextButton(onClick = { showOriginal = !showOriginal }) { Text(if(showOriginal) "Result" else "Original") }
@@ -391,7 +391,7 @@ private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Un
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             ListSearch(search) { search = it }
-            Text("Saved order is priority. Hints: 256 UTF-8 bytes each; ASR 2048 bytes, cleanup 8192 bytes. Later hints may be omitted.",Modifier.padding(horizontal = 16.dp),fontSize = 12.sp,color = Muted)
+            Text("Add names and words you use often. Words at the top have priority; some later words may be skipped.",Modifier.padding(horizontal = 16.dp),fontSize = 12.sp,color = Muted)
             if (filtered.isEmpty()) CenteredListMessage(if (words.isEmpty()) "Your dictionary words show up here." else "No words match your search")
             else LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp)) {
                 items(filtered, key = { it }) { word ->
@@ -411,7 +411,7 @@ private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Un
     if (dialog) AlertDialog(
         onDismissRequest = { dialog = false }, shape = RoundedCornerShape(16.dp), containerColor = Color.White,
         title = { Text(if (edit == null) "Add word" else "Edit word", style = TranscriptStyle) },
-        text = { OutlinedTextField(value, { value = it.take(256) }, placeholder = { Text("Enter a word") }, supportingText = { Text("${value.trim().toByteArray(Charsets.UTF_8).size} / 256 UTF-8 bytes") }, singleLine = true, textStyle = BodyStyle) },
+        text = { OutlinedTextField(value, { value = it.take(256) }, label = { Text("Word or phrase") }, supportingText = { Text(if(value.trim().toByteArray(Charsets.UTF_8).size > 256) "This word is too long. Shorten it to save." else "Add one name, word or short phrase.") }, singleLine = true, textStyle = BodyStyle) },
         confirmButton = { TextButton(onClick = { onChange(if(edit == null) words + value.trim() else words.map { if(it == edit) value.trim() else it }); dialog = false }, enabled = value.isNotBlank() && value.trim().toByteArray(Charsets.UTF_8).size <= 256 && (value.trim() == edit || words.none { it.equals(value.trim(), true) }) && (edit != null || words.size < 1000)) { Text(if (edit == null) "Add" else "Save") } },
         dismissButton = { TextButton(onClick = { dialog = false }) { Text("Cancel", color = M3Gray) } },
     )
@@ -428,7 +428,7 @@ private fun SnippetsScreen(snippets: List<Snippet>, onChange: (List<Snippet>) ->
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             ListSearch(search) { search = it }
-            if (filtered.isEmpty()) CenteredListMessage(if (snippets.isEmpty()) "Your Snippets show up here." else "No Snippets match your search")
+            if (filtered.isEmpty()) CenteredListMessage(if (snippets.isEmpty()) "Save phrases to insert with a voice shortcut." else "No snippets match your search")
             else LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp)) {
                 items(filtered, key = { it.id }) { snippet -> EditableListRow(snippet.trigger, snippet.expansion, { editSnippet(snippet) }, { onChange(snippets.filterNot { it.id == snippet.id }) }) }
             }
@@ -439,8 +439,8 @@ private fun SnippetsScreen(snippets: List<Snippet>, onChange: (List<Snippet>) ->
         onDismissRequest = { dialog = false }, shape = RoundedCornerShape(16.dp), containerColor = Color.White,
         title = { Text(if (edit == null) "Add snippet" else "Edit snippet", style = TranscriptStyle) },
         text = { Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            OutlinedTextField(trigger, { trigger = it.take(60) }, label = { Text("Snippet") }, singleLine = true)
-            OutlinedTextField(expansion, { expansion = it.take(4000) }, label = { Text("Expansion") }, minLines = 3, maxLines = 6)
+            OutlinedTextField(trigger, { trigger = it.take(60) }, label = { Text("Voice shortcut") }, singleLine = true)
+            OutlinedTextField(expansion, { expansion = it.take(4000) }, label = { Text("Text to insert") }, minLines = 3, maxLines = 6)
         } },
         confirmButton = { TextButton(onClick = {
             val next = edit?.copy(trigger = trigger.trim(), expansion = expansion.trim()) ?: Snippet(trigger = trigger.trim(), expansion = expansion.trim())
@@ -503,22 +503,22 @@ private fun EditableListRow(title: String, subtitle: String? = null, onEdit: () 
 private fun SettingsScreen(data: LocalData, hasKey: Boolean, onRoute: (String) -> Unit, onSetup: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         SettingsSection("GENERAL")
-        SettingsRow("Models", data.settings.localModel) { onRoute("Models") }
-        SettingsRow("Output settings", data.settings.outputMode) { onRoute("Output settings") }
+        SettingsRow("Models", speechModelLabel(data.settings.localModel)) { onRoute("Models") }
+        SettingsRow("Output settings", outputLabel(data.settings.outputMode)) { onRoute("Output settings") }
         SettingsRow("Profiles") { onRoute("Profiles") }
         SettingsRow("Recovery audio",if(data.settings.recoveryAudioEnabled) "${data.settings.recoveryAudioDays} days" else "Retention off") { onRoute("Recovery audio") }
         SettingsRow("Data recovery") { onRoute("Data recovery") }
         SettingsRow("Languages", languageName(data.settings.language)) { onRoute("Languages") }
         Spacer(Modifier.height(8.dp))
-        SettingsRow("parla Bubble Size") { onRoute("parla Bubble Size") }
+        SettingsRow("Voice control size") { onRoute("parla Bubble Size") }
         Spacer(Modifier.height(8.dp))
-        SettingsRow("parla Bubble Opacity") { onRoute("parla Bubble Opacity") }
+        SettingsRow("Voice control opacity") { onRoute("parla Bubble Opacity") }
         Spacer(Modifier.height(8.dp))
         SettingsRow("Voice control position", if (data.settings.bubbleDocked) "Follow keyboard" else "Manual") { onRoute("Voice control position") }
         SettingsSection("DATA & PRIVACY")
-        SettingsRow("Local Data Storage", if (data.settings.noHistory) "Off" else "On") { onRoute("Privacy") }
+        SettingsRow("Privacy", if (data.settings.noHistory) "Text history off" else "Text history on") { onRoute("Privacy") }
         SettingsSection("GENERAL")
-        SettingsRow("API connection", if (hasKey) data.settings.cleanupModel else "Optional") { onRoute("API connection") }
+        SettingsRow("API connection", if (hasKey) providerLabel(data.settings.provider) else "Optional") { onRoute("API connection") }
         Spacer(Modifier.height(8.dp))
         SettingsRow("Permissions", onClick = onSetup)
     }
@@ -546,15 +546,18 @@ private fun DrawerRow(label: String, icon: Int, onClick: () -> Unit) {
 private fun AccountScreen(onApi: () -> Unit, onPrivacy: () -> Unit) {
     // Private authentication, subscription and cloud account state are excluded.
     Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text("No account needed",style = ScreenTitleStyle)
+        Text("Speech is transcribed on your device. Connect your own API for optional AI text cleanup.",Modifier.padding(vertical = 16.dp),style = BodyStyle,color = Muted)
         SettingsRow("API connection", onClick = onApi)
         Spacer(Modifier.height(8.dp))
-        SettingsRow("Local Data Storage", onClick = onPrivacy)
+        SettingsRow("Privacy", onClick = onPrivacy)
     }
 }
 @Composable
 private fun FeedbackScreen(title: String, onCopy: (String) -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
     Column(Modifier.fillMaxSize().imePadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text("Write a note to copy and share yourself. Nothing is sent from this screen.",style = BodyStyle,color = Muted)
         OutlinedTextField(text, { text = it.take(4000) }, Modifier.fillMaxWidth().weight(1f), label = { Text(title) })
         Button(onClick = { onCopy(text) }, enabled = text.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Copy") }
     }
@@ -572,14 +575,14 @@ private fun ApiScreen(store: Store, settings: Settings, message: (String) -> Uni
     val url = base.trim().trimEnd('/').toHttpUrlOrNull()
     val valid = url != null && url.isHttps && url.username.isEmpty() && url.password.isEmpty() && url.query == null && url.fragment == null && cleanup.isNotBlank()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        PageTitle("Connect your API.", "Speech stays on device. Optional text cleanup sends dictated text and saved vocabulary/snippets to your chosen provider. Save explicitly binds your key to this provider and endpoint; changing either requires this confirmation.")
-        OutlinedTextField(base, { base = it.take(500) }, label = { Text("HTTPS base URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        PageTitle("AI text cleanup", "Audio stays on your device. AI cleanup sends your transcript, vocabulary and snippets to the provider you choose. Your provider may charge for use and has its own data retention policy.")
+        OutlinedTextField(base, { base = it.take(500) }, label = { Text("API address (HTTPS)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         Text("Text provider")
-        listOf("openai-compatible","anthropic").forEach { choice -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(provider == choice,{ provider = choice; if(choice == "anthropic") { base = "https://api.anthropic.com/v1"; cleanup = "claude-haiku-4-5" } else { base = "https://api.openai.com/v1"; cleanup = "gpt-4.1-mini" } }); Text(choice) } }
-        Text("Apple Intelligence is unavailable on Android. Selecting a remote provider is explicit.",fontSize = 12.sp)
-        OutlinedTextField(cleanup, { cleanup = it.take(100) }, label = { Text("Cleanup model") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        listOf("openai-compatible","anthropic").forEach { choice -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(provider == choice,{ provider = choice; if(choice == "anthropic") { base = "https://api.anthropic.com/v1"; cleanup = "claude-haiku-4-5" } else { base = "https://api.openai.com/v1"; cleanup = "gpt-4.1-mini" } }); Text(providerLabel(choice)) } }
+        Text("Changing the provider or API address requires saving again to authorize use of your key.",fontSize = 12.sp)
+        OutlinedTextField(cleanup, { cleanup = it.take(100) }, label = { Text("AI model ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(key, { key = it.take(8192) }, label = { Text(if (hasKey) "Replace saved key (optional)" else "API key") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-        Text(if (hasKey) "A key is saved in encrypted device storage. Leave this field blank to keep it." else "Your key is encrypted using AndroidKeyStore and excluded from backups.", color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
+        Text(if (hasKey) "A key is saved in encrypted device storage. Leave this field blank to keep it." else "Your key is encrypted on this device and excluded from backups.", color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
         if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
         Button(onClick = {
             busy = true; error = null
@@ -607,7 +610,7 @@ private fun ApiScreen(store: Store, settings: Settings, message: (String) -> Uni
                 finally { busy = false }
             }
         }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Remove saved key") }
-        Text("No audio is uploaded. OpenAI-compatible cleanup uses /chat/completions; Anthropic uses its fixed /v1/messages endpoint. Requests have a 15-second deadline. Failures keep the original transcript. Raw mode, cleanup-off, and locked snippets need no API key.", color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
+        Text("If cleanup fails, your original words are kept. As spoken mode, AI cleanup off, and snippets used on their own work without an API connection.", color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
     }
 }
 private val Languages = listOf("auto" to "Follow the speaker automatically") + SpeechLanguages.all
@@ -644,7 +647,7 @@ private fun PositionScreen(settings: Settings, onChange: (Settings) -> Unit) {
                 Text("Follow keyboard", modifier = Modifier.weight(1f))
                 Switch(settings.bubbleDocked, { onChange(settings.copy(bubbleDocked = it)) })
             }
-            Text("Places parla above the keyboard when Android reports its window bounds. Dragging switches to manual placement. Floating or split keyboards may need manual adjustment.", color = Muted, style = BodyStyle)
+            Text("Keeps the voice control above your keyboard. Drag it to place it manually. Floating or split keyboards may need manual adjustment.", color = Muted, style = BodyStyle)
         }
         OutlinedButton(onClick = { onChange(settings.copy(bubbleX = 16, bubbleY = 280, bubbleDocked = true)) }) { Text("Reset position") }
     }
@@ -653,21 +656,21 @@ private fun PositionScreen(settings: Settings, onChange: (Settings) -> Unit) {
 private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onClear: () -> Unit) {
     var clear by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        PageTitle("Local Data Storage")
+        PageTitle("Privacy")
         Card {
-            Row(verticalAlignment = Alignment.CenterVertically) { Text("No local history", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)); Switch(data.settings.noHistory, { onSettings(data.settings.copy(noHistory = it)) }) }
-            Text("Turning this on stops new text history without deleting saved rows. Use Clear separately. Transient recovery is RAM only, expires after 5 minutes, and holds at most 64KiB combined original/result text.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) { Text("Pause text history", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)); Switch(data.settings.noHistory, { onSettings(data.settings.copy(noHistory = it)) }) }
+            Text("Stops saving new text without deleting your history. The latest result may still be available to copy for up to 5 minutes, until parla closes, or until another result replaces it.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         }
         var limit by remember(data.settings.historyLimit) { mutableStateOf(data.settings.historyLimit.toString()) }
-        OutlinedTextField(limit,{ limit = it.filter(Char::isDigit).take(4) },label = { Text("Saved history count (1–1000)") })
-        Button(onClick = { limit.toIntOrNull()?.takeIf { it in 1..1000 }?.let { onSettings(data.settings.copy(historyLimit = it)) } }, enabled = limit.toIntOrNull() in 1..1000) { Text("Save count") }
-        Row(verticalAlignment = Alignment.CenterVertically) { Text("Retain failed recovery audio",Modifier.weight(1f)); Switch(data.settings.recoveryAudioEnabled,{ onSettings(data.settings.copy(recoveryAudioEnabled = it)) }) }
+        OutlinedTextField(limit,{ limit = it.filter(Char::isDigit).take(4) },label = { Text("History limit (1–1000 entries)") })
+        Button(onClick = { limit.toIntOrNull()?.takeIf { it in 1..1000 }?.let { onSettings(data.settings.copy(historyLimit = it)) } }, enabled = limit.toIntOrNull() in 1..1000) { Text("Save history limit") }
+        Row(verticalAlignment = Alignment.CenterVertically) { Text("Keep failed recordings",Modifier.weight(1f)); Switch(data.settings.recoveryAudioEnabled,{ onSettings(data.settings.copy(recoveryAudioEnabled = it)) }) }
         var days by remember(data.settings.recoveryAudioDays) { mutableStateOf(data.settings.recoveryAudioDays.toString()) }
-        OutlinedTextField(days,{ days = it.filter(Char::isDigit).take(2) },label = { Text("Audio retention days (1–30)") })
+        OutlinedTextField(days,{ days = it.filter(Char::isDigit).take(2) },label = { Text("Keep recordings for (1–30 days)") })
         Button(onClick = { days.toIntOrNull()?.takeIf { it in 1..30 }?.let { onSettings(data.settings.copy(recoveryAudioDays = it)) } },enabled = days.toIntOrNull() in 1..30) { Text("Save audio retention") }
-        Text("Editor context is not sent. App categories and exact package profiles resolve locally. Android has no trusted browser URL metadata, so site profiles are unavailable.",fontSize = 13.sp)
+        Text("Text already in your editor and app identities stay on this device. AI cleanup sends your transcript, vocabulary and snippets to your chosen provider, which has its own retention policy.",fontSize = 13.sp)
         OutlinedButton(onClick = { clear = true }, enabled = data.history.isNotEmpty(), modifier = Modifier.fillMaxWidth()) { Text("Clear saved history (${data.history.size})") }
-        Text("Capture uses private temporary cache. When recovery is enabled, complete audio is atomically saved before recognition; failed/interrupted recognition stays until expiry or explicit deletion. Successful recognition disposes audio even if cleanup fails. Canceled/private sessions are purged after readers exit. Recovery is private, excluded from backup, at most 300 seconds per file and 128MiB total (128 files). Existing schema 1/2 installs keep recovery off until opt-in. Turning retention off stops new stashes; use Recovery audio to delete existing files. Text-history controls never change audio retention. Optional text providers have their own retention policies.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
+        Text("Audio stays on this device and is never uploaded or backed up. With recovery on, failed or interrupted recordings stay until they expire or you delete them in Recovery audio. Successful, canceled and private recordings are removed. Limits: 5 minutes per recording, 134 MB or 128 files total. Turning this off stops saving new recordings; existing ones are kept until expiry or deletion. Text history and audio are managed separately.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
     }
     if (clear) ConfirmDialog("Clear saved history?", "This removes text history from this device.", { clear = false }, { onClear(); clear = false })
 }
@@ -683,7 +686,7 @@ private fun PracticeScreen(visible: Boolean, onBubble: () -> Unit) {
             setPadding(30,30,30,30); setBackgroundColor(android.graphics.Color.rgb(247,235,255))
             contentDescription = "Practice editor"
         } }, modifier = Modifier.fillMaxWidth().heightIn(min = 220.dp).clip(RoundedCornerShape(20.dp)))
-        Text("Changing fields, moving the cursor or editing cancels pending dictation. If insertion is unconfirmed, open parla to copy the result explicitly and check the field before pasting.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
+        Text("Changing fields, moving the cursor or editing cancels dictation. If text does not appear, check the field before copying and pasting the result from parla.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
     }
 }
 @Composable
