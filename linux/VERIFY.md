@@ -15,6 +15,26 @@ write `pass`, `fail` or `not run`. Put what you saw (log lines, clipboard text,
 anything surprising) on the `Notes:` line. Leave nothing blank: an unrun item
 is `not run`, not empty.
 
+## Setup used by every check
+
+Unless a check says otherwise, set `[cleanup] provider = "none"` in
+`config.toml`, so a `Copied: …` result does not depend on API credentials
+(check 4 changes this and restores it). Then define these helpers in the
+shell you run the checks from:
+
+```sh
+LOG=~/parlad-verify.log
+start_parlad() { parlad >>"$LOG" 2>&1 & until parlactl status >/dev/null 2>&1; do sleep 0.5; done; }
+mark()      { MARK=$(grep -c 'parlad: Parla — ' "$LOG"); }
+# Wait for N more delivery log lines (default 1); give up after 60 s.
+delivered() { for _ in $(seq 120); do [ "$(grep -c 'parlad: Parla — ' "$LOG")" -ge $((MARK + ${1:-1})) ] && return; sleep 0.5; done; echo "no delivery within 60 s"; }
+```
+
+`parlactl stop` returns `processing` before transcription finishes, so always
+call `mark` before dictating and `delivered` before reading the clipboard.
+Start the daemon with `start_parlad`, never a bare `parlad &`: a `start` sent
+before the socket is up is lost.
+
 ## Run record
 
 One table per run. Copy it for a second machine or audio stack.
@@ -45,11 +65,11 @@ The selection is served by a background thread inside `parlad` with
 
 - [ ] **1. Clipboard receives the dictation and keeps serving it**
 
-Command (`parlad` running in the session, speak during the sleep):
+Command (`parlad` started with `start_parlad`, speak during the sleep):
 
 ```sh
-parlactl start; sleep 3; parlactl stop
-wl-paste            # immediately
+mark; parlactl start; sleep 3; parlactl stop; delivered
+wl-paste            # as soon as it is delivered
 sleep 30; wl-paste  # 30 s later
 wl-paste; wl-paste  # second and third paste
 ```
@@ -100,7 +120,12 @@ their own default. If yours does, the text is still in the log.
 
 - [ ] **3a. `Copied: …` notification appears**
 
-Command: dictate once (`parlactl start; sleep 3; parlactl stop`, speaking).
+Command (check 2 stopped the daemon, so restart it first; speak during the sleep):
+
+```sh
+start_parlad
+mark; parlactl start; sleep 3; parlactl stop; delivered
+```
 
 Expect: a `Parla` notification with `Copied: <preview>`, and the log line
 `parlad: Parla — Copied: …`.
@@ -115,7 +140,7 @@ Command:
 
 ```sh
 pkill mako   # or dunst / swaync
-parlactl start; sleep 3; parlactl stop
+mark; parlactl start; sleep 3; parlactl stop; delivered
 wl-paste
 ```
 
@@ -132,9 +157,12 @@ Command (notifier running again):
 
 ```sh
 pkill parlad
-env -u WAYLAND_DISPLAY parlad &
+env -u WAYLAND_DISPLAY parlad >>"$LOG" 2>&1 &
+until parlactl status >/dev/null 2>&1; do sleep 0.5; done
 parlactl start; sleep 3; parlactl stop
 ```
+
+Afterwards: `pkill parlad; start_parlad` to get a normal daemon back.
 
 Expect: a `Parla — clipboard failed` notification with the whole dictation and
 `(also in the log)`, which does not auto-dismiss; the log shows
@@ -153,14 +181,20 @@ your words.
 
 - [ ] **4. Missing API key delivers the raw transcript**
 
-Command (with a `[cleanup]` provider other than `"none"` in `config.toml`):
+Command. In `config.toml`, temporarily set a `[cleanup]` provider other than
+`"none"` and remove (or comment out) any inline `cleanup.api_key`: cleanup
+falls back to it, so unsetting the variable alone does not remove the key.
 
 ```sh
 pkill parlad
-env -u ANTHROPIC_API_KEY parlad &   # the variable your api_key_env names
-parlactl start; sleep 3; parlactl stop
+env -u ANTHROPIC_API_KEY parlad >>"$LOG" 2>&1 &   # the variable your api_key_env names
+until parlactl status >/dev/null 2>&1; do sleep 0.5; done
+mark; parlactl start; sleep 3; parlactl stop; delivered
 wl-paste
 ```
+
+Afterwards, restore `config.toml` (provider `"none"` for the remaining checks,
+and your `api_key` line), then `pkill parlad; start_parlad`.
 
 Expect: notification `Copied (raw — no API key): …`; `wl-paste` prints the raw
 transcript.
@@ -341,8 +375,8 @@ Dictate A, and start B before A's notification appears. Say a different,
 recognisable phrase in each (for example "alpha one" then "bravo two"):
 
 ```sh
-parlactl start; sleep 2; parlactl stop; parlactl start; sleep 2; parlactl stop
-sleep 15; wl-paste
+mark; parlactl start; sleep 2; parlactl stop; parlactl start; sleep 2; parlactl stop
+delivered 2; wl-paste
 ```
 
 Record: which text is on the clipboard at the end (A, B, or something else),
@@ -360,8 +394,8 @@ Notes:
 Release the key, then immediately cancel:
 
 ```sh
-parlactl start; sleep 2; parlactl stop; parlactl cancel
-sleep 15; wl-paste
+mark; parlactl start; sleep 2; parlactl stop; parlactl cancel
+delivered; wl-paste   # "no delivery within 60 s" is a valid outcome here
 ```
 
 Record: the reply `parlactl cancel` printed, whether the dictated text still
