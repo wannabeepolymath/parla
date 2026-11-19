@@ -86,9 +86,8 @@ impl App {
             samples.len() as f32 / audio::TARGET_RATE as f32
         );
 
-        let prompt = whisper::initial_prompt(&self.cfg.dictionary);
         let me = self.clone();
-        let pass = move || me.transcriber.transcribe(&samples, prompt.as_deref());
+        let pass = move || me.transcriber.transcribe(&samples, &me.cfg.dictionary);
         let raw = match transcript(tokio::task::spawn_blocking(pass).await) {
             Ok(t) => t,
             Err(refusal) => return ("Parla", refusal.into(), TOAST),

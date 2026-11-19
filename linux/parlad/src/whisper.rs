@@ -1,6 +1,6 @@
 use anyhow::Context;
 use parla_core::config::Config;
-use parla_core::text::strip_non_speech;
+use parla_core::text::{select_prompt_terms, strip_non_speech};
 use std::path::{Path, PathBuf};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -57,13 +57,12 @@ pub fn model_path(cfg: &Config) -> PathBuf {
 }
 
 /// Dictionary terms become whisper's initial_prompt, which biases decoding
-/// toward those spellings.
-pub fn initial_prompt(dictionary: &[String]) -> Option<String> {
-    if dictionary.is_empty() {
-        None
-    } else {
-        Some(dictionary.join(", "))
-    }
+/// toward those spellings. Whisper keeps only the last `capacity` prompt
+/// tokens, so whole terms are selected in saved order against that budget
+/// instead of letting the decoder silently cut the highest-priority ones.
+fn prompt_from(dictionary: &[String], capacity: usize, count: impl Fn(&str) -> usize) -> Option<String> {
+    let selected = select_prompt_terms(dictionary, capacity, count);
+    (!selected.is_empty()).then(|| selected.join(", "))
 }
 
 /// Leave headroom for the rest of the daemon, same as the macOS build: never
@@ -104,15 +103,32 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
+    /// whisper.cpp `max_prompt_ctx = n_text_ctx / 2`, minus the `[prev]` token.
+    fn prompt_capacity(&self) -> usize {
+        (self.ctx.n_text_ctx() / 2 - 1).max(0) as usize
+    }
+
+    /// The `text.len().max(1)` buffer is mandatory: whisper-rs 0.16 `tokenize`
+    /// calls `set_len` on any negative return but -1, so a short buffer is UB.
+    /// A token consumes at least one byte, so this buffer always fits.
+    /// `usize::MAX` on error means the term is never admitted.
+    fn count_tokens(&self, text: &str) -> usize {
+        self.ctx.tokenize(text, text.len().max(1)).map(|t| t.len()).unwrap_or(usize::MAX)
+    }
+
+    pub fn initial_prompt(&self, dictionary: &[String]) -> Option<String> {
+        prompt_from(dictionary, self.prompt_capacity(), |t| self.count_tokens(t))
+    }
+
     /// `Ok("")` means whisper ran and found no speech. `Err` means whisper
     /// itself failed. Collapsing the two into an empty string would report a
     /// broken transcriber to the user as "Nothing heard", which is the silent
     /// degradation the whole pipeline is built to avoid.
-    pub fn transcribe(
-        &self,
-        samples: &[f32],
-        initial_prompt: Option<&str>,
-    ) -> anyhow::Result<String> {
+    ///
+    /// Takes the dictionary rather than a prompt so tokenizing it runs here,
+    /// on the caller's blocking thread, not on a tokio worker.
+    pub fn transcribe(&self, samples: &[f32], dictionary: &[String]) -> anyhow::Result<String> {
+        let initial_prompt = self.initial_prompt(dictionary);
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -123,7 +139,7 @@ impl Transcriber {
         ));
         params.set_temperature_inc(TEMPERATURE_INC);
         params.set_audio_ctx(AUDIO_CTX_FULL_WINDOW);
-        if let Some(p) = initial_prompt {
+        if let Some(p) = &initial_prompt {
             params.set_initial_prompt(p);
         }
 
@@ -207,9 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_joins_dictionary_terms() {
-        assert_eq!(initial_prompt(&["Parla".into(), "wlroots".into()]), Some("Parla, wlroots".to_string()));
-        assert_eq!(initial_prompt(&[]), None);
+    fn prompt_joins_selected_terms_and_is_none_when_nothing_fits() {
+        let words: Vec<String> = vec!["Parla".into(), "wlroots".into()];
+        assert_eq!(prompt_from(&words, 223, str::len), Some("Parla, wlroots".to_string()));
+        assert_eq!(prompt_from(&[], 223, str::len), None);
+        assert_eq!(prompt_from(&words, 0, str::len), None);
+        assert_eq!(prompt_from(&words, 223, |_| usize::MAX), None);
     }
 
     #[test]
