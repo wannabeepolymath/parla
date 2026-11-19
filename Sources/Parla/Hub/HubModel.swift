@@ -497,10 +497,10 @@ final class HubModel: ObservableObject {
     @Published var loadError: String? { didSet { if loadError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings unavailable."); audioImport.invalidate("Settings can't be read."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
     @Published var saveError: String? { didSet { if saveError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings save failed."); audioImport.invalidate("Settings could not be saved."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
     @Published var modelLoaded = false
-    /// The resident model's prompt budget and the client that owns it, read
+    /// The resident model's prompt budget and its unique instance id, read
     /// transiently; nil when none is loaded.
-    var vocabularyBudget: () -> (budget: PromptBudget, model: ObjectIdentifier)? = { nil }
-    private var vocabularyMemo: (words: [String], model: ObjectIdentifier?, count: Int)?
+    var vocabularyBudget: () -> (budget: PromptBudget, model: UUID)? = { nil }
+    private var vocabularyMemo: (words: [String], model: UUID?, count: Int)?
     /// Words that reach the speech prompt. The view re-renders per keystroke, so
     /// recompute only when the words or the loaded model change (models share a
     /// capacity but not a tokenizer).

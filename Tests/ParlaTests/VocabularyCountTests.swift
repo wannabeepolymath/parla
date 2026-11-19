@@ -13,13 +13,12 @@ final class VocabularyCountTests: XCTestCase {
                            history: HistoryStore(url: root.appendingPathComponent("history.json")),
                            recordings: RecordingStore(directory: root.appendingPathComponent("audio")))
         hub.words = ["alpha", "beta", "gamma"].map { HubModel.WordRow(text: $0) }
-        let cheap = NSObject(), dear = NSObject()
-        var resident: (budget: PromptBudget, model: ObjectIdentifier)?
+        var resident: (budget: PromptBudget, model: UUID)?
         hub.vocabularyBudget = { resident }
 
-        resident = (PromptBudget(capacity: 12, count: { _ in 1 }), ObjectIdentifier(cheap))
+        resident = (PromptBudget(capacity: 12, count: { _ in 1 }), UUID())
         XCTAssertEqual(hub.retainedVocabularyCount().count, 3)
-        resident = (PromptBudget(capacity: 12, count: { $0.utf8.count }), ObjectIdentifier(dear))
+        resident = (PromptBudget(capacity: 12, count: { $0.utf8.count }), UUID())
         XCTAssertEqual(hub.retainedVocabularyCount().count, 2, "same capacity, different tokenizer")
         resident = nil
         XCTAssertFalse(hub.retainedVocabularyCount().exact)

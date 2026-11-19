@@ -509,8 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { m.bindParakeet(parakeetPreparation) }
         m.modelSelectionEpoch = preparationSelectionEpoch
         m.vocabularyBudget = { [weak self] in
-            guard let client = self?.residentRecognition?.client, let budget = client.promptBudget else { return nil }
-            return (budget, ObjectIdentifier(client))
+            guard let resident = self?.residentRecognition, let budget = resident.client.promptBudget else { return nil }
+            return (budget, resident.instance)
         }
         m.preparationSnapshot = nativePreparation.snapshot
         m.onRecognitionPreviewRevoked = { [weak self] in MainActor.assumeIsolated { self?.revokeRecognitionPreview() } }
