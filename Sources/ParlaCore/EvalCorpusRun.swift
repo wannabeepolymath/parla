@@ -142,6 +142,8 @@ public enum EvalCorpusRun {
             let json = try EvalCorpusJSON.parse(snapshot.data)
             // Manifest admission hashes every audio file against its declared digest.
             manifest = try EvalCorpus.Manifest(json, digest: snapshot.digest, io: io, now: Date().timeIntervalSince1970)
+            // Consent must cover the local ASR leg before any audio reaches the recognizer.
+            try manifest.permission(runs: [], now: Date().timeIntervalSince1970, legs: ["asr"])
             guard case .object(let top) = json else { throw EvalCorpusError.schema }
             order = try top.field("cases").array(limit: 256).map { value -> (id: String, path: String) in
                 guard case .object(let c) = value, case .object(let audio) = try c.field("audio") else { throw EvalCorpusError.schema }

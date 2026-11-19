@@ -102,6 +102,31 @@ final class EvalCorpusRunTests: XCTestCase {
         _ = try EvalCorpus.evaluate(.init(manifest: path, results: options.out, against: nil))
     }
 
+    func testMissingASRConsentIsRefusedBeforeRecognition() async throws {
+        let f = try EvalCorpusFixture()
+        f.mutateConsent { $0["uses"] = .array([.string("binding-check"), .string("reference-review")]) }
+        // A real tone, so only the consent check stands between the case and the recognizer.
+        let audio = wav(hz: 440), aHash = EvalCorpusIO.digest(audio)
+        try audio.write(to: f.root.appendingPathComponent("a0.wav"))
+        f.mutateCase { c in
+            c["audio"] = .object(["path": .string("a0.wav"), "sha256": .string(aHash), "bytes": .number(String(audio.count))])
+            for role in ["verbatim", "cleaned"] {
+                guard case .object(var ref) = c[role] else { return }
+                ref["audioSHA256"] = .string(aHash); c[role] = .object(ref)
+            }
+        }
+        let path = try f.writeManifest()
+        let options = EvalCorpusRun.Options(manifest: path, out: f.root.appendingPathComponent("run.json").path, runID: "TEST-run",
+                                            configRevision: "TEST-config", whisperModel: nil, context: nil)
+        var called = false
+        do {
+            _ = try await EvalCorpusRun.produce(options, engine: engine) { _ in called = true; return nil }
+            XCTFail("missing asr consent must refuse")
+        } catch {}
+        XCTAssertFalse(called, "no audio reaches the recognizer")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: options.out))
+    }
+
     func testOtherFailuresAndMissingEngineAreEngineRows() {
         XCTAssertEqual(EvalCorpusRun.row(nil).reason, "engine")
         XCTAssertEqual(EvalCorpusRun.row(pass(.failed(.clientUnavailable))).reason, "engine")
