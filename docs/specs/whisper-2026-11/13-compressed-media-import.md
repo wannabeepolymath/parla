@@ -1,4 +1,4 @@
-# Lane 13 — Compressed media import (M4A / MP3 / MP4)
+# Lane 13 — Compressed media import (M4A / MP3)
 
 Wave 4 · Risk: High · Depends on: nothing (macOS only)
 
@@ -45,8 +45,10 @@ from their outlines, not a full trace of the saved-import path.
 
 ## Design
 
-1. **Formats.** `SourceFormat` gains `.m4a`, `.mp3`, `.mp4` (extensions `m4a`, `mp3`, `mp4`;
-   still extension-selected, no sniffing). `SourceProfile` gains `compressedAVFoundationV1`.
+1. **Formats (decided): M4A and MP3 only; no MP4; the 20 MB / 10 minute caps are unchanged.**
+   Reason: the byte cap bounds the importer's whole-file in-memory read and would refuse most MP4
+   video, so MP4 would mostly add refusals. `SourceFormat` gains `.m4a`, `.mp3` (extensions `m4a`,
+   `mp3`; still extension-selected, no sniffing). `SourceProfile` gains `compressedAVFoundationV1`.
    `SourceFacts` gains `.compressed(ImportedCompressedAudio.Facts)` with origin
    `.systemCompressedConversion`.
 
@@ -73,8 +75,8 @@ from their outlines, not a full trace of the saved-import path.
    add the new origin to that refusal explicitly and keep the user-facing reason. No subtitle
    export for compressed sources.
 
-4. **Routing.** `FileImportSource` maps the three extensions. `decodeSource` dispatches to the new
-   decoder. The open panel adds `.mpeg4Audio`, `.mp3`, `.mpeg4Movie`.
+4. **Routing.** `FileImportSource` maps the two extensions. `decodeSource` dispatches to the new
+   decoder. The open panel adds `.mpeg4Audio`, `.mp3`.
 
 5. **Saved imports.** If `SavedAudioImportStorage` validates container structure when it stores or
    reopens encoded bytes, do **not** extend that machinery in this lane: compressed sources are
@@ -100,7 +102,7 @@ encoded by AVFoundation, so MP3 decode is covered by the human check only.
 | Temp file never survives | After success, failure and cancel, the temp directory holds no leftover |
 | No audio track → format failure | A video-only or empty container |
 | Timed mode refuses compressed | `AudioImportExecution.validateSource(.compressed(...), mode: .experimentalTimed)` throws |
-| Routing is extension-closed | `.m4a/.mp3/.mp4` map; `.aac`, `.ogg`, no extension still refuse |
+| Routing is extension-closed | `.m4a/.mp3` map; `.mp4`, `.aac`, `.ogg`, no extension still refuse |
 | Existing WAV/MOV behaviour unchanged | Existing `ImportedAudioTests`, `ImportedWAVTests`, `ImportedPCMMOVTests`, `AudioImportTests` pass untouched |
 
 ## Checks to run
@@ -110,17 +112,12 @@ encoded by AVFoundation, so MP3 decode is covered by the human check only.
 
 ## Out of scope
 
-- FFmpeg or any new dependency. Formats beyond the three. iOS and Android import.
-- Raising the 20 MB / 10 minute caps (see open question). Source-time mapping, subtitles or word
-  timing for compressed sources. Drag-and-drop or batch import.
+- FFmpeg or any new dependency. MP4 and any format beyond the two. iOS and Android import.
+- Raising the 20 MB / 10 minute caps. Source-time mapping, subtitles or word timing for compressed
+  sources. Drag-and-drop or batch import.
 
 ## Needs a human
 
-- [ ] Import a real MP3, a real M4A voice memo and a small MP4 screen recording; confirm each
-      transcribes and that cancel works mid-decode.
+- [ ] Import a real MP3 and a real M4A voice memo; confirm each transcribes and that cancel works
+      mid-decode.
 - [ ] Confirm a DRM-protected or corrupt file fails with the decode message, not a crash.
-
-## Open question
-
-The 20 MB cap will refuse most MP4 video. Options: ship M4A + MP3 only; keep MP4 under the cap
-(specced); or raise the byte cap for compressed sources while keeping the 10-minute decoded cap.

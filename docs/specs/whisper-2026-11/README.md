@@ -112,10 +112,10 @@ result of the earlier ones.
 | 2 | [10](10-acoustic-smoke-tier.md) | Acoustic smoke tier: one pinned model, a few licensed clips | Medium | 04, 05 |
 | 3 | [11](11-linux-resampling.md) | Linux capture: keep device-rate audio, resample once after Stop | High | 09 |
 | 3 | [12](12-experiments-harness.md) | Internal experiment switches and native evidence in `parla-eval` | Medium | 04, 07 |
-| 4 | [13](13-compressed-media-import.md) | Compressed media import (M4A / MP3 / MP4) | High | — |
+| 4 | [13](13-compressed-media-import.md) | Compressed media import (M4A / MP3) | High | — |
 | 4 | [14](14-word-timing-and-captions.md) | Experimental word timing and readable captions (core only) | High | 12 |
 | 4 | [15](15-recognition-export.md) | Structured recognition export (core only) | Low | — |
-| 5 | [16](16-import-review-exports.md) | Import review UI: readable captions and JSON export | Medium | 13, 14, 15 |
+| 5 | [16](16-import-review-exports.md) | Import review UI: JSON export | Medium | 13, 14, 15 |
 
 Mapping to the revised order: (1) → 01–03; (2) → 07; (3) → 04; (4) → 10; (5) → 06 then 09, 11;
 (6) → 07, 08; (7) → 12; (8) → 13–16. Smaller items: `download-model.sh` → 05, iOS typed results →
@@ -139,15 +139,13 @@ touched files with no claim list.
 
 ## Items I recommend not building as specced (your call)
 
-1. **Word timing (lane 14).** It is specced on whisper's heuristic `token_timestamps`, not DTW,
-   because DTW needs a second context configuration and a per-model alignment-heads preset, which
-   would invalidate the qualified `whisper191PCM10ms` segment clock. Even the heuristic path has no
-   accuracy evidence until lane 10 has clips. I would ship lane 14 strictly as an internal,
-   experimental core capability and hold lane 16's caption button until a human has checked word
-   times against audio on real clips.
-2. **MP4 video import under the current caps (lane 13).** The importer refuses files over 20 MB and
-   10 minutes. Most MP4 videos exceed 20 MB, so MP4 support will mostly produce refusals. Either
-   ship M4A + MP3 only, or decide to raise the byte cap for compressed sources (open question 5).
+1. **Word timing (lane 14) — decided, see [Decisions](#decisions).** It is specced on whisper's
+   heuristic `token_timestamps`, not DTW, because DTW needs a second context configuration and a
+   per-model alignment-heads preset, which would invalidate the qualified `whisper191PCM10ms`
+   segment clock. Even the heuristic path has no accuracy evidence until lane 10 has clips.
+2. **MP4 video import (lane 13) — decided, see [Decisions](#decisions).** The importer refuses
+   files over 20 MB and 10 minutes. Most MP4 videos exceed 20 MB, so MP4 support would mostly
+   produce refusals.
 3. **Upstream-normalizer benchmark WER.** Kept out of the native code as instructed. Lane 04 only
    documents how to run it externally. I would not write even the helper script until someone needs
    a number comparable to published Whisper WER.
@@ -193,6 +191,20 @@ text (the 64-token reserve in lane 01 is a starting value), cpal behaviour on re
 devices, `cargo test` for `parlad` on this Mac (`linux/VERIFY.md` says it was developed that way),
 and whether whisper-rs frees the boxed abort closure.
 
+## Decisions
+
+Decided by the design owner; each lane spec states the same single design.
+
+1. **Lane 09, Linux job policy: queue.** Jobs deliver in recording order and Cancel while idle
+   revokes every pending job. Superseding would silently drop a finished dictation.
+2. **Lane 09, Linux default language: `"en"`.** An omitted `language` keeps today's forced English
+   on every model; `language = "auto"` is the opt-in. No existing config changes behaviour or speed.
+3. **Lane 13, compressed import: M4A and MP3 only.** No MP4, caps unchanged. The 20 MB cap bounds a
+   whole-file in-memory read and would refuse most MP4 video.
+4. **Lanes 14 and 16, word timing: internal-only core plus the JSON export.** No app path requests
+   word timing, and the readable-caption buttons are held until lane 14's human word-time check is
+   recorded. Heuristic word times have no accuracy evidence yet.
+
 ## Open questions
 
-See the final handoff message; they are repeated at the bottom of the lane that needs each answer.
+Still open: the ones at the bottom of lanes 04 and 11.

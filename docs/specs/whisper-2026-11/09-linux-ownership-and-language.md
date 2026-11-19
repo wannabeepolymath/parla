@@ -6,7 +6,7 @@ Wave 2 · Risk: High · Depends on: lane 03 (same files); lane 06 baseline run r
 
 1. After Stop, a recording becomes a **job** with an identity. Jobs deliver in recording order,
    `cancel` revokes pending jobs, and nothing reaches the clipboard without a last ownership check.
-2. The daemon gets an explicit recognition-language setting instead of inheriting whisper's `"en"`.
+2. The daemon gets an explicit recognition-language setting. Omitted, it keeps today's `"en"`.
 
 ## Files owned
 
@@ -33,10 +33,11 @@ Wave 2 · Risk: High · Depends on: lane 03 (same files); lane 06 baseline run r
 
 ### A. Job ownership
 
-**Policy (decided here, see open question): queue, do not supersede.** Jobs run one at a time in
-the order their recordings ended, so the clipboard always ends with the newest finished dictation
-and two whisper passes never compete for the CPU. `cancel` while nothing is recording revokes every
-pending job.
+**Policy (decided): queue, never supersede.** Jobs run one at a time in the order their recordings
+ended, so the clipboard always ends with the newest finished dictation and two whisper passes never
+compete for the CPU. `cancel` while nothing is recording revokes every pending job. Reason:
+superseding would silently drop dictation A when B is recorded before A finishes; with
+clipboard-only delivery A's text would survive only in its notification.
 
 1. `struct Job { epoch: u64, samples: Vec<f32> }` and, on `App`,
    `cancel_epoch: Arc<AtomicU64>` and `pending: AtomicUsize`.
@@ -71,33 +72,41 @@ already factored.
 
 ### B. Language
 
-1. `Config.language: Option<String>` (serde default `None`). Documented values: omitted or
-   `"auto"` → follow the speaker; a whisper code such as `"en"` or `"hi"` → pin.
+**Default (decided): omitted `language` stays `"en"` on every model; auto-detect is opt-in with
+`language = "auto"`.** Reason: no existing config changes behaviour or pays the extra encoder pass
+without asking for it.
+
+1. `Config.language: Option<String>` (serde default `None`). Documented values: omitted → `"en"`
+   (today's behaviour); `"auto"` → follow the speaker; a whisper code such as `"en"` or `"hi"` →
+   pin.
 2. Resolved once at startup in `Transcriber::new(model, language)` and stored:
    - English-only model (`!ctx.is_multilingual()`) → `"en"`. If the config asked for anything else,
      say so on stderr.
-   - Multilingual + omitted/`"auto"` → `"auto"`.
+   - Multilingual + omitted → `"en"`.
+   - Multilingual + `"auto"` → `"auto"`.
    - Multilingual + code → valid when the code has no NUL, `get_lang_id(code)` is `Some(id)` and
      `id < ctx.token_translate() - ctx.token_sot() - 1`. Invalid → stderr complaint naming the
-     value, then `"auto"`. (Degrade loudly, like `Config::load` and the watchdog clamp do.)
+     value, then `"en"`, the default. (Degrade loudly, like `Config::load` and the watchdog clamp
+     do.)
    - Pure helper `resolve_language(multilingual, requested, lang_id, language_count) -> String` so
      the table is unit-testable.
 3. `transcribe` always calls `params.set_language(Some(&self.language))` and
    `params.set_translate(false)`. Never `set_detect_language(true)` (detect-only returns without
    transcribing).
-4. Behaviour change to state in `README.md`: a multilingual custom model used to decode everything
-   as English; it now auto-detects, which costs one extra encoder pass per dictation. Pin
-   `language = "en"` to keep the old speed.
-5. Known limit, documented, not fixed: whisper.cpp 1.8.3's own auto-detect scans the global
-   language list, so on a 51865-vocabulary model it considers one non-language token.
+4. No behaviour change for existing configs. State in `README.md`: a multilingual custom model
+   still decodes as English until `language` is set; `language = "auto"` detects the spoken
+   language and costs one extra encoder pass per dictation.
+5. Known limit of `"auto"`, documented, not fixed: whisper.cpp 1.8.3's own auto-detect scans the
+   global language list, so on a 51865-vocabulary model it considers one non-language token.
 
 ### C. Docs
 
 - `README.md`: the `language` key, the queue-and-cancel behaviour.
 - `VERIFY.md`: fill the "added by lane 09" placeholders from lane 06 with checkbox items —
   A-then-B ordering, cancel after release (nothing copied, "Cancelled" toast), cancel mid-whisper on
-  a long clip returns promptly, multilingual auto, pinned language, invalid `language` value logs
-  and falls back. No results filled in.
+  a long clip returns promptly, multilingual model with no `language` key still decodes as English,
+  `language = "auto"`, pinned language, invalid `language` value logs and falls back to English. No
+  results filled in.
 
 ## Acceptance criteria and checks (one per behaviour)
 
@@ -109,7 +118,7 @@ already factored.
 | Stale job never delivers | Same harness: bump the epoch while job 1 is "in whisper"; injected deliver closure is never called for it; job 2 (enqueued after the bump) delivers |
 | Aborted pass is not "Transcription failed" | Unit test on the outcome fold: stale + `Err` → cancelled message |
 | Session table unchanged | Existing `session.rs` tests pass untouched |
-| Language resolution table | `resolve_language` unit test: english-only+any → `en`; multi+None → `auto`; multi+`hi` valid → `hi`; multi+`yue` with count 99 → `auto`; multi+`zz` → `auto` |
+| Language resolution table | `resolve_language` unit test: english-only+any → `en`; multi+None → `en`; multi+`auto` → `auto`; multi+`hi` valid → `hi`; multi+`yue` with count 99 → `en`; multi+`zz` → `en` |
 | Config round-trip | `config.rs` test: `language = "hi"` parses; absent key → `None`; existing files still load |
 
 To make the worker testable, give it its pipeline as a parameter (a closure or a small trait object
@@ -135,8 +144,3 @@ Same caveat as lane 03 about `parlad` compiling whisper.cpp; report any part tha
 - [ ] Run the lane 09 section of `linux/VERIFY.md` on real hardware and record results.
 - [ ] Whether whisper-rs frees the boxed abort closure was not verified. If it leaks, the leak is
       one small allocation per dictation; note it in the report rather than working around it.
-
-## Open question
-
-Queue (specced) or supersede? Superseding would drop dictation A when B is recorded before A
-finishes; with clipboard-only delivery A's text would then exist only in its notification.

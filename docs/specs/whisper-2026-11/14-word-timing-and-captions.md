@@ -8,11 +8,12 @@ Add an explicit, separately labelled word-timing result for timed file recogniti
 caption layout function that turns words into readable cues. Core only: no UI in this lane, and the
 existing literal segment export stays exactly as it is.
 
-## Recommendation recorded in the README
+## Decision: internal-only
 
-Word times here are whisper's heuristic token timestamps. They are estimates with no accuracy
-evidence yet. Ship the capability behind the existing experimental timed-import mode and hold any
-user-facing promise until a person has checked word times against audio (lane 10 clips).
+This lane ships a core capability with no product caller: nothing in the app sets `wordTiming`, so
+the shipped timed import decodes exactly as today and no user sees a word time or a readable
+caption. Reason: word times here are whisper's heuristic token timestamps, estimates with no
+accuracy evidence until a person has checked them against audio (lane 10 clips).
 
 ## Why `token_timestamps`, not DTW
 
@@ -122,5 +123,7 @@ result, and this lane must not ship on the shared path. Report it instead of wor
 ## Needs a human
 
 - [ ] On 3–5 real clips, compare word start times with the audio in an editor; record typical and
-      worst error. This decides whether lane 16 exposes readable captions.
+      worst error. No app path produces words, so run this through the core API on a local build
+      (after lane 16, `RecognitionExport.encoded` writes them as JSON). It decides whether a later
+      change exposes word times and readable captions (lane 16 ships neither).
 - [ ] Run the model-gated equality test locally with the default model installed.
