@@ -95,14 +95,17 @@ class LocalSpeechModelTest {
         try {
             val b = "fake model".toByteArray(); val m = model(b)
             val model = File(dir,"model").apply { writeBytes(b) }; val audio = File(dir,"audio").apply { writeBytes(wav()) }
-            var released = false
+            var released = false; var sent = ""
             val fake = object : SpeechNative {
                 override fun createToken() = 1L
                 override fun cancel(token: Long) { error("unexpected cancellation") }
                 override fun release(token: Long) { released = true }
-                override fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray) = " 👋 नमस्ते [BLANK_AUDIO] ".toByteArray(Charsets.UTF_8)
+                override fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray {
+                    sent = prompt.toString(Charsets.UTF_8); return " 👋 नमस्ते [BLANK_AUDIO] ".toByteArray(Charsets.UTF_8)
+                }
             }
-            assertEquals("👋 नमस्ते",LocalSpeech(fake).transcribe(audio,model,m,emptyList(),"auto"))
+            assertEquals("👋 नमस्ते",LocalSpeech(fake).transcribe(audio,model,m,listOf("a","b"),"auto"))
+            assertEquals("Terms cross JNI one per line; native picks them by token budget","a\nb",sent)
             NativeTasks.run { assertTrue(released) }
         } finally { dir.deleteRecursively() }
     }

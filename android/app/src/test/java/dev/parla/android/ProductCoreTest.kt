@@ -91,6 +91,7 @@ class ProductCoreTest {
         assertEquals("नमस्ते दुनिया",selected.first()); assertTrue(selected.size > 100)
         assertFalse(selected.contains("x".repeat(257)))
         assertTrue(VocabularyHints.asrPrompt(words).toByteArray().size <= 2048)
+        assertTrue(VocabularyHints.asrTerms(words).toByteArray().size <= 2048)
         assertTrue(selected.joinToString(", ").toByteArray().size <= 8192)
         assertEquals(listOf("a"),VocabularyHints.select(listOf("a","A"),8192))
     }

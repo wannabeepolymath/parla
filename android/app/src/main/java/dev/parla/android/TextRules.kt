@@ -25,6 +25,8 @@ object VocabularyHints {
         }
     }
     fun asrPrompt(words: List<String>) = select(words, 2048).joinToString(", ")
+    // JNI wire format: byte-admitted terms, one per line. The bridge picks whole terms by token budget.
+    fun asrTerms(words: List<String>) = select(words, 2048).joinToString("\n")
 }
 
 enum class AppCategory { terminal, code, chat, email, prose, unknown }

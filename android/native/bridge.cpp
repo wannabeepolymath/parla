@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <whisper.h>
+#include "bridge_policy.h"
 #include <atomic>
 #include <algorithm>
 #include <memory>
@@ -57,7 +58,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         if (token->canceled.load()) return nullptr;
         const auto model = bytes(env, modelBytes, 8192);
         if (model != lastModel) { lastLanguage = "en"; lastModel = model; }
-        const auto prompt = bytes(env, promptBytes, 2048);
+        const auto terms = bytes(env, promptBytes, 2048);
         const auto chosen = bytes(env, languageBytes, 32);
         if (!sampleArray) throw std::runtime_error("No samples");
         const auto count = env->GetArrayLength(sampleArray);
@@ -73,6 +74,13 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         const bool multi = whisper_is_multilingual(ctx.get());
         const bool pinned = chosen != "auto" && whisper_lang_id(chosen.c_str()) >= 0;
         std::string language = !multi ? "en" : pinned ? chosen : lastLanguage;
+        // whisper keeps only the last n_text_ctx/2 - 1 prompt tokens; select whole terms in priority order.
+        const int capacity = std::max(0, whisper_n_text_ctx(ctx.get()) / 2 - 1);
+        const auto countTokens = [&](const std::string &s) {
+            std::vector<whisper_token> buf(std::max<size_t>(1, s.size()));  // a token consumes at least one byte
+            return std::max(0, whisper_tokenize(ctx.get(), s.c_str(), buf.data(), int(buf.size())));
+        };
+        const std::string prompt = parla::select_prompt(parla::split_lines(terms), capacity, countTokens);
         auto decode = [&]() {
             auto p = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
             p.n_threads = std::max(4, std::min(8, int(std::thread::hardware_concurrency()) - 2));
