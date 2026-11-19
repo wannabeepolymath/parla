@@ -15,10 +15,29 @@ Exit 0 admits declared bindings, including bad hypotheses or fully recorded
 operational failures; it is never a quality pass. Legacy flat arrays are accepted
 only by legacy modes. Manifest-only success measures no model quality.
 
-No producer is added: an independently authorized external/manual generator must
-emit every exact field/terminal row below. Its engine/configuration identities,
-routes, timings, consent and human review are attestations, not independently
-verified facts. Never relabel a legacy file as a qualified run. Do not use test
+`corpus-check` stays read-only. Saved runs for the ASR leg are produced by a
+separate subcommand (this supersedes the earlier "no producer" rule and
+ROOTPOLICY8A.1's "no new live run producer" below):
+
+```
+parla-eval corpus-run MANIFEST --out RUN.json --run-id ID --config-revision ID [--whisper-model PATH] [--context FILE]
+```
+
+It admits MANIFEST with the same checker (a manifest `corpus-check` refuses is
+refused with the same finite error), decodes each case's digest-bound audio in
+manifest order, records one `asr-only` row per case (gate-skipped audio is
+`skipped/policy`; native decode failure `failed/decode`; other engine failure or
+unreadable audio `failed/engine`; cancellation `failed/cancelled`), and makes a
+single write: `--out`, created new with mode 0600, never overwritten. It then
+re-admits the file with `corpus-check`; on refusal the file is deleted and the
+exit is 3. Exit 2 is refused input/arguments; quality is never an exit code. The
+dictionary is empty unless `--context` (same shape as `eval/context.json`) is
+given. Cleanup routes still have no producer; an independently authorized
+external/manual generator must emit every exact field/terminal row below.
+
+Engine/configuration identities, routes, timings, consent and human review in a
+run file remain attestations by whoever ran it, not independently verified
+facts. Never relabel a legacy file as a qualified run. Do not use test
 bytes/declarations as evidence of real speech, consent, references or quality.
 
 ## Exact v1 schema (all listed keys required; no others; nullable only where stated)
@@ -122,7 +141,7 @@ process for transcript inspection.
    disposal blocks a fully-deleted claim. The checker cannot erase external
    copies or discover an unrecorded withdrawal.
 
-B02 remains PARTIAL and uncompleted. Real consented collection, reviewed human
+B02 remains PARTIAL and uncompleted: the producer exists, the human corpus does not. Real consented collection, reviewed human
 references, reserved speakers/cohorts, actual paired engines and separately
 approved human/native qualification remain open.
 

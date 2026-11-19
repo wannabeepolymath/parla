@@ -98,6 +98,12 @@ if args.contains("corpus-check") {
         exit(2)
     }
 }
+// Same strict refusal rules; every refusal precedes the engine, which is released before exit.
+if args.contains("corpus-run") {
+    let run = await EvalCorpusRun.main(arguments: args)
+    if run.code == 0 { print(run.output) } else { FileHandle.standardError.write(Data((run.output + "\n").utf8)) }
+    exit(run.code)
+}
 
 
 /// Removes `--flag value` from `args` and returns the value. Value-taking flags
@@ -540,6 +546,10 @@ let needsCleanup = mode != .asrOnly
 
 // MARK: - Engines
 
+// Loaded before the engine so the handle's frozen request carries the fixture
+// dictionary and derives the same prompt the app ships.
+let contextFixture = (try? Data(contentsOf: contextURL)).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+
 var transcriber: EvalRecognition?
 var modelPath = ""
 if needsASR {
@@ -549,7 +559,9 @@ if needsASR {
     }
     do {
         transcriber = EvalRecognition()
-        try await transcriber?.acquire(needsASR: true, request: { RecognitionRequest(settings: Settings()) })
+        var asrSettings = Settings()
+        asrSettings.dictionary = contextFixture?.dictionary ?? []
+        try await transcriber?.acquire(needsASR: true, request: { RecognitionRequest(settings: asrSettings) })
     }
     catch { die("\(error)", 2) }
 }
@@ -567,8 +579,7 @@ settings.transformPresets = []
 settings.selectedPresetID = nil
 settings.cleanupEnabled = true
 settings.cleanupStyle = .standard
-if let data = try? Data(contentsOf: contextURL),
-   let fixture = try? JSONDecoder().decode(Settings.self, from: data) {
+if let fixture = contextFixture {
     settings.dictionary = fixture.dictionary
     settings.snippets = fixture.snippets
     settings.replacements = fixture.replacements

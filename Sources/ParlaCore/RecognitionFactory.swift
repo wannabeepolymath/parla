@@ -150,8 +150,14 @@ public final class EvalRecognition {
         guard needsASR else { return }
         handle = try await factory.acquire(request: request())
     }
+    /// `prompt` is ignored: the handle derives it from its frozen `request.dictionary`, as the app does.
+    /// The parameter stays so `Pipeline`'s transcribe closure keeps its shape.
     public func transcribe(_ samples: [Float], prompt: String?) async -> String? {
-        await handle?.recognize(samples, pass: .fullFinal, initialPrompt: prompt).text
+        await recognize(samples)?.text
+    }
+    /// Typed outcome for the corpus producer; nil when no engine was acquired.
+    public func recognize(_ samples: [Float]) async -> RecognitionPassResult? {
+        await handle?.recognize(samples, pass: .fullFinal)
     }
     public func release() { handle = nil }
 }

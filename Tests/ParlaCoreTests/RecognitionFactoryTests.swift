@@ -362,9 +362,10 @@ final class RecognitionFactoryTests: XCTestCase {
         var requests = 0
         try await eval.acquire(needsASR: false, request: { requests += 1; return self.request() }, factory: probe.factory())
         XCTAssertEqual(requests, 0); XCTAssertEqual(probe.admissions, 0); XCTAssertTrue(probe.constructions.isEmpty)
-        try await eval.acquire(needsASR: true, request: { requests += 1; return self.request() }, factory: probe.factory())
-        recognitionAssertEqual(await eval.transcribe(audio, prompt: "fixture"), "transcript")
-        XCTAssertEqual(probe.calls.last?.prompt, "fixture")
+        try await eval.acquire(needsASR: true, request: { requests += 1; return self.request(words: ["Kubernetes", "Parla"]) }, factory: probe.factory())
+        recognitionAssertEqual(await eval.transcribe(audio, prompt: "ignored"), "transcript")
+        // The handle derives the shipped prompt from request.dictionary; the explicit one is ignored.
+        XCTAssertEqual(probe.calls.last?.prompt, VocabularyHints.asrPrompt(["Kubernetes", "Parla"]))
         probe.outputs = [.init(status: 0)]; recognitionAssertEqual(await eval.transcribe(audio, prompt: nil), "")
         probe.outputs = [.init(status: 1)]; recognitionAssertNil(await eval.transcribe(audio, prompt: nil))
         XCTAssertEqual(probe.releases, 0); eval.release(); XCTAssertEqual(probe.releases, 1)
