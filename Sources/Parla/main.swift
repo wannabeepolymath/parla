@@ -508,7 +508,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { m.bindAppleSpeech(appleSpeechPreparation) }
         MainActor.assumeIsolated { m.bindParakeet(parakeetPreparation) }
         m.modelSelectionEpoch = preparationSelectionEpoch
-        m.vocabularyBudget = { [weak self] in self?.residentRecognition?.client.promptBudget }
+        m.vocabularyBudget = { [weak self] in
+            guard let client = self?.residentRecognition?.client, let budget = client.promptBudget else { return nil }
+            return (budget, ObjectIdentifier(client))
+        }
         m.preparationSnapshot = nativePreparation.snapshot
         m.onRecognitionPreviewRevoked = { [weak self] in MainActor.assumeIsolated { self?.revokeRecognitionPreview() } }
         m.onPreparationDraftDisabled = { [weak self] in
