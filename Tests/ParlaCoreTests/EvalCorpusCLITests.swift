@@ -76,4 +76,39 @@ final class EvalCorpusCLITests: XCTestCase {
         try Data("{\"version\":1,\"version\":1}".utf8).write(to: URL(fileURLWithPath: f.manifestPath))
         XCTAssertEqual(try probe(["corpus-check", f.manifestPath], fixture: f).0, 2)
     }
+    /// Every refusal here precedes engine acquisition, so no model or audio decoder runs.
+    func testCorpusRunRefusalsWriteNothing() throws {
+        let f = try EvalCorpusFixture()
+        f.manifest["snapshotAt"] = .number("1700000000")
+        f.mutateConsent { $0["effectiveAt"] = .number("1600000000"); $0["reviewedAt"] = .number("1700000000") }
+        f.mutateCase { c in
+            for key in ["verbatim", "cleaned"] {
+                if case .object(var ref) = c[key] { ref["reviewedAt"] = .number("1700000000"); c[key] = .object(ref) }
+            }
+        }
+        try f.writeManifest()
+        XCTAssertEqual(try probe(["corpus-check", f.manifestPath], fixture: f).0, 0, "admitted before the digest is broken")
+        let out = f.root.appendingPathComponent("run.json").path
+        let base = ["corpus-run", f.manifestPath, "--out", out, "--run-id", "TEST-run", "--config-revision", "TEST-config"]
+        for args in [base + ["--unknown", "x"], base + ["--run-id", "TEST-other"], Array(base.prefix(2)) + Array(base.suffix(4))] {
+            let result = try probe(args, fixture: f)
+            XCTAssertEqual(result.0, 2, result.1); XCTAssertFalse(FileManager.default.fileExists(atPath: out))
+            XCTAssertFalse(result.1.contains(f.root.path))
+        }
+        // Never overwrites: an existing --out is refused and left byte-identical.
+        let existing = Data("TEST-existing-bytes".utf8)
+        try existing.write(to: URL(fileURLWithPath: out))
+        XCTAssertEqual(try probe(base, fixture: f).0, 2)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: out)), existing)
+        try FileManager.default.removeItem(atPath: out)
+        // A manifest corpus-check refuses (digest mismatch) is refused here; nothing is written.
+        f.mutateCase { c in
+            if case .object(var audio) = c["audio"] { audio["sha256"] = .string(String(repeating: "0", count: 64)); c["audio"] = .object(audio) }
+        }
+        try f.writeManifest()
+        XCTAssertEqual(try probe(["corpus-check", f.manifestPath], fixture: f).0, 2)
+        let refused = try probe(base, fixture: f)
+        XCTAssertEqual(refused.0, 2, refused.1); XCTAssertTrue(refused.1.contains("corpus-run refused: binding"), refused.1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out))
+    }
 }
