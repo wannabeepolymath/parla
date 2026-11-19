@@ -497,6 +497,20 @@ final class HubModel: ObservableObject {
     @Published var loadError: String? { didSet { if loadError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings unavailable."); audioImport.invalidate("Settings can't be read."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
     @Published var saveError: String? { didSet { if saveError != nil { surroundingDraftChanged(); store.revokeCleanupFailover(); failoverReview = nil; templates.cancel("Settings save failed."); audioImport.invalidate("Settings could not be saved."); onActivityShadowRevoked(); onScratchpadDictionaryDraftChanged(); onParakeetDraftChanged() } } }
     @Published var modelLoaded = false
+    /// The resident model's prompt budget, read transiently; nil when none is loaded.
+    var vocabularyBudget: () -> PromptBudget? = { nil }
+    private var vocabularyMemo: (words: [String], capacity: Int?, count: Int)?
+    /// Words that reach the speech prompt. The view re-renders per keystroke, so
+    /// recompute only when the words or the budget's capacity change.
+    func retainedVocabularyCount() -> (count: Int, exact: Bool) {
+        let list = words.map(\.text), budget = vocabularyBudget()
+        if let memo = vocabularyMemo, memo.words == list, memo.capacity == budget?.capacity {
+            return (memo.count, budget != nil)
+        }
+        let count = VocabularyHints.select(list, budget: budget).count
+        vocabularyMemo = (list, budget?.capacity, count)
+        return (count, budget != nil)
+    }
     @Published var downloadProgress: Double? // non-nil while downloading
     @Published var downloadingModel: ModelCatalog.Model?
     /// Why the last download failed, nil once another one starts.

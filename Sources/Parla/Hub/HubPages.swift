@@ -553,9 +553,12 @@ struct DictionaryPage: View {
                     }
                 }
             }
-            let usedWords = VocabularyHints.select(model.words.map(\.text), byteLimit: VocabularyHints.asrBytes).count
-            if usedWords < model.words.filter({ !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }).count {
-                Text("The list is long, so only the top \(usedWords) words help recognition.")
+            let retained = model.retainedVocabularyCount()
+            let total = model.words.filter({ !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }).count
+            if retained.count < total {
+                Text(retained.exact
+                     ? "\(retained.count) of \(total) words fit the speech model's prompt. Words higher in the list win."
+                     : "About \(retained.count) of \(total) words help recognition. The exact number appears once the speech model is loaded.")
                     .font(.system(size: 12)).foregroundStyle(Theme.muted)
             }
             Button {

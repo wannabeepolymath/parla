@@ -37,6 +37,46 @@ final class VocabularyTests: XCTestCase {
         }
     }
 
+    func testTokenBudgetKeepsPriorityTermsOfAnOverBudgetDictionary() {
+        let words = (0..<200).map { "Name\($0)" }
+        let budget = PromptBudget(capacity: 223, count: { $0.utf8.count })
+        let selected = VocabularyHints.select(words, budget: budget)
+        XCTAssertEqual(selected.first, "Name0")
+        XCTAssertLessThan(selected.count, words.count)
+        let prompt = VocabularyHints.asrPrompt(words, budget: budget)
+        XCTAssertEqual(prompt, selected.joined(separator: ", "))
+        XCTAssertLessThanOrEqual(prompt?.utf8.count ?? .max, 223)
+        // No budget: the byte selection, unchanged.
+        XCTAssertEqual(VocabularyHints.select(words, budget: nil), VocabularyHints.select(words, byteLimit: VocabularyHints.asrBytes))
+        XCTAssertEqual(VocabularyHints.asrPrompt(words), VocabularyHints.asrPrompt(words, budget: nil))
+    }
+
+    func testFinalJoinedGuardHoldsForANonAdditiveCounter() {
+        // A separator piece costs its bytes alone, but the joined string pays 1 more per ", ".
+        let count: (String) -> Int = { s in
+            s.hasPrefix(", ") ? s.utf8.count : s.utf8.count + s.components(separatedBy: ", ").count - 1
+        }
+        let words = ["alpha", "beta", "gamma", "d", "epsilon"]
+        XCTAssertEqual(VocabularyHints.select(["alpha", "beta"], budget: PromptBudget(capacity: 11, count: count)), ["alpha"])
+        for capacity in 0...40 {
+            let budget = PromptBudget(capacity: capacity, count: count)
+            let selected = VocabularyHints.select(words, budget: budget)
+            XCTAssertLessThanOrEqual(count(selected.joined(separator: ", ")), capacity, "capacity \(capacity)")
+            if let tail = StreamWindow.tailPrompt(dictionary: words, confirmed: "hello world", budget: budget, reserve: 8) {
+                XCTAssertLessThanOrEqual(count(tail), capacity, "tail capacity \(capacity)")
+            }
+        }
+    }
+
+    func testRetainedCountIsExactOnlyWithABudget() {
+        // HubModel.retainedVocabularyCount: count = select(words, budget:).count, exact = budget != nil.
+        let words = (0..<200).map { "Name\($0)" }
+        let tokens = VocabularyHints.select(words, budget: PromptBudget(capacity: 223, count: { $0.utf8.count })).count
+        let bytes = VocabularyHints.select(words, budget: nil).count
+        XCTAssertEqual(bytes, VocabularyHints.select(words, byteLimit: VocabularyHints.asrBytes).count)
+        XCTAssertLessThan(tokens, bytes)
+    }
+
     func testUnicodeBoundariesOverlapsTiesLiteralOutputAndNoCascade() {
         let rules: [LiteralReplacement] = [
             .init(source: "cat", replacement: "dog"),
