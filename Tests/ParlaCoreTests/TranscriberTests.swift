@@ -1,5 +1,6 @@
 import XCTest
 @testable import ParlaCore
+import whisper
 
 final class TranscriberTests: XCTestCase {
     /// 51865 vocabularies have 99 languages (id 99 would be the translate token), 51866 has 100.
@@ -7,6 +8,84 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(WhisperCContext.languageCount(sot: 50258, translate: 50358), 99)
         XCTAssertEqual(WhisperCContext.languageCount(sot: 50258, translate: 50359), 100)
         XCTAssertEqual(WhisperCContext.languageCount(sot: 50258, translate: 50258), 0)
+    }
+    /// Fake C API: records the params each whisper_full saw, answers with `segments` and fixed evidence.
+    private final class ExperimentAPI {
+        var params: [whisper_full_params] = [], vadPaths: [String?] = []
+        let texts: [UnsafeMutablePointer<CChar>]
+        init(segments: [String]) { texts = segments.map { strdup($0)! } }
+        deinit { texts.forEach { free($0) } }
+        func context(multilingual: Bool = false, detected: String? = nil) -> WhisperCContext {
+            var api = WhisperCContext.API()
+            api.multilingual = multilingual
+            api.knowsLanguage = { ["en", "hi"].contains($0) }
+            api.spokenLanguage = { detected }
+            api.full = { params, _, _ in
+                self.params.append(params); self.vadPaths.append(params.vad_model_path.map { String(cString: $0) }); return 0
+            }
+            api.count = { Int32(self.texts.count) }
+            api.text = { UnsafePointer(self.texts[Int($0)]) }
+            api.noSpeechProbability = { Float($0) / 10 }
+            api.tokenCount = { $0 + 1 }
+            api.tokenProbability = { _, token in token == 0 ? 0.5 : 1 }
+            return WhisperCContext(api: api)
+        }
+    }
+    func testExperimentSwitchesReachTheNativeParamsAndDefaultsStayShipping() {
+        let fake = ExperimentAPI(segments: ["x"]), context = fake.context()
+        _ = context.decode([0.1], initialPrompt: nil, language: "en", configuration: WhisperDecodeConfiguration(), shouldAbort: nil)
+        var experiment = WhisperExperiment()
+        experiment.suppressNonSpeechTokens = true; experiment.carryInitialPrompt = true
+        experiment.beamSize = 5; experiment.vadModelPath = "/models/vad.bin"
+        _ = context.decode([0.1], initialPrompt: nil, language: "en",
+                           configuration: WhisperDecodeConfiguration(experiment: experiment), shouldAbort: nil)
+        let (shipping, varied) = (fake.params[0], fake.params[1])
+        XCTAssertEqual(shipping.strategy, WHISPER_SAMPLING_GREEDY)
+        XCTAssertFalse(shipping.suppress_nst || shipping.carry_initial_prompt || shipping.vad)
+        XCTAssertNil(fake.vadPaths[0])
+        XCTAssertEqual(varied.strategy, WHISPER_SAMPLING_BEAM_SEARCH); XCTAssertEqual(varied.beam_search.beam_size, 5)
+        XCTAssertTrue(varied.suppress_nst && varied.carry_initial_prompt && varied.vad)
+        XCTAssertEqual(fake.vadPaths[1], "/models/vad.bin")
+        XCTAssertGreaterThan(varied.temperature_inc, 0); XCTAssertEqual(varied.audio_ctx, 0)
+    }
+    func testTimedDecodeRefusesAnyExperiment() {
+        let fake = ExperimentAPI(segments: ["x"]), context = fake.context()
+        for change in [{ $0.suppressNonSpeechTokens = true }, { $0.carryInitialPrompt = true }, { $0.beamSize = 2 },
+                       { $0.vadModelPath = "/v" }, { $0.collectEvidence = true }] as [(inout WhisperExperiment) -> Void] {
+            var experiment = WhisperExperiment(); change(&experiment)
+            XCTAssertNil(context.decodeTimed([0.1], initialPrompt: nil, language: "en",
+                                             configuration: WhisperDecodeConfiguration(timed: true, experiment: experiment), shouldAbort: nil))
+        }
+        XCTAssertTrue(fake.params.isEmpty)
+    }
+    func testEvidenceIsCollectedOnlyWhenAskedAndRecordsTheLanguageRetry() async throws {
+        let fake = ExperimentAPI(segments: ["a", "b", "c"])
+        let english = try WhisperTranscriber(modelPath: "/m", native: fake.context())
+        _ = await english.recognize([0.1], initialPrompt: nil, language: nil, shouldAbort: nil)
+        XCTAssertNil(english.lastEvidence)
+        english.experiment.collectEvidence = true
+        _ = await english.recognize([0.1], initialPrompt: nil, language: nil, shouldAbort: nil)
+        let evidence = try XCTUnwrap(english.lastEvidence)
+        XCTAssertEqual(evidence.segments, [.init(noSpeechProbability: 0, tokens: 1, meanTokenProbability: 0.5),
+                                           .init(noSpeechProbability: 0.1, tokens: 2, meanTokenProbability: 0.75),
+                                           .init(noSpeechProbability: 0.2, tokens: 3, meanTokenProbability: 2.5 / 3)])
+        XCTAssertFalse(evidence.languageRetry); XCTAssertEqual(evidence.requestedLanguage, "en")
+
+        let hindi = try WhisperTranscriber(modelPath: "/m", native: fake.context(multilingual: true, detected: "hi"))
+        hindi.experiment.collectEvidence = true
+        _ = await hindi.recognize([0.1], initialPrompt: nil, language: nil, shouldAbort: nil)
+        let retried = try XCTUnwrap(hindi.lastEvidence)
+        XCTAssertTrue(retried.languageRetry); XCTAssertEqual(retried.requestedLanguage, "en"); XCTAssertEqual(retried.detectedLanguage, "hi")
+    }
+    func testExperimentListParsingIsStrict() {
+        let parsed = WhisperExperiment.parse("suppress-nst,beam=5")
+        XCTAssertEqual(parsed?.suppressNonSpeechTokens, true); XCTAssertEqual(parsed?.beamSize, 5)
+        XCTAssertEqual(parsed?.label, "suppress-nst+beam=5")
+        XCTAssertEqual(WhisperExperiment.parse("vad=/m/vad.bin", fileExists: { _ in true })?.label, "vad=vad.bin")
+        for refused in ["beam=99", "beam=1", "foo", "", "suppress-nst,suppress-nst", "suppress-nst=1", "beam", "vad=/missing"] {
+            XCTAssertNil(WhisperExperiment.parse(refused, fileExists: { _ in false }), refused)
+        }
+        XCTAssertEqual(WhisperExperiment().label, "")
     }
     func testShippedMultilingualModelKeepsCantonese() throws {
         let model = ModelCatalog.path(for: ModelCatalog.all.first { $0.id.hasPrefix("large") }!)

@@ -160,7 +160,36 @@ public final class EvalRecognition {
     }
     /// Typed outcome for the corpus producer; nil when no engine was acquired.
     public func recognize(_ samples: [Float]) async -> RecognitionPassResult? {
-        await handle?.recognize(samples, pass: .fullFinal)
+        let result = await handle?.recognize(samples, pass: .fullFinal)
+        evidence = (handle?.client as? WhisperTranscriber)?.lastEvidence
+        return result
     }
+    private var evidence: WhisperDecodeEvidence?
     public func release() { handle = nil }
+    /// Eval-only decoder switches; a no-op for engines other than Whisper.
+    public func configure(_ experiment: WhisperExperiment) { (handle?.client as? WhisperTranscriber)?.experiment = experiment }
+    /// Evidence of the last recognition, cleared on read so a case the floor skipped never reuses it.
+    public func takeEvidence() -> WhisperDecodeEvidence? { defer { evidence = nil }; return evidence }
+}
+
+/// `--evidence-out`: one JSON line per ASR case, never transcript text. Refuses an existing file.
+public final class EvalEvidenceLog {
+    struct Line: Encodable {
+        let name: String, audioSeconds: Double, decodeSeconds: Double, model: String, experiment: String
+        let evidence: WhisperDecodeEvidence?
+    }
+    private let handle: FileHandle
+    public init(path: String) throws {
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw TranscriberError(description: errno == EEXIST ? "evidence output exists" : "evidence output unwritable") }
+        handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+    public func append(name: String, audioSeconds: Double, decodeSeconds: Double, model: String,
+                       experiment: WhisperExperiment, evidence: WhisperDecodeEvidence?) throws {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        var data = try encoder.encode(Line(name: name, audioSeconds: audioSeconds, decodeSeconds: decodeSeconds, model: model,
+                                           experiment: experiment.label, evidence: evidence))
+        data.append(0x0A)
+        try handle.write(contentsOf: data)
+    }
 }
