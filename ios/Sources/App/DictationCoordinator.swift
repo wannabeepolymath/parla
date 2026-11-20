@@ -178,7 +178,7 @@ import ParlaCore
             do {
                 if let samples {
                     raw = try await withTaskCancellationHandler {
-                        try await DictationEngine.recognize(samples, pipeline: pipeline) { try await DictationEngine.localRecognizer(snapshot, operation: operation) }
+                        try await DictationEngine.recognize(samples) { try await DictationEngine.localRecognizer(snapshot, operation: operation) }
                     } onCancel: { operation.revoke() }
                 }
                 try Task.checkCancellation()

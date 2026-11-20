@@ -2,6 +2,18 @@ import XCTest
 @testable import ParlaCore
 
 final class TranscriberTests: XCTestCase {
+    /// 51865 vocabularies have 99 languages (id 99 would be the translate token), 51866 has 100.
+    func testLanguageCountComesFromTheModelsTokenLayout() throws {
+        XCTAssertEqual(WhisperCContext.languageCount(sot: 50258, translate: 50358), 99)
+        XCTAssertEqual(WhisperCContext.languageCount(sot: 50258, translate: 50359), 100)
+        XCTAssertEqual(WhisperCContext.languageCount(sot: 50258, translate: 50258), 0)
+    }
+    func testShippedMultilingualModelKeepsCantonese() throws {
+        let model = ModelCatalog.path(for: ModelCatalog.all.first { $0.id.hasPrefix("large") }!)
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: model), "no large-v3-turbo-q5_0 model installed")
+        let context = try WhisperCContext(model, .nativeDefaults)
+        XCTAssertTrue(context.knowsLanguage("yue")); XCTAssertFalse(context.knowsLanguage("xx"))
+    }
     func testTranscribeSilenceProducesNoCrash() async throws {
         let path = WhisperTranscriber.defaultModelPath()
         try XCTSkipUnless(FileManager.default.fileExists(atPath: path),

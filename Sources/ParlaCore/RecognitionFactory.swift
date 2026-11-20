@@ -20,6 +20,7 @@ public struct RecognitionFactory {
     public var directory: URL
     public var catalog: [ModelCatalog.Model]
     public var admit: (String, RecognitionAdmission) throws -> Void
+    public var languageHints: WhisperLanguageHints?
 
     public init(parakeetPreparedUse: @escaping (RecognitionSelection, PendingOperation?) async throws -> ParakeetInstallationLease = { _, _ in throw ParakeetRefusal.needsPreparation },
                 parakeetTrust: ParakeetTrustBottom = .system,
@@ -35,7 +36,8 @@ public struct RecognitionFactory {
                 runtime: @escaping () -> RecognitionRuntime = { WhisperCContext.runtime },
                 metadata: @escaping (String) -> RecognitionFileGeneration? = RecognitionFileGeneration.observe,
                 directory: URL = ModelCatalog.directory, catalog: [ModelCatalog.Model] = ModelCatalog.all,
-                admit: @escaping (String, RecognitionAdmission) throws -> Void = { try RecognitionFactory.admitInstalled($0, $1) }) {
+                admit: @escaping (String, RecognitionAdmission) throws -> Void = { try RecognitionFactory.admitInstalled($0, $1) },
+                languageHints: WhisperLanguageHints? = nil) {
         self.parakeetPreparedUse = parakeetPreparedUse; self.parakeetTrust = parakeetTrust
         self.parakeetApp = parakeetApp; self.parakeetWorker = parakeetWorker
         self.appleBottom = appleBottom; self.appleClock = appleClock; self.appleInstalledUse = appleInstalledUse
@@ -43,6 +45,7 @@ public struct RecognitionFactory {
         self.guardedNative = guardedNative; self.preparation = preparation
         self.preparationPermission = preparationPermission
         self.directory = directory; self.catalog = catalog; self.admit = admit
+        self.languageHints = languageHints
     }
     public static func ownedModel(path: String, directory: URL = ModelCatalog.directory,
                                   catalog: [ModelCatalog.Model] = ModelCatalog.all) -> ModelCatalog.Model? {
@@ -127,7 +130,7 @@ public struct RecognitionFactory {
             if permit != nil, policy == .readOnlyCatalog { throw PreparationRefusal.preparedResidentRequired }
             let client = try WhisperTranscriber(modelPath: request.modelPath, language: request.language,
                 native: permit.map { try guardedNative(request.modelPath, runtime.compute, $0) }
-                    ?? native(request.modelPath, runtime.compute))
+                    ?? native(request.modelPath, runtime.compute), hints: languageHints)
             // Native construction is not cancellable. Its owner stays alive until it actually returns.
             guard metadata(request.modelPath) == identity.generation else { throw TranscriberError(description: "Local model changed during acquisition") }
             guard shouldAbort?() != true else { throw CancellationError() }

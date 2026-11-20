@@ -47,12 +47,22 @@ public extension WhisperNativeContext {
                      configuration: WhisperDecodeConfiguration, shouldAbort: (() -> Bool)?) -> WhisperNativeDecode? { nil }
 }
 
+/// Last detected language per model path, in memory only. A hint is a first guess; a stale one costs one retry.
+public final class WhisperLanguageHints {
+    private let state = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
+    public init() {}
+    public func last(for model: String) -> String? { state.withLock { $0[model] } }
+    public func record(_ language: String, for model: String) { state.withLock { $0[model] = language } }
+}
+
 public final class WhisperTranscriber: RecognitionClient {
     private let native: WhisperNativeContext
     public var capabilities: RecognitionCapabilities {
         RecognitionCapabilities(modelLanguages: native.multilingual ? .multilingual : .englishOnly)
     }
     private let spoken: OSAllocatedUnfairLock<(pinned: String?, last: String)>
+    private let hints: WhisperLanguageHints?
+    private let modelPath: String
     public static func defaultModelPath() -> String { ModelCatalog.path(for: ModelCatalog.default) }
     public static var languages: [(code: String, name: String)] { WhisperCContext.languages }
     public var promptBudget: PromptBudget? { native.promptBudget }
@@ -63,9 +73,10 @@ public final class WhisperTranscriber: RecognitionClient {
     public convenience init(modelPath: String, language: String? = nil) throws {
         try self.init(modelPath: modelPath, language: language, native: WhisperCContext(modelPath, .nativeDefaults))
     }
-    public init(modelPath: String, language: String? = nil, native: WhisperNativeContext) throws {
-        self.native = native
-        spoken = OSAllocatedUnfairLock(initialState: (pinned: language, last: "en"))
+    public init(modelPath: String, language: String? = nil, native: WhisperNativeContext,
+                hints: WhisperLanguageHints? = nil) throws {
+        self.native = native; self.hints = hints; self.modelPath = modelPath
+        spoken = OSAllocatedUnfairLock(initialState: (pinned: language, last: hints?.last(for: modelPath) ?? "en"))
     }
     public func transcribe(_ samples: [Float], initialPrompt: String?, shouldAbort: (() -> Bool)? = nil) async -> String? {
         await transcribe(samples, initialPrompt: initialPrompt, language: language, shouldAbort: shouldAbort)
@@ -105,6 +116,7 @@ public final class WhisperTranscriber: RecognitionClient {
               let actual = native.spokenLanguage() else { return first }
         guard actual != guess else { return .completed(.init(text: payload.text, detectedLanguage: actual)) }
         spoken.withLock { $0.last = actual }
+        hints?.record(actual, for: modelPath)
         let retry = decodeOutcome(samples, initialPrompt: initialPrompt, language: actual, shouldAbort: shouldAbort)
         if case .completed(let result) = retry { return .completed(.init(text: result.text, detectedLanguage: actual)) }
         return retry
@@ -215,6 +227,8 @@ public final class WhisperCContext: WhisperNativeContext {
             if let returned { whisper_free(returned) } // terminal persistence failure must not leak a returned pointer
             throw error
         }
+        // A 51865 vocabulary has 99 languages: id 99 would index the translate token.
+        let languages = Self.languageCount(sot: whisper_token_sot(ctx), translate: whisper_token_translate(ctx))
         api = API(multilingual: whisper_is_multilingual(ctx) != 0,
             nTextLayer: whisper_model_n_text_layer(ctx), nVocab: whisper_model_n_vocab(ctx),
             textContext: whisper_n_text_ctx(ctx),
@@ -224,7 +238,8 @@ public final class WhisperCContext: WhisperNativeContext {
                 var tokens = [whisper_token](repeating: 0, count: max(1, text.utf8.count))
                 return max(0, Int(whisper_tokenize(ctx, text, &tokens, Int32(tokens.count))))
             },
-            knowsLanguage: { whisper_lang_id($0) >= 0 }, spokenLanguage: { Self.detectedLanguage(ctx) },
+            knowsLanguage: { let id = whisper_lang_id($0); return id >= 0 && id < languages },
+            spokenLanguage: { Self.detectedLanguage(ctx, languages: languages) },
             full: { whisper_full(ctx, $0, $1, $2) }, count: { whisper_full_n_segments(ctx) },
             text: { whisper_full_get_segment_text(ctx, $0) }, start: { whisper_full_get_segment_t0(ctx, $0) },
             end: { whisper_full_get_segment_t1(ctx, $0) }, release: { whisper_free(ctx) })
@@ -239,10 +254,13 @@ public final class WhisperCContext: WhisperNativeContext {
     }
     public func knowsLanguage(_ code: String) -> Bool { api.knowsLanguage(code) }
     public func spokenLanguage() -> String? { api.spokenLanguage() }
-    private static func detectedLanguage(_ ctx: OpaquePointer) -> String? {
+    static func languageCount(sot: Int32, translate: Int32) -> Int32 { max(0, translate - sot - 1) }
+    private static func detectedLanguage(_ ctx: OpaquePointer, languages: Int32) -> String? {
+        let ids = 0..<min(languages, whisper_lang_max_id() + 1)
+        guard !ids.isEmpty else { return nil }
         var sot = whisper_token_sot(ctx)
         guard whisper_decode(ctx, &sot, 1, 0, Self.threads) == 0, let logits = whisper_get_logits(ctx) else { return nil }
-        let best = (0...whisper_lang_max_id()).max {
+        let best = ids.max {
             logits[Int(whisper_token_lang(ctx, $0))] < logits[Int(whisper_token_lang(ctx, $1))]
         }
         return best.flatMap { whisper_lang_str($0) }.map { String(cString: $0) }
