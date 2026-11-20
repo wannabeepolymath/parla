@@ -141,12 +141,20 @@ long stretches — up to 300 seconds, the length of the capture buffer. Anything
 higher is clamped to that (and says so on stderr), because a recording that
 outlives the buffer loses its opening words.
 
+The capture buffer holds `watchdog_secs` plus one second of mono audio at the
+microphone's own rate (logged at startup with its size): about 6 MB at 48 kHz
+with the default 30 s, about 58 MB at 300 s. Each recording is resampled to
+16 kHz once, after you release the key.
+
 ## Known limitations in M1
 
 - Output goes to the clipboard, not the focused window. You paste it yourself,
   and it overwrites whatever was on the clipboard before.
 - No password-field protection. Parla cannot tell what is focused, so nothing
   stops you dictating into a password prompt — don't dictate secrets.
+- The microphone is opened once, at startup, with its default format. A device
+  that changes rate or is unplugged afterwards is not followed; restart
+  `parlad`.
 - No pill overlay and no live partial transcript; notifications are the only
   feedback while it works.
 - Unless `provider = "none"`, the transcript is sent to whichever LLM endpoint

@@ -52,7 +52,7 @@ struct App {
 /// One finished recording. `epoch` is `cancel_epoch` when the key was released.
 struct Job {
     epoch: u64,
-    samples: Vec<f32>,
+    recording: audio::Recording,
 }
 
 fn is_stale(job_epoch: u64, current: u64) -> bool {
@@ -143,29 +143,35 @@ impl App {
             let mine = job.epoch;
             move || is_stale(mine, e.load(Ordering::Relaxed))
         };
-        let produce = self.clone().produce(job.samples, stale.clone());
+        let produce = self.clone().produce(job.recording, stale.clone());
         owned(stale, produce, |text| async move { deliver::to_clipboard(&text).await }).await
     }
 
     /// Whisper then cleanup. `stale` also aborts the whisper pass natively.
     async fn produce(
         self: Arc<Self>,
-        samples: Vec<f32>,
+        recording: audio::Recording,
         stale: impl Fn() -> bool + Clone + Send + 'static,
     ) -> Result<Outcome, &'static str> {
-        let samples = worth_transcribing(samples)?;
-
-        // The one number that says whether the ring was marked on key-down:
-        // an unmarked ring hands back everything since the last dictation, so a
-        // three-second phrase arriving as thirty seconds is the symptom.
-        eprintln!(
-            "parlad: transcribing {:.1}s of audio",
-            samples.len() as f32 / audio::TARGET_RATE as f32
-        );
-
         let me = self.clone();
         let abort = stale.clone();
-        let pass = move || me.transcriber.transcribe(&samples, &me.cfg.dictionary, abort);
+        // One blocking section: resampling a long recording is real work too.
+        let pass = move || {
+            let samples = audio::resample_to_16k(&recording.samples, recording.rate);
+            drop(recording);
+            // An empty transcript is `transcript`'s "Nothing heard", the same refusal.
+            let Ok(samples) = worth_transcribing(samples) else {
+                return Ok(String::new());
+            };
+            // The one number that says whether the ring was marked on key-down:
+            // an unmarked ring hands back everything since the last dictation,
+            // so a three-second phrase arriving as thirty seconds is the symptom.
+            eprintln!(
+                "parlad: transcribing {:.1}s of audio",
+                samples.len() as f32 / audio::TARGET_RATE as f32
+            );
+            me.transcriber.transcribe(&samples, &me.cfg.dictionary, abort)
+        };
         let done = tokio::task::spawn_blocking(pass).await;
         let raw = transcript(stale(), done)?;
 
@@ -305,8 +311,8 @@ async fn main() -> anyhow::Result<()> {
     // Opened once, here, and never closed: `mark()` only stamps a position in
     // an already-running ring, because opening the mic on key-down clips the
     // first syllable.
-    let capture = Arc::new(audio::Capture::start()?);
     let watchdog = Duration::from_secs(cfg.watchdog_secs);
+    let capture = Arc::new(audio::Capture::start(watchdog)?);
 
     let app = Arc::new(App {
         cfg,
@@ -401,7 +407,7 @@ async fn main() -> anyhow::Result<()> {
                     // hold once that task is scheduled.
                     let job = Job {
                         epoch: app.cancel_epoch.load(Ordering::Relaxed),
-                        samples: capture.take_since_mark(),
+                        recording: capture.take_since_mark(),
                     };
                     app.pending.fetch_add(1, Ordering::Relaxed);
                     // The worker task owns the receiver for the daemon's life.
@@ -490,6 +496,10 @@ mod tests {
         assert_eq!(epoch.load(Ordering::Relaxed), 8, "bumped exactly once");
     }
 
+    fn job(epoch: u64, len: usize) -> Job {
+        Job { epoch, recording: audio::Recording { samples: vec![0.0; len], rate: audio::TARGET_RATE } }
+    }
+
     /// Drives `work` with a pipeline that runs the real `owned` checks around
     /// a fake whisper (which yields, so the next job could start if it were
     /// allowed to) and a recording clipboard.
@@ -507,7 +517,7 @@ mod tests {
         work(rx, move |job: Job| {
             let (log, copied, epoch) = (l.clone(), c.clone(), e.clone());
             async move {
-                let id = job.samples.len();
+                let id = job.recording.samples.len();
                 let mine = job.epoch;
                 let ep = epoch.clone();
                 let produce = async {
@@ -534,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn jobs_run_one_at_a_time_in_recording_order() {
-        let jobs = vec![Job { epoch: 0, samples: vec![0.0; 1] }, Job { epoch: 0, samples: vec![0.0; 2] }];
+        let jobs = vec![job(0, 1), job(0, 2)];
         let (log, copied) = run_jobs(jobs, None).await;
         assert_eq!(log, ["start 1", "end 1", "start 2", "end 2"]);
         assert_eq!(copied, ["text 1", "text 2"]);
@@ -543,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_revoked_mid_whisper_never_reaches_the_clipboard() {
         // Job 2 was made after the cancel (epoch 1), so it still delivers.
-        let jobs = vec![Job { epoch: 0, samples: vec![0.0; 1] }, Job { epoch: 1, samples: vec![0.0; 2] }];
+        let jobs = vec![job(0, 1), job(1, 2)];
         let (log, copied) = run_jobs(jobs, Some(1)).await;
         assert_eq!(log, ["start 1", "end 1", "start 2", "end 2"]);
         assert_eq!(copied, ["text 2"]);

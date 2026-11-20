@@ -505,7 +505,53 @@ Notes:
 
 ## After checks — added by lane 11
 
-(Placeholder. Lane 11 appends its checks here.)
+Same setup and helpers as above.
+
+- [ ] **L11.1. Startup log** — the `parlad: capturing … Hz, … ch, …; ring … s, … MB`
+  line. Record it.
+
+Result:
+
+Notes:
+
+- [ ] **L11.2. Duration fidelity** — a timed 10.0 s dictation logs
+  `transcribing 10.0s of audio` ± 0.1 s. Compare with the lane 06 baseline
+  number.
+
+Result:
+
+Notes:
+
+- [ ] **L11.3. Other devices** — repeat L11.1–L11.2 on a 44.1 kHz and a 48 kHz
+  device (or change the PipeWire clock rate) and on one USB microphone.
+
+Result:
+
+Notes:
+
+- [ ] **L11.4. Recognition sanity** — the same sentence dictated before and
+  after this lane is at least as accurate. Do not claim a WER number without the
+  lane 04 corpus.
+
+Result:
+
+Notes:
+
+- [ ] **L11.5. Memory** — `ps -o rss= -p $(pgrep parlad)` (or `smem`) after
+  5 minutes idle, with the default watchdog and with `watchdog_secs = 300`.
+  Record both.
+
+Result:
+
+Notes:
+
+- [ ] **L11.6. Five-minute dictation** — `watchdog_secs = 300`, dictate for
+  about 4.5 minutes; it finishes and delivers. Record the time from `stop` to
+  the `transcribing` log line (the resample step).
+
+Result:
+
+Notes:
 
 ---
 
