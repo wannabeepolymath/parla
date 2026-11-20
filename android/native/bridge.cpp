@@ -72,7 +72,10 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         // Init cannot abort; token still invalidates delivery immediately and owns state until return.
         if (token->canceled.load()) return nullptr;
         const bool multi = whisper_is_multilingual(ctx.get());
-        const bool pinned = chosen != "auto" && whisper_lang_id(chosen.c_str()) >= 0;
+        // The global registry has 100 ids; a 51865-vocabulary model has 99 (id 99 is its translate token).
+        const int languages = parla::language_count(whisper_token_sot(ctx.get()), whisper_token_translate(ctx.get()));
+        const int pinnedId = chosen == "auto" ? -1 : whisper_lang_id(chosen.c_str());
+        const bool pinned = pinnedId >= 0 && pinnedId < languages;
         std::string language = !multi ? "en" : pinned ? chosen : lastLanguage;
         // whisper keeps only the last n_text_ctx/2 - 1 prompt tokens; select whole terms in priority order.
         const int capacity = std::max(0, whisper_n_text_ctx(ctx.get()) / 2 - 1);
@@ -99,14 +102,14 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
             return text;
         };
         auto text = decode();
-        if (multi && !pinned && !token->canceled.load() && !text.empty()) {
+        if (multi && !pinned && languages > 0 && !token->canceled.load() && !text.empty()) {
             whisper_token sot = whisper_token_sot(ctx.get());
             const char *actual = nullptr;
             if (whisper_decode(ctx.get(), &sot, 1, 0, std::max(4, std::min(8, int(std::thread::hardware_concurrency()) - 2))) == 0) {
                 const float *logits = whisper_get_logits(ctx.get());
                 if (logits) {
                     int best = 0;
-                    for (int i = 1; i <= whisper_lang_max_id(); ++i)
+                    for (int i = 1; i < languages && i <= whisper_lang_max_id(); ++i)
                         if (logits[whisper_token_lang(ctx.get(), i)] > logits[whisper_token_lang(ctx.get(), best)]) best = i;
                     actual = whisper_lang_str(best);
                 }

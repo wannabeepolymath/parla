@@ -23,6 +23,9 @@ inline std::string join(const std::vector<std::string>& terms) {
     return out;
 }
 
+// Languages of a loaded multilingual model: the language tokens sit between sot and translate.
+inline int language_count(int sot, int translate) { return std::max(0, translate - sot - 1); }
+
 // terms: priority order. count: tokens for a UTF-8 string. Returns the ", "-joined prompt.
 template <class Count>
 std::string select_prompt(const std::vector<std::string>& terms, int capacity, Count count) {
