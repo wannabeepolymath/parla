@@ -47,7 +47,13 @@ import ParlaCore
         } catch { message = error.localizedDescription }
         let staleActivities = Activity<RecordingActivity>.activities
         Task { for activity in staleActivities { await activity.end(nil, dismissalPolicy: .immediate) } }
-        capture.onInvalidated = { [weak self] in self?.cancel(reason: "Recording stopped because the microphone changed or another app interrupted it. Start again when ready.") }
+        capture.onInvalidated = { [weak self] in
+            guard let self else { return }
+            // Keep what was already said: finish the take instead of discarding it.
+            guard self.recording else { return self.cancel(reason: "Recording stopped because the microphone changed or another app interrupted it. Start again when ready.") }
+            self.stop()
+            self.message = "Recording stopped early because a call or another app took the microphone. What you said before that was kept."
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
     }
     func foreground() {
