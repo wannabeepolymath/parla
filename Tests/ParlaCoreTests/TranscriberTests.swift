@@ -51,6 +51,20 @@ final class TranscriberTests: XCTestCase {
         XCTAssertEqual(devanagari, true, "got: \(heard[0] ?? "nil")")
     }
 
+    /// Local only: needs the default model.
+    func testNativePromptBudgetKeepsPriorityTermsWithinTheModelPrompt() throws {
+        let path = WhisperTranscriber.defaultModelPath()
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: path),
+                          "no whisper model — run scripts/download-model.sh")
+        let budget = try XCTUnwrap(try WhisperTranscriber(modelPath: path).promptBudget)
+        XCTAssertEqual(budget.capacity, 223)
+        let words = (0..<200).map { "Name\($0)" }
+        XCTAssertGreaterThan(budget.count(words.joined(separator: ", ")), 223)
+        let prompt = try XCTUnwrap(VocabularyHints.asrPrompt(words, budget: budget))
+        XCTAssertLessThanOrEqual(budget.count(prompt), 223)
+        XCTAssertTrue(prompt.hasPrefix("Name0"))
+    }
+
     func testMissingModelThrows() {
         XCTAssertThrowsError(try WhisperTranscriber(modelPath: "/nonexistent.bin"))
     }

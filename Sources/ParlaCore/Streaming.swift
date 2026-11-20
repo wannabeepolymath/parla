@@ -53,11 +53,17 @@ public struct StreamWindow {
 
     public static let confirmedContextBytes = 800
 
+    /// Tokens kept for confirmed context when a budget is known. Starting value,
+    /// roughly today's 200-character English context; revisit with lane 12 evidence.
+    public static let contextReserveTokens = 64
+
     /// initial_prompt for a tail pass: dictionary terms plus the tail of the
     /// confirmed transcript (whisper reads initial_prompt as prior context).
+    /// With a budget, the tail keeps at most `reserve` tokens and the dictionary
+    /// gets the rest. `reserve` is a test seam; production uses the default.
     public static func tailPrompt(dictionary: [String], confirmed: String,
-                                  maxContext: Int = 200) -> String? {
-        let dict = VocabularyHints.asrPrompt(dictionary)
+                                  maxContext: Int = 200, budget: PromptBudget? = nil,
+                                  reserve: Int = contextReserveTokens) -> String? {
         var tail = ""
         var bytes = 0
         for character in confirmed.suffix(max(0, maxContext)).reversed() {
@@ -66,9 +72,21 @@ public struct StreamWindow {
             tail.insert(character, at: tail.startIndex)
             bytes += size
         }
-        let ctx = tail.isEmpty ? nil : tail
-        let parts = [dict, ctx].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: " ")
+        var terms = VocabularyHints.select(dictionary, budget: nil)
+        if let budget {
+            let reserve = min(reserve, budget.capacity)
+            while !tail.isEmpty, budget.count(tail) > reserve { tail.removeFirst(max(1, tail.count / 8)) }
+            let room = max(0, budget.capacity - budget.count(tail) - (tail.isEmpty ? 0 : 1))
+            terms = VocabularyHints.select(dictionary, budget: PromptBudget(capacity: room, count: budget.count))
+        }
+        func joined() -> String? {
+            let parts = [terms.isEmpty ? nil : terms.joined(separator: ", "), tail.isEmpty ? nil : tail].compactMap { $0 }
+            return parts.isEmpty ? nil : parts.joined(separator: " ")
+        }
+        if let budget {
+            while !terms.isEmpty, let prompt = joined(), budget.count(prompt) > budget.capacity { terms.removeLast() }
+        }
+        return joined()
     }
 
     /// confirmed + " " + tail, tolerating either side being empty.

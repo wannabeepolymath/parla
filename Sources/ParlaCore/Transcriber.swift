@@ -33,6 +33,7 @@ public struct WhisperDecodeConfiguration: Equatable {
 /// Raw native operations only. Language policy and text cleanup live in the real adapter.
 public protocol WhisperNativeContext: AnyObject {
     var multilingual: Bool { get }
+    var promptBudget: PromptBudget? { get }
     func knowsLanguage(_ code: String) -> Bool
     func spokenLanguage() -> String?
     func decode(_ samples: [Float], initialPrompt: String?, language: String,
@@ -41,6 +42,7 @@ public protocol WhisperNativeContext: AnyObject {
                      configuration: WhisperDecodeConfiguration, shouldAbort: (() -> Bool)?) -> WhisperNativeDecode?
 }
 public extension WhisperNativeContext {
+    var promptBudget: PromptBudget? { nil }
     func decodeTimed(_ samples: [Float], initialPrompt: String?, language: String,
                      configuration: WhisperDecodeConfiguration, shouldAbort: (() -> Bool)?) -> WhisperNativeDecode? { nil }
 }
@@ -53,6 +55,7 @@ public final class WhisperTranscriber: RecognitionClient {
     private let spoken: OSAllocatedUnfairLock<(pinned: String?, last: String)>
     public static func defaultModelPath() -> String { ModelCatalog.path(for: ModelCatalog.default) }
     public static var languages: [(code: String, name: String)] { WhisperCContext.languages }
+    public var promptBudget: PromptBudget? { native.promptBudget }
     public var language: String? {
         get { spoken.withLock { $0.pinned } }
         set { spoken.withLock { $0.pinned = newValue } }
@@ -177,6 +180,8 @@ public final class WhisperCContext: WhisperNativeContext {
         var multilingual = false
         var nTextLayer: Int32 = 6
         var nVocab: Int32 = 51_864
+        var textContext: Int32 = 448
+        var tokenize: (String) -> Int = { $0.utf8.count }
         var knowsLanguage: (String) -> Bool = { $0 == "en" }
         var spokenLanguage: () -> String? = { nil }
         var full: (whisper_full_params, UnsafePointer<Float>?, Int32) -> Int32 = { _, _, _ in -1 }
@@ -212,6 +217,13 @@ public final class WhisperCContext: WhisperNativeContext {
         }
         api = API(multilingual: whisper_is_multilingual(ctx) != 0,
             nTextLayer: whisper_model_n_text_layer(ctx), nVocab: whisper_model_n_vocab(ctx),
+            textContext: whisper_n_text_ctx(ctx),
+            // A token consumes at least one byte, so a byte-sized buffer always fits.
+            // Never whisper_token_count: it logs on every call and is not WHISPER_API.
+            tokenize: { text in
+                var tokens = [whisper_token](repeating: 0, count: max(1, text.utf8.count))
+                return max(0, Int(whisper_tokenize(ctx, text, &tokens, Int32(tokens.count))))
+            },
             knowsLanguage: { whisper_lang_id($0) >= 0 }, spokenLanguage: { Self.detectedLanguage(ctx) },
             full: { whisper_full(ctx, $0, $1, $2) }, count: { whisper_full_n_segments(ctx) },
             text: { whisper_full_get_segment_text(ctx, $0) }, start: { whisper_full_get_segment_t0(ctx, $0) },
@@ -220,6 +232,11 @@ public final class WhisperCContext: WhisperNativeContext {
     }
     init(api: API) { self.api = api; multilingual = api.multilingual }
     deinit { api.release() }
+    /// whisper_tokenize only reads the vocabulary, so it is safe beside whisper_full.
+    /// The closure keeps this context alive; callers must not store the budget.
+    public var promptBudget: PromptBudget? {
+        PromptBudget(capacity: max(0, Int(api.textContext) / 2 - 1), count: { [self] in api.tokenize($0) })
+    }
     public func knowsLanguage(_ code: String) -> Bool { api.knowsLanguage(code) }
     public func spokenLanguage() -> String? { api.spokenLanguage() }
     private static func detectedLanguage(_ ctx: OpaquePointer) -> String? {

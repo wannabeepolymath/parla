@@ -1,6 +1,17 @@
 import Foundation
 
-/// Saved order is priority. Limits measure UTF-8 bytes, never estimated tokens.
+/// The loaded model's prompt budget. Use it transiently; never store it.
+public struct PromptBudget {
+    public let capacity: Int              // whisper_n_text_ctx / 2 - 1
+    public let count: (String) -> Int     // loaded model's tokenizer
+    public init(capacity: Int, count: @escaping (String) -> Int) {
+        self.capacity = capacity
+        self.count = count
+    }
+}
+
+/// Saved order is priority. UTF-8 bytes are the resource guard; with a
+/// `PromptBudget`, the model's tokens decide which terms are retained.
 public enum VocabularyHints {
     public static let maxHintBytes = 256
     public static let asrBytes = 2_048
@@ -24,8 +35,25 @@ public enum VocabularyHints {
         }
     }
 
-    public static func asrPrompt(_ words: [String]) -> String? {
-        let selected = select(words, byteLimit: asrBytes)
+    /// Byte admission, then token admission in priority order. A term that
+    /// does not fit is skipped; later cheaper terms may still be admitted.
+    // ponytail: recomputed per pass; memoize on (words, capacity) only if profiling shows it.
+    public static func select(_ words: [String], budget: PromptBudget?) -> [String] {
+        let candidates = select(words, byteLimit: asrBytes)
+        guard let budget else { return candidates }
+        var used = 0
+        var selected: [String] = []
+        for term in candidates {
+            let cost = budget.count(selected.isEmpty ? term : ", " + term)
+            if used + cost <= budget.capacity { selected.append(term); used += cost }
+        }
+        // Tokenization is not additive across the ", " boundaries.
+        while !selected.isEmpty, budget.count(selected.joined(separator: ", ")) > budget.capacity { selected.removeLast() }
+        return selected
+    }
+
+    public static func asrPrompt(_ words: [String], budget: PromptBudget? = nil) -> String? {
+        let selected = select(words, budget: budget)
         return selected.isEmpty ? nil : selected.joined(separator: ", ")
     }
 }

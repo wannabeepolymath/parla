@@ -32,6 +32,8 @@ public struct RecognitionRequest: Equatable, Sendable {
 public protocol RecognitionClient: AnyObject {
     var capabilities: RecognitionCapabilities { get }
     var deliveryRevoked: Bool { get }
+    /// The loaded model's prompt budget; nil keeps byte-only prompt selection.
+    var promptBudget: PromptBudget? { get }
     func recognize(_ samples: [Float], initialPrompt: String?, language: String?, shouldAbort: (() -> Bool)?) async -> RecognitionNativeOutcome
     func recognizeTimed(_ samples: [Float], initialPrompt: String?, language: String?, shouldAbort: (() -> Bool)?) async -> RecognitionNativeOutcome
     func transcribe(_ samples: [Float], initialPrompt: String?, language: String?, shouldAbort: (() -> Bool)?) async -> String?
@@ -39,6 +41,7 @@ public protocol RecognitionClient: AnyObject {
 public extension RecognitionClient {
     var capabilities: RecognitionCapabilities { RecognitionCapabilities() }
     var deliveryRevoked: Bool { false }
+    var promptBudget: PromptBudget? { nil }
     /// No compatibility fallthrough to string-only clients or other backends.
     func recognizeTimed(_ samples: [Float], initialPrompt: String?, language: String?, shouldAbort: (() -> Bool)?) async -> RecognitionNativeOutcome {
         .failed(.unsupportedCapability)
@@ -164,8 +167,8 @@ public final class RecognitionHandle {
         if !client.capabilities.manualTextPrompt { prompt = nil }
         else { switch pass {
         case .streamHead(let confirmed), .streamTail(let confirmed), .windowedFinal(let confirmed):
-            prompt = StreamWindow.tailPrompt(dictionary: request.dictionary, confirmed: confirmed)
-        case .fullFinal, .command, .hudPreview: prompt = initialPrompt ?? VocabularyHints.asrPrompt(request.dictionary)
+            prompt = StreamWindow.tailPrompt(dictionary: request.dictionary, confirmed: confirmed, budget: client.promptBudget)
+        case .fullFinal, .command, .hudPreview: prompt = initialPrompt ?? VocabularyHints.asrPrompt(request.dictionary, budget: client.promptBudget)
         case .warmup: prompt = nil
         } }
         let span = diagnostics?.begin(.asr); defer { span?.end() }

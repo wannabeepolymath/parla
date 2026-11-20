@@ -43,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The callable production binder receives all authority as inert closures.
-    /// Production capture stays OFF pending separately scoped native qualification.
+    /// Production capture is ON: `captureCapability: true`, with microphone and
+    /// selected-application capture enabled.
     @MainActor private func configureMeetingHub() {
         meetingHub.discoverApplications = {
             NSWorkspace.shared.runningApplications.compactMap { app in
@@ -507,6 +508,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { m.bindAppleSpeech(appleSpeechPreparation) }
         MainActor.assumeIsolated { m.bindParakeet(parakeetPreparation) }
         m.modelSelectionEpoch = preparationSelectionEpoch
+        m.vocabularyBudget = { [weak self] in
+            guard let resident = self?.residentRecognition, let budget = resident.client.promptBudget else { return nil }
+            return (budget, resident.instance)
+        }
         m.preparationSnapshot = nativePreparation.snapshot
         m.onRecognitionPreviewRevoked = { [weak self] in MainActor.assumeIsolated { self?.revokeRecognitionPreview() } }
         m.onPreparationDraftDisabled = { [weak self] in
