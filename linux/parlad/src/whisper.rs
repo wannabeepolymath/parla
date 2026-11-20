@@ -2,7 +2,7 @@ use anyhow::Context;
 use parla_core::config::Config;
 use parla_core::text::{select_prompt_terms, strip_non_speech};
 use std::path::{Path, PathBuf};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{get_lang_id, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Whisper's own default (`whisper.cpp:5953`), re-asserted explicitly rather
 /// than left to omission so that changing it is a visible diff instead of an
@@ -82,8 +82,31 @@ fn assemble(segments: &[String]) -> String {
     strip_non_speech(segments.concat().trim())
 }
 
+/// The language whisper decodes as, decided once at startup. Omitted stays
+/// `"en"` on every model, today's behaviour; `"auto"` is the opt-in. A code is
+/// pinned only when the loaded model has that language token: on a
+/// 51865-vocabulary model id 99 (`yue`) is the translate token. Anything
+/// unusable degrades loudly to the default, like `Config::load` does.
+/// `lang_id` is `get_lang_id(requested)`, looked up by the caller.
+pub fn resolve_language(multilingual: bool, requested: Option<&str>, lang_id: Option<i32>, language_count: i32) -> String {
+    let fallback = |why: &str| {
+        eprintln!("parlad: language = {requested:?} {why}; decoding as English");
+        "en".to_string()
+    };
+    match requested {
+        None | Some("en") => "en".into(),
+        Some(_) if !multilingual => fallback("needs a multilingual model"),
+        Some("auto") => "auto".into(),
+        Some(code) => match lang_id {
+            Some(id) if id < language_count => code.into(),
+            _ => fallback("is not a language this model knows"),
+        },
+    }
+}
+
 pub struct Transcriber {
     ctx: WhisperContext,
+    language: String,
 }
 
 // Task 8 shares `Transcriber` across tokio tasks inside an `Arc<App>`.
@@ -93,14 +116,18 @@ const _: () = {
 };
 
 impl Transcriber {
-    pub fn new(model: &Path) -> anyhow::Result<Self> {
+    pub fn new(model: &Path, language: Option<&str>) -> anyhow::Result<Self> {
         if !model.exists() {
             anyhow::bail!("whisper model not found at {}", model.display());
         }
         // `new_with_params` takes `AsRef<Path>`, so the path goes through as
         // bytes — no `to_string_lossy` to mangle a non-UTF-8 model path.
         let ctx = WhisperContext::new_with_params(model, WhisperContextParameters::default())?;
-        Ok(Self { ctx })
+        // `get_lang_id` panics on an interior NUL; such a value is simply unknown.
+        let lang_id = language.filter(|l| !l.contains('\0')).and_then(get_lang_id);
+        let count = ctx.token_translate() - ctx.token_sot() - 1;
+        let language = resolve_language(ctx.is_multilingual(), language, lang_id, count);
+        Ok(Self { ctx, language })
     }
 
     /// whisper.cpp `max_prompt_ctx = n_text_ctx / 2`, minus the `[prev]` token.
@@ -127,7 +154,15 @@ impl Transcriber {
     ///
     /// Takes the dictionary rather than a prompt so tokenizing it runs here,
     /// on the caller's blocking thread, not on a tokio worker.
-    pub fn transcribe(&self, samples: &[f32], dictionary: &[String]) -> anyhow::Result<String> {
+    ///
+    /// `should_abort` is polled by whisper during the pass; returning true ends
+    /// it early with an `Err` the caller must not report as a failure.
+    pub fn transcribe(
+        &self,
+        samples: &[f32],
+        dictionary: &[String],
+        should_abort: impl FnMut() -> bool + 'static,
+    ) -> anyhow::Result<String> {
         let initial_prompt = self.initial_prompt(dictionary);
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_progress(false);
@@ -139,6 +174,16 @@ impl Transcriber {
         ));
         params.set_temperature_inc(TEMPERATURE_INC);
         params.set_audio_ctx(AUDIO_CTX_FULL_WINDOW);
+        // Always explicit: whisper's implicit default is "en" today, and
+        // detect-only (`set_detect_language`) returns without transcribing.
+        params.set_language(Some(&self.language));
+        params.set_translate(false);
+        // ponytail: F must be `Box<dyn FnMut>`. whisper-rs 0.16's trampoline
+        // casts its user data to `*mut F` but stores a `Box<dyn FnMut>` there,
+        // so any other F is read with the wrong layout. The box is never freed
+        // (one small leak per dictation); drop the Box once whisper-rs fixes it.
+        let should_abort: Box<dyn FnMut() -> bool> = Box::new(should_abort);
+        params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(should_abort);
         if let Some(p) = &initial_prompt {
             params.set_initial_prompt(p);
         }
@@ -215,7 +260,7 @@ mod tests {
         // `.err()` rather than `.unwrap_err()`: the latter needs
         // `Transcriber: Debug`, which would mean deriving Debug on a live
         // whisper context just to write this assertion.
-        let err = Transcriber::new(std::path::Path::new("/nonexistent/model.bin"))
+        let err = Transcriber::new(std::path::Path::new("/nonexistent/model.bin"), None)
             .err()
             .expect("a missing model must fail, not load")
             .to_string();
@@ -229,6 +274,22 @@ mod tests {
         assert_eq!(prompt_from(&[], 223, str::len), None);
         assert_eq!(prompt_from(&words, 0, str::len), None);
         assert_eq!(prompt_from(&words, 223, |_| usize::MAX), None);
+    }
+
+    #[test]
+    fn language_resolution_keeps_english_unless_a_usable_language_is_asked_for() {
+        // English-only model: whatever was asked for.
+        assert_eq!(resolve_language(false, Some("hi"), Some(17), 0), "en");
+        assert_eq!(resolve_language(false, Some("auto"), None, 0), "en");
+        assert_eq!(resolve_language(false, None, None, 0), "en");
+        // Multilingual: omitted is today's English; auto is opt-in.
+        assert_eq!(resolve_language(true, None, None, 100), "en");
+        assert_eq!(resolve_language(true, Some("auto"), None, 100), "auto");
+        assert_eq!(resolve_language(true, Some("hi"), Some(17), 100), "hi");
+        // id 99 is the translate token on a 99-language (51865) vocabulary.
+        assert_eq!(resolve_language(true, Some("yue"), Some(99), 99), "en");
+        assert_eq!(resolve_language(true, Some("yue"), Some(99), 100), "yue");
+        assert_eq!(resolve_language(true, Some("zz"), None, 100), "en");
     }
 
     #[test]

@@ -62,6 +62,10 @@ pub struct Config {
     /// top. Guards sway#6456,
     /// which drops the --release edge if another key is pressed while held.
     pub watchdog_secs: u64,
+    /// None => "en" on every model (today's behaviour). "auto" => detect the
+    /// spoken language (one extra encoder pass). A whisper code ("hi") =>
+    /// pinned; a code the model lacks falls back to "en" with a stderr line.
+    pub language: Option<String>,
 }
 
 impl Default for Config {
@@ -72,6 +76,7 @@ impl Default for Config {
             cleanup: Cleanup::default(),
             whisper_model: None,
             watchdog_secs: 30,
+            language: None,
         }
     }
 }
@@ -146,6 +151,14 @@ mod tests {
         // Untouched keys must keep their defaults, not reset the struct.
         assert_eq!(c.watchdog_secs, 30);
         assert_eq!(c.cleanup.model, None);
+    }
+
+    #[test]
+    fn language_is_optional_and_parses_when_present() {
+        let c: Config = toml::from_str(r#"language = "hi""#).unwrap();
+        assert_eq!(c.language.as_deref(), Some("hi"));
+        let c: Config = toml::from_str("watchdog_secs = 10").unwrap();
+        assert_eq!(c.language, None);
     }
 
     #[test]

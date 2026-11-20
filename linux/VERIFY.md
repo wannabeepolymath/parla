@@ -428,7 +428,80 @@ Notes:
 
 ## After checks — added by lane 09
 
-(Placeholder. Lane 09 appends its checks here.)
+Same setup and helpers as above. Each item compares against its baseline.
+
+- [ ] **L9.1. A-then-B ordering** (compare B3)
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl start; sleep 2; parlactl stop
+delivered 2; wl-paste
+```
+
+Expected: the clipboard ends with B; the log shows A's `parlad: Parla — Copied: …`
+line before B's.
+
+Result:
+
+Notes:
+
+- [ ] **L9.2. Cancel after release** (compare B4)
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl cancel
+delivered; wl-paste
+```
+
+Expected: `parlactl cancel` prints `cancelled`, nothing new on the clipboard,
+and a `Cancelled — nothing copied` notification and log line.
+
+Result:
+
+Notes:
+
+- [ ] **L9.3. Cancel mid-whisper on a long clip**
+
+Dictate for about 60 s, release, wait 1 s, then `time parlactl cancel` and
+`delivered`. Expected: the `Cancelled — nothing copied` line appears within a
+few seconds of the cancel, not after the full transcription time.
+
+Result:
+
+Notes:
+
+- [ ] **L9.4. Multilingual model, no `language` key** (compare B5)
+
+Same model and sentence as B5, `language` absent. Expected: output is English
+(transcribed or translated), as in B5.
+
+Result:
+
+Notes:
+
+- [ ] **L9.5. `language = "auto"`**
+
+Same model and sentence. Expected: output in the spoken language.
+
+Result:
+
+Notes:
+
+- [ ] **L9.6. Pinned language**
+
+`language = "<code of the spoken language>"`, same sentence. Expected: output
+in that language.
+
+Result:
+
+Notes:
+
+- [ ] **L9.7. Invalid `language`**
+
+`language = "zz"`, restart. Expected: a startup stderr line naming `"zz"` and
+saying it decodes as English; dictation works and is English.
+
+Result:
+
+Notes:
 
 ## After checks — added by lane 11
 
