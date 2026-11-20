@@ -379,6 +379,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // three values the old inline flow passed from hand to hand.
     var capturedGeneration: Int?
     var captured: [Float] = []                   // .stopCapture(discard: false)
+    var capturedSummary: AudioRecorder.CaptureSummary? // set with `captured`, main only
+    var captureSummaries: [Int: AudioRecorder.CaptureSummary] = [:] // main only, per ordinary finish
     var pendingPolish: (DictationSession.Session, DictationSession.Landed)?  // .polish
     var selectionDestinations: [Int: Inserter.Destination] = [:] // main only; token captured before async work
     var pendingInstruction: String?              // .transform

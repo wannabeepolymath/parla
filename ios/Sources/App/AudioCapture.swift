@@ -1,4 +1,5 @@
 import AVFoundation
+import CallKit
 import Foundation
 import UIKit
 import ParlaCore
@@ -37,15 +38,25 @@ private final class SampleSink: @unchecked Sendable {
     private var cue: AVAudioPlayer?
     private var cueCleanup: Task<Void, Never>?
     private var generation: UUID?
-    var onInvalidated: (() -> Void)?
+    var onInvalidated: (() -> Void)?  // interruption, route change or media reset; captured audio is still in stop()
     var limitReached: Bool { sink?.state.full ?? false }
     var conversionFailed: Bool { sink?.state.failed ?? false }
     var inputName: String { AVAudioSession.sharedInstance().currentRoute.inputs.first?.portName ?? "iPhone Microphone" }
+    static let duringCall = ParlaError.message("Can't record during a call. End the call and try again.")
+    /// The session below is non-mixable: during a phone or CallKit call its activation
+    /// fails with insufficientPriority ('!pri'), so name the call instead of a generic failure.
+    static func startFailure(_ error: Error, callActive: Bool) -> ParlaError {
+        if callActive || (error as NSError).code == AVAudioSession.ErrorCode.insufficientPriority.rawValue { return duringCall }
+        return error as? ParlaError ?? .message("Could not start the microphone. Check permissions and other audio apps.")
+    }
+    private static var callActive: Bool { CXCallObserver().calls.contains { !$0.hasEnded } }
     func start(microphoneID: String?, feedback: Bool) async throws {
         let granted = await AVAudioApplication.requestRecordPermission()
         guard granted else { throw ParlaError.message("Microphone access is denied. Enable it in iPhone Settings → Parla.") }
         try Task.checkCancellation()
         guard UIApplication.shared.applicationState == .active else { throw ParlaError.unavailable }
+        // Refuse before activation: a non-mixable session must not grab audio from a call.
+        guard !Self.callActive else { throw Self.duringCall }
         let session = AVAudioSession.sharedInstance()
         do {
             cueCleanup?.cancel(); cueCleanup = nil; cue?.stop()
@@ -75,7 +86,7 @@ private final class SampleSink: @unchecked Sendable {
                 })
             }
         } catch is CancellationError { stop(feedback: false); throw CancellationError() }
-        catch { stop(feedback: false); throw ParlaError.message("Could not start the microphone. Check permissions and other audio apps.") }
+        catch { stop(feedback: false); throw Self.startFailure(error, callActive: Self.callActive) }
     }
     /// Returns everything captured so far (empty after a failed start).
     @discardableResult func stop(feedback: Bool) -> [Float] {

@@ -415,4 +415,11 @@ final class CleanupTransportTests: XCTestCase {
             }
         }
     }
+    @MainActor func testStartFailureNamesTheCall() {
+        let priority = NSError(domain: NSOSStatusErrorDomain, code: AVAudioSession.ErrorCode.insufficientPriority.rawValue)
+        XCTAssertEqual(AudioCapture.startFailure(priority, callActive: false).localizedDescription, AudioCapture.duringCall.localizedDescription)
+        XCTAssertEqual(AudioCapture.startFailure(CocoaError(.fileNoSuchFile), callActive: true).localizedDescription, AudioCapture.duringCall.localizedDescription)
+        XCTAssertEqual(AudioCapture.startFailure(ParlaError.message("Microphone is unavailable or in use."), callActive: false).localizedDescription,
+                       "Microphone is unavailable or in use.")
+    }
 }
