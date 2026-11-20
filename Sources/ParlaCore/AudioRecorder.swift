@@ -110,6 +110,46 @@ public final class AudioRecorder {
     /// ⇒ system default input. Applied at each start() while the engine is idle.
     public var inputDeviceUID: String?
 
+    /// Scalar facts about the last ordinary capture, set by stop(). Device
+    /// name/UID only — never audio. Read on main right after stop().
+    public struct CaptureSummary: Equatable, Sendable {
+        public var sampleCount = 0
+        public var rms: Float = 0
+        public var heldSeconds: Double = 0
+        public var firstPCM = false
+        public var deviceName: String?
+        public var deviceUID: String?
+        public var requestedUID: String?   // nil = follow the system default
+        public var routeChanged = false
+        public var ended: EndReason?
+        public var failedBuffers = 0
+        public init() {}
+
+        /// The take produced no transcript: one content-free Parla.log line, and
+        /// the HUD text (nil = a short tap, nothing worth saying).
+        public func noRecognitionReport() -> (log: String, hud: String?) {
+            let reason = sampleCount == 0 ? "noSamples"
+                : TextRules.audioWorthTranscribing(sampleCount: sampleCount, rms: rms)
+                    ? "asrEmptyOrFailed" : sampleCount < 6400 ? "minimumDuration" : "silence"
+            let log = "Parla no recognition: reason=\(reason) samples=\(sampleCount)"
+                + " dur=\(String(format: "%.2f", Double(sampleCount) / 16_000))s held=\(String(format: "%.2f", heldSeconds))s"
+                + " rms=\(String(format: "%.6f", rms)) firstPCM=\(firstPCM ? 1 : 0)"
+                + " device=\"\(deviceName ?? "unknown")\" uid=\(deviceUID ?? "unknown")"
+                + " requested=\(requestedUID ?? "system default") routeChanged=\(routeChanged ? 1 : 0)"
+                + " ended=\(ended.map { "\($0)" } ?? "none") failedBuffers=\(failedBuffers)"
+            let noSound = "No sound from \(deviceName ?? "the microphone") — in use by another app?"
+            switch reason {
+            case "asrEmptyOrFailed": return (log, firstPCM ? "No speech recognized" : noSound)
+            // The HUD truncates the tail, so the device name leads.
+            // ponytail: 1 s separates an accidental tap from a mic that delivered nothing.
+            case "minimumDuration": return (log, heldSeconds >= 1 ? noSound : nil)
+            default: return (log, noSound)
+            }
+        }
+    }
+    public private(set) var lastCapture: CaptureSummary?
+    private var boundUID: String?
+
     public init(engine: MicrophoneCaptureEngine? = nil, admission: CaptureAdmission = CaptureAdmission(),
                 conversion: ((AVAudioPCMBuffer) -> [Float]?)? = nil,
                 guidedDrain: (() -> Result<[Float], GuidedTemplateFailure>)? = nil,
@@ -506,6 +546,7 @@ public final class AudioRecorder {
         let name = device == kAudioObjectUnknown ? nil : Self.stringProperty(device, kAudioObjectPropertyName)
         let requestedUID = unsavedPurpose == nil ? inputDeviceUID : diagnosticRequestedUID
         lock.withLock {
+            boundUID = actualUID
             localRoute = MicrophoneRoute(name: name, fallback: actualUID.map { requestedUID != nil && requestedUID != $0 })
             if capturing { captureDiagnostics?.route = route; captureDiagnostics?.routeEvidence = evidence }
         }
@@ -1045,11 +1086,17 @@ public final class AudioRecorder {
         captureFormat = nil
         let failures = failedBuffers
         let diagnosticEnd = ended
+        var summary = CaptureSummary()
+        summary.sampleCount = captured.count; summary.heldSeconds = captureClock() - captureStartedAt
+        summary.firstPCM = postStartPCM; summary.deviceName = localRoute.name; summary.deviceUID = boundUID
+        summary.requestedUID = inputDeviceUID; summary.routeChanged = canceledCaptureDisrupted || resumes > 0
+        summary.ended = diagnosticEnd; summary.failedBuffers = failures
         // Whatever the tap wrote while stop() ran is this dictation's own tail,
         // already transcribed — never prepend it to the next one.
         preRoll.reset()
         lock.unlock()
         let rms = AudioRecorder.rms(captured)
+        summary.rms = rms; lastCapture = summary
         lock.withLock { captureDiagnostics?.stop(sampleCount: captured.count, rms: rms, deviceLost: diagnosticEnd == .deviceLost) }
         // The production reader of the failure count, which is the whole reason
         // it is kept: "Parla heard nothing" otherwise logs identically whether the

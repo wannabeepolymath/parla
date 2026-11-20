@@ -1,8 +1,43 @@
+import AVFoundation
 import CoreAudio
 import XCTest
 @testable import ParlaCore
 
 final class AudioRecorderTests: XCTestCase {
+    private final class SilentEngine: MicrophoneCaptureEngine {
+        var isRunning = false
+        var route = MicrophoneRoute(name: "Camo Microphone")
+        var changed: (() -> Void)?
+        func start(requestedUID: String?, receive: @escaping (AVAudioPCMBuffer) -> Void, changed: @escaping () -> Void) throws {
+            isRunning = true; self.changed = changed
+        }
+        func stop() { isRunning = false }
+    }
+
+    func testSilentTakeReportsReasonDeviceAndRouteChange() throws {
+        var clock: TimeInterval = 100
+        let engine = SilentEngine()
+        let recorder = AudioRecorder(engine: engine, captureClock: { clock }, scheduleRoute: { _, _ in {} })
+        try recorder.start()
+        engine.changed?()                      // a call grabbing the route mid-take
+        recorder.append([Float](repeating: 0, count: 32_000))
+        clock += 3
+        _ = recorder.stop()
+        let summary = try XCTUnwrap(recorder.lastCapture)
+        let report = summary.noRecognitionReport()
+        XCTAssertTrue(report.log.contains("reason=silence samples=32000"), report.log)
+        XCTAssertTrue(report.log.contains("held=3.00s"), report.log)
+        XCTAssertTrue(report.log.contains("firstPCM=0"), report.log)
+        XCTAssertTrue(report.log.contains("device=\"Camo Microphone\""), report.log)
+        XCTAssertTrue(report.log.contains("requested=system default routeChanged=1"), report.log)
+        XCTAssertEqual(report.hud, "No sound from Camo Microphone — in use by another app?")
+
+        var tap = AudioRecorder.CaptureSummary(); tap.sampleCount = 3_000; tap.heldSeconds = 0.3
+        XCTAssertTrue(tap.noRecognitionReport().log.contains("reason=minimumDuration"))
+        XCTAssertNil(tap.noRecognitionReport().hud, "an accidental tap stays quiet")
+        XCTAssertTrue(AudioRecorder.CaptureSummary().noRecognitionReport().log.contains("reason=noSamples"))
+    }
+
     func testRMSEmptyIsZero() {
         XCTAssertEqual(AudioRecorder.rms([]), 0)
     }
