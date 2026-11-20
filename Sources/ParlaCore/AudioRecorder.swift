@@ -137,18 +137,19 @@ public final class AudioRecorder {
                 + " device=\"\(deviceName ?? "unknown")\" uid=\(deviceUID ?? "unknown")"
                 + " requested=\(requestedUID ?? "system default") routeChanged=\(routeChanged ? 1 : 0)"
                 + " ended=\(ended.map { "\($0)" } ?? "none") failedBuffers=\(failedBuffers)"
+            // ponytail: 1 s separates an accidental tap from a mic that delivered nothing.
+            guard heldSeconds >= 1 else { return (log, nil) }
             let noSound = "No sound from \(deviceName ?? "the microphone") — in use by another app?"
             switch reason {
             case "asrEmptyOrFailed": return (log, firstPCM ? "No speech recognized" : noSound)
             // The HUD truncates the tail, so the device name leads.
-            // ponytail: 1 s separates an accidental tap from a mic that delivered nothing.
-            case "minimumDuration": return (log, heldSeconds >= 1 ? noSound : nil)
             default: return (log, noSound)
             }
         }
     }
     public private(set) var lastCapture: CaptureSummary?
     private var boundUID: String?
+    private var boundRequestedUID: String?   // what the bound capture asked for, not today's preference
 
     public init(engine: MicrophoneCaptureEngine? = nil, admission: CaptureAdmission = CaptureAdmission(),
                 conversion: ((AVAudioPCMBuffer) -> [Float]?)? = nil,
@@ -474,9 +475,10 @@ public final class AudioRecorder {
 
     private func build(device: AudioDeviceID?) throws {
         let epoch = UUID()
-        lock.withLock { engineEpoch = epoch; lastFeed = nil }
+        let requested = unsavedPurpose == nil ? inputDeviceUID : diagnosticRequestedUID
+        lock.withLock { engineEpoch = epoch; lastFeed = nil; boundRequestedUID = requested }
         if let testEngine {
-            try testEngine.start(requestedUID: unsavedPurpose == nil ? inputDeviceUID : diagnosticRequestedUID, receive: { [weak self] buffer in
+            try testEngine.start(requestedUID: requested, receive: { [weak self] buffer in
                 self?.receive(buffer, epoch: epoch)
             }, changed: { [weak self] in self?.configurationChanged(epoch: epoch) })
             updateDiagnosticRoute(); return
@@ -1089,7 +1091,7 @@ public final class AudioRecorder {
         var summary = CaptureSummary()
         summary.sampleCount = captured.count; summary.heldSeconds = captureClock() - captureStartedAt
         summary.firstPCM = postStartPCM; summary.deviceName = localRoute.name; summary.deviceUID = boundUID
-        summary.requestedUID = inputDeviceUID; summary.routeChanged = canceledCaptureDisrupted || resumes > 0
+        summary.requestedUID = boundRequestedUID; summary.routeChanged = canceledCaptureDisrupted || resumes > 0
         summary.ended = diagnosticEnd; summary.failedBuffers = failures
         // Whatever the tap wrote while stop() ran is this dictation's own tail,
         // already transcribed — never prepend it to the next one.

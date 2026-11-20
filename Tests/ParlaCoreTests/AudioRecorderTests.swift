@@ -36,6 +36,21 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertTrue(tap.noRecognitionReport().log.contains("reason=minimumDuration"))
         XCTAssertNil(tap.noRecognitionReport().hud, "an accidental tap stays quiet")
         XCTAssertTrue(AudioRecorder.CaptureSummary().noRecognitionReport().log.contains("reason=noSamples"))
+        var emptyTap = AudioRecorder.CaptureSummary(); emptyTap.heldSeconds = 0.1
+        XCTAssertNil(emptyTap.noRecognitionReport().hud, "a zero-sample tap stays quiet")
+        var preRollTap = AudioRecorder.CaptureSummary(); preRollTap.sampleCount = 8_000; preRollTap.heldSeconds = 0.2
+        XCTAssertTrue(preRollTap.noRecognitionReport().log.contains("reason=silence"))
+        XCTAssertNil(preRollTap.noRecognitionReport().hud, "a silent tap carrying pre-roll stays quiet")
+    }
+
+    func testSummaryReportsTheUIDTheCaptureWasBoundWith() throws {
+        let engine = SilentEngine()
+        let recorder = AudioRecorder(engine: engine, scheduleRoute: { _, _ in {} })
+        recorder.inputDeviceUID = "mic-A"
+        try recorder.start()
+        recorder.inputDeviceUID = "mic-B"       // picked mid-take; capture stays on A
+        _ = recorder.stop()
+        XCTAssertEqual(recorder.lastCapture?.requestedUID, "mic-A")
     }
 
     func testRMSEmptyIsZero() {
