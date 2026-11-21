@@ -56,9 +56,34 @@ final class ImportedCompressedAudioTests: XCTestCase {
         XCTAssertEqual(checks, 4)
         XCTAssertEqual(try leftovers(), [])
     }
-    func testNoReadableAudioIsAFormatFailureAndOtherFormatsAreRefused() throws {
-        XCTAssertThrowsError(try decode(Data(repeating: 0, count: 4_096))) { XCTAssertEqual($0 as? ImportedCompressedAudio.Failure, .format) }
+    /// A valid MPEG-4 container holding one 16×16 H.264 frame and no audio track, generated here.
+    private func videoOnly() throws -> Data {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("parla-fixture-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264,
+                                                                         AVVideoWidthKey: 16, AVVideoHeightKey: 16])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
+        writer.add(input)
+        XCTAssertTrue(writer.startWriting()); writer.startSession(atSourceTime: .zero)
+        var pixels: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32BGRA, nil, &pixels)
+        while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.01) }
+        XCTAssertTrue(adaptor.append(try XCTUnwrap(pixels), withPresentationTime: .zero))
+        input.markAsFinished()
+        let done = DispatchSemaphore(value: 0)
+        writer.finishWriting { done.signal() }
+        done.wait()
+        XCTAssertEqual(writer.status, .completed, String(describing: writer.error))
+        return try Data(contentsOf: url)
+    }
+    func testVideoOnlyIsAFormatFailureAndCorruptIsADecodeFailure() throws {
+        XCTAssertThrowsError(try decode(try videoOnly())) { XCTAssertEqual($0 as? ImportedCompressedAudio.Failure, .format) }
+        let audio = try m4a()
+        for corrupt in [Data(repeating: 0, count: 4_096), audio.prefix(audio.count / 2)] {
+            XCTAssertThrowsError(try decode(corrupt)) { XCTAssertEqual($0 as? ImportedCompressedAudio.Failure, .native) }
+        }
         XCTAssertEqual(try leftovers(), [])
-        XCTAssertThrowsError(try ImportedCompressedAudio.decode(try m4a(), format: .wav)) { XCTAssertEqual($0 as? ImportedCompressedAudio.Failure, .format) }
+        XCTAssertThrowsError(try ImportedCompressedAudio.decode(audio, format: .wav)) { XCTAssertEqual($0 as? ImportedCompressedAudio.Failure, .format) }
     }
 }

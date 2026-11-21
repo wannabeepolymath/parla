@@ -55,14 +55,15 @@ public enum ImportedCompressedAudio {
         do { try handle.write(contentsOf: bytes); try handle.close() } catch { throw Failure.native }
         if canceled() { throw CancellationError() }
 
-        let file: AVAudioFile
-        do { file = try AVAudioFile(forReading: url) } catch { throw Failure.format }
-        let source = file.fileFormat.streamDescription.pointee
-        let reported = Int(max(0, file.length))
-        guard source.mSampleRate.isFinite, source.mSampleRate > 0, source.mChannelsPerFrame > 0 else { throw Failure.format }
-
+        // Only a readable container with no audio track is a format failure; a corrupt, truncated
+        // or protected file that cannot be opened is a decode failure.
         let asset = AVURLAsset(url: url)
         guard let track = try audioTrack(asset) else { throw Failure.format }
+        let file: AVAudioFile
+        do { file = try AVAudioFile(forReading: url) } catch { throw Failure.native }
+        let source = file.fileFormat.streamDescription.pointee
+        let reported = Int(max(0, file.length))
+        guard source.mSampleRate.isFinite, source.mSampleRate > 0, source.mChannelsPerFrame > 0 else { throw Failure.native }
         let reader: AVAssetReader
         do { reader = try AVAssetReader(asset: asset) } catch { throw Failure.native }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
@@ -114,7 +115,7 @@ public enum ImportedCompressedAudio {
             box.tracks = tracks; box.failed = error != nil; done.signal()
         }
         done.wait()
-        guard !box.failed else { throw Failure.format }
+        guard !box.failed else { throw Failure.native }
         return box.tracks?.first
     }
 
