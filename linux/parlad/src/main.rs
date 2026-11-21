@@ -10,8 +10,7 @@ use parla_core::prompt::Context;
 use parla_core::text::{audio_worth_transcribing, flatten_newlines, rms};
 use session::{Command, Edge, Session};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::sync::Mutex;
@@ -42,14 +41,50 @@ const TOAST: deliver::Timeout = deliver::Timeout::Milliseconds(4_000);
 struct App {
     cfg: Config,
     transcriber: whisper::Transcriber,
-    /// Bumped by a `cancel` while idle; a job whose epoch no longer matches is
-    /// revoked. Read under the session lock when a job is made.
-    cancel_epoch: Arc<AtomicU64>,
-    /// Jobs queued or running. Up under the session lock, down by the worker.
-    pending: AtomicUsize,
+    ledger: Arc<StdMutex<Ledger>>,
 }
 
-/// One finished recording. `epoch` is `cancel_epoch` when the key was released.
+/// Job ownership. One lock, so a job passing its last ownership check and an
+/// idle `cancel` cannot interleave: either the cancel lands first and the job
+/// is revoked, or the job is committed and the cancel does not claim it.
+#[derive(Default)]
+struct Ledger {
+    /// Bumped by a `cancel` while idle; a job whose epoch no longer matches is
+    /// revoked.
+    epoch: u64,
+    /// Jobs queued or running. Up under the session lock, down by the worker.
+    pending: usize,
+    /// The running job passed its last check and is on its way to the
+    /// clipboard. One worker, so at most one.
+    committed: bool,
+}
+
+impl Ledger {
+    /// A finished recording joins the queue; returns its epoch.
+    fn enqueue(&mut self) -> u64 {
+        self.pending += 1;
+        self.epoch
+    }
+
+    /// The last ownership check. `true` commits the job to delivery.
+    fn commit(&mut self, mine: u64) -> bool {
+        self.committed = !is_stale(mine, self.epoch);
+        self.committed
+    }
+
+    /// The worker is done with a job, whatever became of it.
+    fn done(&mut self) {
+        self.pending -= 1;
+        self.committed = false;
+    }
+}
+
+fn lock(l: &StdMutex<Ledger>) -> std::sync::MutexGuard<'_, Ledger> {
+    // Nothing panics while holding it; a poisoned ledger is still accurate.
+    l.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One finished recording. `epoch` is the ledger's when the key was released.
 struct Job {
     epoch: u64,
     recording: audio::Recording,
@@ -60,10 +95,12 @@ fn is_stale(job_epoch: u64, current: u64) -> bool {
 }
 
 /// `cancel` with nothing recording: revoke every pending job, or say there was
-/// nothing to cancel. Called under the session lock.
-fn cancel_idle(pending: &AtomicUsize, cancel_epoch: &AtomicU64) -> &'static str {
-    if pending.load(Ordering::Relaxed) > 0 {
-        cancel_epoch.fetch_add(1, Ordering::Relaxed);
+/// nothing to cancel. A committed job is past revoking. Called under the
+/// session lock.
+fn cancel_idle(ledger: &StdMutex<Ledger>) -> &'static str {
+    let mut l = lock(ledger);
+    if l.pending > usize::from(l.committed) {
+        l.epoch += 1;
         "cancelled"
     } else {
         "ignored"
@@ -85,6 +122,7 @@ async fn work<F: Future<Output = ()>>(mut rx: UnboundedReceiver<Job>, mut run: i
 /// is lazy: it does not start unless the job is still owned.
 async fn owned<D: Future<Output = anyhow::Result<()>>>(
     stale: impl Fn() -> bool,
+    commit: impl FnOnce() -> bool,
     produce: impl Future<Output = Result<Outcome, &'static str>>,
     deliver: impl FnOnce(String) -> D,
 ) -> Message {
@@ -95,8 +133,9 @@ async fn owned<D: Future<Output = anyhow::Result<()>>>(
         Ok(out) => out,
         Err(refusal) => return ("Parla", refusal.into(), TOAST),
     };
-    // The last check: nothing reaches the clipboard for a revoked job.
-    if stale() {
+    // The last check: nothing reaches the clipboard for a revoked job, and a
+    // `cancel` from here on does not claim this one.
+    if !commit() {
         return ("Parla", CANCELLED.into(), TOAST);
     }
     delivered(deliver(out.text.clone()).await, out)
@@ -138,13 +177,14 @@ impl App {
     /// watchdog tick, which is the one thing guaranteed to be needed if a
     /// dictation goes wrong.
     async fn dictate(self: Arc<Self>, job: Job) -> Message {
+        let mine = job.epoch;
         let stale = {
-            let e = self.cancel_epoch.clone();
-            let mine = job.epoch;
-            move || is_stale(mine, e.load(Ordering::Relaxed))
+            let l = self.ledger.clone();
+            move || is_stale(mine, lock(&l).epoch)
         };
+        let commit = || lock(&self.ledger).commit(mine);
         let produce = self.clone().produce(job.recording, stale.clone());
-        owned(stale, produce, |text| async move { deliver::to_clipboard(&text).await }).await
+        owned(stale, commit, produce, |text| async move { deliver::to_clipboard(&text).await }).await
     }
 
     /// Whisper then cleanup. `stale` also aborts the whisper pass natively.
@@ -317,8 +357,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Arc::new(App {
         cfg,
         transcriber,
-        cancel_epoch: Arc::new(AtomicU64::new(0)),
-        pending: AtomicUsize::new(0),
+        ledger: Arc::default(),
     });
     let sess = Arc::new(Mutex::new(Session::new(watchdog)));
 
@@ -331,7 +370,7 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = tokio::spawn(app.clone().finish(job)).await {
                 eprintln!("parlad: dictation task panicked: {e}");
             }
-            app.pending.fetch_sub(1, Ordering::Relaxed);
+            lock(&app.ledger).done();
         }
     }));
 
@@ -406,10 +445,9 @@ async fn main() -> anyhow::Result<()> {
                     // taken here rather than on whatever the ring happens to
                     // hold once that task is scheduled.
                     let job = Job {
-                        epoch: app.cancel_epoch.load(Ordering::Relaxed),
+                        epoch: lock(&app.ledger).enqueue(),
                         recording: capture.take_since_mark(),
                     };
-                    app.pending.fetch_add(1, Ordering::Relaxed);
                     // The worker task owns the receiver for the daemon's life.
                     jobs.send(job).expect("job worker stopped");
                     "processing"
@@ -420,7 +458,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Pending jobs need a cancel of their own while idle; a cancel
                 // while recording discards only the recording.
-                Edge::Ignored if cmd == Command::Cancel => cancel_idle(&app.pending, &app.cancel_epoch),
+                Edge::Ignored if cmd == Command::Cancel => cancel_idle(&app.ledger),
                 Edge::Ignored => "ignored",
             };
             reply.into()
@@ -489,11 +527,36 @@ mod tests {
 
     #[test]
     fn cancel_while_idle_revokes_pending_jobs_or_is_ignored() {
-        let epoch = AtomicU64::new(7);
-        assert_eq!(cancel_idle(&AtomicUsize::new(0), &epoch), "ignored");
-        assert_eq!(epoch.load(Ordering::Relaxed), 7);
-        assert_eq!(cancel_idle(&AtomicUsize::new(2), &epoch), "cancelled");
-        assert_eq!(epoch.load(Ordering::Relaxed), 8, "bumped exactly once");
+        let ledger = StdMutex::new(Ledger { epoch: 7, ..Ledger::default() });
+        assert_eq!(cancel_idle(&ledger), "ignored");
+        assert_eq!(lock(&ledger).epoch, 7);
+        lock(&ledger).pending = 2;
+        assert_eq!(cancel_idle(&ledger), "cancelled");
+        assert_eq!(lock(&ledger).epoch, 8, "bumped exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_the_clipboard_handoff_does_not_claim_the_job() {
+        // The job passed its last check; while the handoff is suspended a
+        // cancel arrives. It must not answer "cancelled" for text that lands.
+        let ledger = StdMutex::new(Ledger::default());
+        let mine = lock(&ledger).enqueue();
+        let reply = std::cell::Cell::new("");
+        let msg = owned(
+            || is_stale(mine, lock(&ledger).epoch),
+            || lock(&ledger).commit(mine),
+            async { Ok(outcome("kept", None)) },
+            |_| async {
+                tokio::task::yield_now().await;
+                reply.set(cancel_idle(&ledger));
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(msg.1, "Copied: kept");
+        assert_eq!(reply.get(), "ignored");
+        lock(&ledger).done();
+        assert_eq!(cancel_idle(&ledger), "ignored", "nothing left pending");
     }
 
     fn job(epoch: u64, len: usize) -> Job {
@@ -504,27 +567,25 @@ mod tests {
     /// a fake whisper (which yields, so the next job could start if it were
     /// allowed to) and a recording clipboard.
     async fn run_jobs(jobs: Vec<Job>, bump_during: Option<u64>) -> (Vec<String>, Vec<String>) {
-        use std::sync::Mutex as StdMutex;
         let log = Arc::new(StdMutex::new(Vec::new()));
         let copied = Arc::new(StdMutex::new(Vec::new()));
-        let epoch = Arc::new(AtomicU64::new(0));
+        let ledger = Arc::new(StdMutex::new(Ledger::default()));
         let (tx, rx) = unbounded_channel();
         for job in jobs {
             tx.send(job).unwrap();
         }
         drop(tx);
-        let (l, c, e) = (log.clone(), copied.clone(), epoch.clone());
+        let (l, c, e) = (log.clone(), copied.clone(), ledger.clone());
         work(rx, move |job: Job| {
-            let (log, copied, epoch) = (l.clone(), c.clone(), e.clone());
+            let (log, copied, ledger) = (l.clone(), c.clone(), e.clone());
             async move {
                 let id = job.recording.samples.len();
                 let mine = job.epoch;
-                let ep = epoch.clone();
                 let produce = async {
                     log.lock().unwrap().push(format!("start {id}"));
                     tokio::task::yield_now().await;
                     if bump_during == Some(id as u64) {
-                        epoch.fetch_add(1, Ordering::Relaxed); // cancel lands mid-whisper
+                        lock(&ledger).epoch += 1; // cancel lands mid-whisper
                     }
                     tokio::task::yield_now().await;
                     log.lock().unwrap().push(format!("end {id}"));
@@ -534,7 +595,8 @@ mod tests {
                     copied.lock().unwrap().push(t);
                     Ok(())
                 };
-                owned(move || is_stale(mine, ep.load(Ordering::Relaxed)), produce, deliver).await;
+                let stale = || is_stale(mine, lock(&ledger).epoch);
+                owned(stale, || lock(&ledger).commit(mine), produce, deliver).await;
             }
         })
         .await;
@@ -564,6 +626,7 @@ mod tests {
         let ran = std::cell::Cell::new(false);
         let msg = owned(
             || true,
+            || panic!("committed a revoked job"),
             async {
                 ran.set(true);
                 Ok(outcome("x", None))

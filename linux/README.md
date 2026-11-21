@@ -124,7 +124,8 @@ so the clipboard always ends with the newest one. `parlactl cancel` while
 recording discards only that recording. `parlactl cancel` with nothing
 recording revokes every dictation still being transcribed: none of them
 reaches the clipboard, each shows "Cancelled — nothing copied", and the reply
-is `cancelled` (or `ignored` when nothing was pending). So a dictation still
+is `cancelled` (or `ignored` when nothing was pending, or the only one is
+already being copied). So a dictation still
 in progress after a cancelled recording needs a second cancel.
 
 `parlactl status` reports what the daemon is doing; `parlactl start` and

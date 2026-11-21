@@ -124,7 +124,8 @@ impl Transcriber {
         // bytes — no `to_string_lossy` to mangle a non-UTF-8 model path.
         let ctx = WhisperContext::new_with_params(model, WhisperContextParameters::default())?;
         // `get_lang_id` panics on an interior NUL; such a value is simply unknown.
-        let lang_id = language.filter(|l| !l.contains('\0')).and_then(get_lang_id);
+        // `"auto"` is not a language, and whisper.cpp would log it as unknown.
+        let lang_id = language.filter(|l| *l != "auto" && !l.contains('\0')).and_then(get_lang_id);
         let count = ctx.token_translate() - ctx.token_sot() - 1;
         let language = resolve_language(ctx.is_multilingual(), language, lang_id, count);
         Ok(Self { ctx, language })
