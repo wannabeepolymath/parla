@@ -59,7 +59,7 @@ struct HubAudioImportView: View {
                         Button(review.saveFailed ? "Try saving again" : "Save to history", action: model.saveAudioImport)
                     } else { Text("History is off.").foregroundStyle(.secondary) }
                 }.disabled(model.hasPendingSettingsSave || model.loadError != nil || model.saveError != nil)
-                Text("Raw recognition with model and timing details.")
+                Text("JSON includes the raw transcript, model, and timestamps when available.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
