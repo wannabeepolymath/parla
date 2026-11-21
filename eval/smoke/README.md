@@ -55,4 +55,6 @@ Never add a row you have not downloaded and checked yourself.
 - [ ] Decide per clip whether the licence allows committing the WAV; otherwise keep it fetched.
 - [ ] Trigger the workflow once manually and confirm the model cache, the fetch step and the
       `parla-eval` step behave; fix the workflow from that run's logs.
-- [ ] Include at least one clip with a proper noun so a prompt-wiring regression is visible.
+- [ ] Include at least one clip with a proper noun so a prompt-wiring regression is visible, and
+      commit `eval/smoke/context.json` (a `Settings` JSON whose `dictionary` lists that noun).
+      Without it `parla-eval` runs with an empty dictionary and no prompt, so the clip tests nothing.

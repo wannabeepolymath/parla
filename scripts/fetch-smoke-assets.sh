@@ -7,6 +7,8 @@ set -euo pipefail
 
 MANIFEST="${1:-eval/smoke/clips.tsv}"
 CASES="${2:-eval/smoke/cases}"
+# The loop reads through process substitution, which hides a missing file from set -e.
+[ -f "$MANIFEST" ] && [ -r "$MANIFEST" ] || { echo "manifest not readable: $MANIFEST" >&2; exit 1; }
 mkdir -p "$CASES"
 
 PART=""
