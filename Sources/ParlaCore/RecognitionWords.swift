@@ -48,7 +48,7 @@ public struct RecognitionWords: Equatable, Sendable {
 
     /// Pure token → word assembly. Special and timestamp tokens (`id >= eot`) are dropped. A token
     /// starting with a space, or a new segment, starts a word; other tokens extend it; a
-    /// punctuation-only token attaches to the previous word. Bytes are decoded once per word;
+    /// punctuation-only token attaches to the previous word of the same segment. Bytes are decoded once per word;
     /// a word that is not valid UTF-8 is dropped.
     public static func assemble(tokens: [Token], eot: Int32) -> [Word] {
         var words: [Word] = []
@@ -62,7 +62,7 @@ public struct RecognitionWords: Equatable, Sendable {
         for token in tokens where token.id < eot && !token.bytes.isEmpty {
             let trimmed = String(bytes: token.bytes, encoding: .utf8)?.trimmingCharacters(in: .whitespaces)
             let punctuation = trimmed.map { !$0.isEmpty && $0.unicodeScalars.allSatisfy(CharacterSet.punctuationCharacters.contains) } ?? false
-            let startsWord = segment < 0 || (!punctuation && (token.bytes[0] == 0x20 || token.segment != segment))
+            let startsWord = segment < 0 || token.segment != segment || (!punctuation && token.bytes[0] == 0x20)
             if startsWord {
                 flush()
                 start = token.start; segment = token.segment

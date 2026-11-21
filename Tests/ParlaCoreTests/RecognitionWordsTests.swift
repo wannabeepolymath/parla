@@ -12,6 +12,12 @@ final class RecognitionWordsTests: XCTestCase {
         ], eot: 50_256)
         XCTAssertEqual(words, [.init(text: "Hello,", start: 10, end: 22, segment: 0), .init(text: "world.", start: 30, end: 41, segment: 0)])
     }
+    func testPunctuationOpeningASegmentNeverJoinsThePreviousSegment() {
+        let words = RecognitionWords.assemble(tokens: [
+            token(" Hello", 0, 10), token(" (", 20, 21, segment: 1), token("world", 21, 30, segment: 1), token(")", 30, 31, segment: 1),
+        ], eot: 50_256)
+        XCTAssertEqual(words, [.init(text: "Hello", start: 0, end: 10, segment: 0), .init(text: "(world)", start: 20, end: 31, segment: 1)])
+    }
     func testMultiByteCharacterSplitAcrossTokensDecodesAsOneWord() {
         let bytes = Array(" नमस्ते".utf8)
         let words = RecognitionWords.assemble(tokens: [
