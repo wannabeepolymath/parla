@@ -6,7 +6,7 @@ struct HubAudioImportView: View {
     @ObservedObject var owner: AudioImportOwner
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Mono 16-bit WAV, or MOV with uncompressed 16 kHz mono audio. Up to 10 minutes and 20 MB.")
+            Text("Mono 16-bit WAV, MOV with uncompressed 16 kHz mono audio, M4A or MP3. Up to 10 minutes and 20 MB.")
                 .foregroundStyle(.secondary)
             Text("Language: \(model.settings.language ?? "auto-detect")")
                 .font(.caption)

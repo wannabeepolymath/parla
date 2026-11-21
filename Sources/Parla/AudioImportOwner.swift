@@ -102,7 +102,7 @@ final class AudioImportOwner: ObservableObject {
         catch { message = Self.failure(error) }
     }
     func start(settings: Settings, selectionEpoch: UUID, preparationEpoch: UUID?, diagnostics: DiagnosticStore, mode: Mode = .raw) -> Job? {
-        guard !busy, let source else { message = "Choose a WAV or MOV file first."; return nil }
+        guard !busy, let source else { message = "Choose a WAV, MOV, M4A or MP3 file first."; return nil }
         guard mode != .experimentalTimed || source.format == .wav else {
             message = "Timestamps need a 16 kHz mono WAV. Use Transcribe for this file."
             return nil // Keep the untouched selection available for explicit raw Start.
@@ -133,6 +133,10 @@ final class AudioImportOwner: ObservableObject {
     }
     func takeSourceForSaved() -> FileImportSource? {
         guard !busy, let selected = source else { return nil }
+        // Saved imports re-validate container structure; compressed sources are transcribe-only in v1.
+        guard selected.format == .wav || selected.format == .mov else {
+            message = "M4A and MP3 files can’t be kept yet. Use Transcribe for this file."; return nil
+        }
         source = nil; invalidate(nil); return selected
     }
     func invalidate(_ message: String? = "Discarded.") {
@@ -181,6 +185,7 @@ final class AudioImportOwner: ObservableObject {
     static func failure(_ error: Error) -> String {
         if let error = error as? ImportedAudio.Failure { return error.message }
         if let error = error as? ImportedWAV.Failure { return error.message }
+        if let error = error as? ImportedCompressedAudio.Failure { return error.message }
         if let error = error as? ImportedPCMMOV.Failure {
             switch error {
             case .canceled: return "Import canceled."
@@ -206,6 +211,8 @@ final class AudioImportOwner: ObservableObject {
         try validateSource(.wav(info), mode: mode)
     }
     nonisolated static func validateSource(_ info: ImportedAudio.SourceFacts, mode: AudioImportOwner.Mode) throws {
+        // Only strict PCM WAV is timed. This also refuses compressed sources (systemCompressedConversion),
+        // whose encoder delay and priming are not mapped.
         guard mode != .experimentalTimed || (info.profile == .wavPCM && info.origin == .strictPCM16k) else {
             throw RecordingStore.Failure("Timestamps need a 16 kHz mono WAV. Use Transcribe for this file.")
         }

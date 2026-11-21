@@ -170,7 +170,7 @@ extension HubModel {
         let panel = NSOpenPanel()
         panel.title = "Choose an audio file"
         panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.wav, .quickTimeMovie]; panel.resolvesAliases = false
+        panel.allowedContentTypes = [.wav, .quickTimeMovie, .mpeg4Audio, .mp3]; panel.resolvesAliases = false
         return panel.runModal() == .OK ? panel.url : nil
     }
 }
