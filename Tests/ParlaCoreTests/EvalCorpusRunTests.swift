@@ -102,6 +102,18 @@ final class EvalCorpusRunTests: XCTestCase {
         _ = try EvalCorpus.evaluate(.init(manifest: path, results: options.out, against: nil))
     }
 
+    /// `--evidence-out` is one line per ASR case: a gate-skipped case still gets one, without a decode time.
+    func testEvidenceCoversSkippedCases() async throws {
+        let path = try manifest(tones: [440, 0])
+        var lines: [(id: String, samples: Int?, seconds: Double?)] = []
+        _ = try await EvalCorpusRun.produce(options(path), engine: engine,
+                                            recognize: { _ in self.pass(.completed(.init(text: "tone"))) },
+                                            evidence: { lines.append(($0, $1, $2)) })
+        XCTAssertEqual(lines.map(\.id), ["TEST-case-0", "TEST-case-1"])
+        XCTAssertEqual(lines.map(\.samples), [8000, 8000])
+        XCTAssertNotNil(lines[0].seconds); XCTAssertNil(lines[1].seconds)
+    }
+
     func testMissingASRConsentIsRefusedBeforeRecognition() async throws {
         let f = try EvalCorpusFixture()
         f.mutateConsent { $0["uses"] = .array([.string("binding-check"), .string("reference-review")]) }

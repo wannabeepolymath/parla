@@ -348,6 +348,8 @@ public final class WhisperCContext: WhisperNativeContext {
         multilingual = api.multilingual
     }
     init(api: API) { self.api = api; multilingual = api.multilingual }
+    /// Set by the first experiment decode; native state (VAD mappings) may outlive that call.
+    private var ranExperiment = false
     deinit { api.release() }
     /// whisper_tokenize only reads the vocabulary, so it is safe beside whisper_full.
     /// The closure keeps this context alive; callers must not store the budget.
@@ -375,13 +377,14 @@ public final class WhisperCContext: WhisperNativeContext {
     public func decodeTimed(_ samples: [Float], initialPrompt: String?, language: String,
                             configuration: WhisperDecodeConfiguration, shouldAbort: (() -> Bool)?) -> WhisperNativeDecode? {
         // Exact pinned implementation predicate; no filename/family guessing. Never with an experiment.
-        guard configuration.experiment == .init(), !(api.nTextLayer == 2 && api.nVocab != 51_866), !configuration.noTimestamps,
+        guard configuration.experiment == .init(), !ranExperiment, !(api.nTextLayer == 2 && api.nVocab != 51_866), !configuration.noTimestamps,
               !samples.isEmpty, samples.count <= Int32.max else { return nil }
         return decodeNative(samples, initialPrompt: initialPrompt, language: language, configuration: configuration, shouldAbort: shouldAbort)
     }
     private func decodeNative(_ samples: [Float], initialPrompt: String?, language: String,
                               configuration: WhisperDecodeConfiguration, shouldAbort: (() -> Bool)?) -> WhisperNativeDecode {
         let experiment = configuration.experiment
+        if experiment != .init() { ranExperiment = true }
         var params = whisper_full_default_params(experiment.beamSize == nil ? WHISPER_SAMPLING_GREEDY : WHISPER_SAMPLING_BEAM_SEARCH)
         if let beam = experiment.beamSize { params.beam_search.beam_size = beam }
         params.suppress_nst = experiment.suppressNonSpeechTokens
@@ -390,9 +393,9 @@ public final class WhisperCContext: WhisperNativeContext {
         params.print_realtime = configuration.printRealtime
         params.print_special = configuration.printSpecial
         params.no_timestamps = configuration.noTimestamps
-        // VAD runs only for an eval experiment, which decodeTimed refuses: a context that has
-        // run VAD is never used for a timed decode, so the whisper191PCM10ms clock never sees a
-        // VAD map. Context DTW is disabled at construction too.
+        // VAD runs only for an eval experiment, and decodeTimed refuses any context that ever ran
+        // one (`ranExperiment`), so the whisper191PCM10ms clock never sees a VAD map left over
+        // from an earlier call. Context DTW is disabled at construction too.
         params.vad = experiment.vadModelPath != nil
         if !configuration.noTimestamps {
             params.offset_ms = 0; params.duration_ms = 0

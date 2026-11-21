@@ -137,7 +137,7 @@ public enum EvalCorpusRun {
             let report = try await produce(options, engine: Self.engine(modelPath: request.modelPath, configRevision: options.configRevision),
                                            recognize: { await recognition.recognize($0) },
                                            evidence: evidenceLog.map { log in { id, samples, seconds in
-                                               try log.append(name: id, audioSeconds: Double(samples) / 16_000, decodeSeconds: seconds,
+                                               try log.append(name: id, audioSeconds: samples.map { Double($0) / 16_000 }, decodeSeconds: seconds,
                                                                model: model, experiment: options.experiment, evidence: recognition.takeEvidence())
                                            } })
             return (0, report)
@@ -151,7 +151,7 @@ public enum EvalCorpusRun {
     /// Admits the manifest, recognizes every case in manifest order, writes `out` once, then self-verifies.
     static func produce(_ options: Options, engine: Engine,
                         recognize: ([Float]) async -> RecognitionPassResult?,
-                        evidence: ((String, Int, Double) throws -> Void)? = nil) async throws -> String {
+                        evidence: ((String, Int?, Double?) throws -> Void)? = nil) async throws -> String {
         let manifestURL = URL(fileURLWithPath: absolute(options.manifest))
         let io: EvalCorpusIO, snapshot: EvalCorpusIO.Snapshot, manifest: EvalCorpus.Manifest
         let order: [(id: String, path: String)]
@@ -181,9 +181,12 @@ public enum EvalCorpusRun {
             // ponytail: AVAudioFile only opens URLs, so decode re-opens the path the digest was taken from;
             // io.revalidate() below and the self-verify rehash catch a file swapped after admission.
             guard let samples = try? Eval.loadSamples(url: manifestURL.deletingLastPathComponent().appendingPathComponent(path)) else {
+                // One evidence line per case even when nothing decoded: nil sizes/timings, no native evidence.
+                try evidence?(id, nil, nil)
                 rows.append(row("failed", "engine", nil, Date().timeIntervalSince(t0))); continue
             }
             if Pipeline.recognitionSkip(samples: samples) != nil {
+                try evidence?(id, samples.count, nil)
                 rows.append(row("skipped", "policy", nil, nil)); continue
             }
             let start = Date()

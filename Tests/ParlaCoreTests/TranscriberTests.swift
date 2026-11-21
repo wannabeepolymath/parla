@@ -57,6 +57,12 @@ final class TranscriberTests: XCTestCase {
                                              configuration: WhisperDecodeConfiguration(timed: true, experiment: experiment), shouldAbort: nil))
         }
         XCTAssertTrue(fake.params.isEmpty)
+        // A context that once decoded with an experiment stays refused for timed decodes.
+        var vad = WhisperExperiment(); vad.vadModelPath = "/v"
+        _ = context.decode([0.1], initialPrompt: nil, language: "en", configuration: WhisperDecodeConfiguration(experiment: vad), shouldAbort: nil)
+        XCTAssertNil(context.decodeTimed([0.1], initialPrompt: nil, language: "en",
+                                         configuration: WhisperDecodeConfiguration(timed: true), shouldAbort: nil))
+        XCTAssertEqual(fake.params.count, 1)
     }
     func testEvidenceIsCollectedOnlyWhenAskedAndRecordsTheLanguageRetry() async throws {
         let fake = ExperimentAPI(segments: ["a", "b", "c"])

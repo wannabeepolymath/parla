@@ -175,7 +175,7 @@ public final class EvalRecognition {
 /// `--evidence-out`: one JSON line per ASR case, never transcript text. Refuses an existing file.
 public final class EvalEvidenceLog {
     struct Line: Encodable {
-        let name: String, audioSeconds: Double, decodeSeconds: Double, model: String, experiment: String
+        let name: String, audioSeconds: Double?, decodeSeconds: Double?, model: String, experiment: String
         let evidence: WhisperDecodeEvidence?
     }
     private let handle: FileHandle
@@ -184,7 +184,7 @@ public final class EvalEvidenceLog {
         guard fd >= 0 else { throw TranscriberError(description: errno == EEXIST ? "evidence output exists" : "evidence output unwritable") }
         handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }
-    public func append(name: String, audioSeconds: Double, decodeSeconds: Double, model: String,
+    public func append(name: String, audioSeconds: Double?, decodeSeconds: Double?, model: String,
                        experiment: WhisperExperiment, evidence: WhisperDecodeEvidence?) throws {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         var data = try encoder.encode(Line(name: name, audioSeconds: audioSeconds, decodeSeconds: decodeSeconds, model: model,
