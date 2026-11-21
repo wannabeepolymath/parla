@@ -14,10 +14,12 @@ public struct WhisperNativeDecode: Equatable {
     public let timing: RecognitionSegments?
     /// Only when `WhisperExperiment.collectEvidence` asked for it.
     public let evidence: [WhisperDecodeEvidence.Segment]?
+    /// Only when a timed decode asked for word timing; never present without `timing`.
+    public let words: RecognitionWords?
     public init(status: Int32, segments: [String] = [], abortObserved: Bool = false, timing: RecognitionSegments? = nil,
-                evidence: [WhisperDecodeEvidence.Segment]? = nil) {
+                evidence: [WhisperDecodeEvidence.Segment]? = nil, words: RecognitionWords? = nil) {
         self.status = status; self.segments = segments; self.abortObserved = abortObserved
-        self.timing = timing; self.evidence = evidence
+        self.timing = timing; self.evidence = evidence; self.words = words
     }
 }
 /// Eval-process decoder switches. The defaults are the shipping decode; no app path sets any of them.
@@ -82,9 +84,13 @@ public struct WhisperDecodeConfiguration: Equatable {
     public let nativeTemperatureFallback = true
     public let nativeAudioContext = true
     public let experiment: WhisperExperiment
+    /// Heuristic per-call `token_timestamps`; only a timed configuration can set it.
+    public let wordTiming: Bool
     public var greedySampling: Bool { experiment.beamSize == nil }
-    public init(experiment: WhisperExperiment = .init()) { noTimestamps = true; self.experiment = experiment }
-    init(timed: Bool, experiment: WhisperExperiment = .init()) { noTimestamps = !timed; self.experiment = experiment }
+    public init(experiment: WhisperExperiment = .init()) { noTimestamps = true; self.experiment = experiment; wordTiming = false }
+    init(timed: Bool, experiment: WhisperExperiment = .init(), wordTiming: Bool = false) {
+        noTimestamps = !timed; self.experiment = experiment; self.wordTiming = timed && wordTiming
+    }
 }
 /// Raw native operations only. Language policy and text cleanup live in the real adapter.
 public protocol WhisperNativeContext: AnyObject {
@@ -156,13 +162,18 @@ public final class WhisperTranscriber: RecognitionClient {
     }
     public func recognizeTimed(_ samples: [Float], initialPrompt: String?, language: String?,
                                shouldAbort: (() -> Bool)?) async -> RecognitionNativeOutcome {
+        await recognizeTimed(samples, initialPrompt: initialPrompt, language: language, shouldAbort: shouldAbort, wordTiming: false)
+    }
+    /// `wordTiming` adds experimental heuristic word times; no app path sets it.
+    public func recognizeTimed(_ samples: [Float], initialPrompt: String?, language: String?,
+                               shouldAbort: (() -> Bool)?, wordTiming: Bool) async -> RecognitionNativeOutcome {
         guard shouldAbort?() != true else { return .canceled }
         // A pinned language removes the ordinary auto probe/retry. Never repair timing.
         let code: String
         if !native.multilingual { code = "en" }
         else if let language, native.knowsLanguage(language) { code = language }
         else { return .failed(.unsupportedCapability) }
-        return decodeOutcome(samples, initialPrompt: initialPrompt, language: code, shouldAbort: shouldAbort, timed: true)
+        return decodeOutcome(samples, initialPrompt: initialPrompt, language: code, shouldAbort: shouldAbort, timed: true, wordTiming: wordTiming)
     }
     /// Synchronous native body; only the awaited adapter enters it in production.
     private func recognizeNative(_ samples: [Float], initialPrompt: String?, language: String?,
@@ -199,14 +210,14 @@ public final class WhisperTranscriber: RecognitionClient {
         return retry
     }
     private func decodeOutcome(_ samples: [Float], initialPrompt: String?, language: String,
-                               shouldAbort: (() -> Bool)?, timed: Bool = false, experiment: WhisperExperiment = .init(),
+                               shouldAbort: (() -> Bool)?, timed: Bool = false, wordTiming: Bool = false, experiment: WhisperExperiment = .init(),
                                record: ((WhisperNativeDecode) -> Void)? = nil) -> RecognitionNativeOutcome {
         guard shouldAbort?() != true else { return .canceled }
         let result: WhisperNativeDecode
         if timed {
             guard !samples.isEmpty, samples.count <= Int32.max,
                   let decoded = native.decodeTimed(samples, initialPrompt: initialPrompt, language: language,
-                      configuration: WhisperDecodeConfiguration(timed: true), shouldAbort: shouldAbort) else { return .failed(.unsupportedCapability) }
+                      configuration: WhisperDecodeConfiguration(timed: true, wordTiming: wordTiming), shouldAbort: shouldAbort) else { return .failed(.unsupportedCapability) }
             result = decoded
             guard !result.abortObserved else { return .canceled }
         } else {
@@ -217,7 +228,7 @@ public final class WhisperTranscriber: RecognitionClient {
         guard result.status == 0 else { return result.abortObserved ? .canceled : .failed(.nativeDecode) }
         // Keep observed native success even if cancellation won delivery on return.
         return .completed(.init(text: Self.stripNonSpeech(result.segments.joined().trimmingCharacters(in: .whitespacesAndNewlines)),
-                                segments: timed ? result.timing : nil))
+                                segments: timed ? result.timing : nil, words: timed ? result.words : nil))
     }
     func decode(_ samples: [Float], initialPrompt: String?, language: String,
                 shouldAbort: (() -> Bool)? = nil) -> String? {
@@ -284,6 +295,9 @@ public final class WhisperCContext: WhisperNativeContext {
         var noSpeechProbability: (Int32) -> Float = { _ in 0 }
         var tokenCount: (Int32) -> Int32 = { _ in 0 }
         var tokenProbability: (Int32, Int32) -> Float = { _, _ in 0 }
+        var tokenText: (Int32, Int32) -> UnsafePointer<CChar>? = { _, _ in nil }
+        var tokenData: (Int32, Int32) -> whisper_token_data = { _, _ in whisper_token_data() }
+        var eot: Int32 = 50_256
         var release: () -> Void = {}
     }
     private let api: API
@@ -328,6 +342,8 @@ public final class WhisperCContext: WhisperNativeContext {
             end: { whisper_full_get_segment_t1(ctx, $0) },
             noSpeechProbability: { whisper_full_get_segment_no_speech_prob(ctx, $0) },
             tokenCount: { whisper_full_n_tokens(ctx, $0) }, tokenProbability: { whisper_full_get_token_p(ctx, $0, $1) },
+            tokenText: { whisper_full_get_token_text(ctx, $0, $1) }, tokenData: { whisper_full_get_token_data(ctx, $0, $1) },
+            eot: whisper_token_eot(ctx),
             release: { whisper_free(ctx) })
         multilingual = api.multilingual
     }
@@ -380,7 +396,8 @@ public final class WhisperCContext: WhisperNativeContext {
         params.vad = experiment.vadModelPath != nil
         if !configuration.noTimestamps {
             params.offset_ms = 0; params.duration_ms = 0
-            params.single_segment = false; params.token_timestamps = false
+            // Word timing is the per-call heuristic flag only (max_len stays 0); never context DTW.
+            params.single_segment = false; params.token_timestamps = configuration.wordTiming
             params.translate = false; params.detect_language = false
             params.max_len = 0; params.max_tokens = 0; params.tdrz_enable = false
             params.print_timestamps = false
@@ -438,7 +455,7 @@ public final class WhisperCContext: WhisperNativeContext {
             guard result == 0, abortBox?.observed != true else {
                 return .init(status: result, abortObserved: abortBox?.observed == true)
             }
-            return copyTimedResult(sampleCount: samples.count)
+            return copyTimedResult(sampleCount: samples.count, wordTiming: configuration.wordTiming)
         }
         var segments: [String] = []
         if result == 0 {
@@ -456,7 +473,7 @@ public final class WhisperCContext: WhisperNativeContext {
         return WhisperNativeDecode(status: result, segments: segments, abortObserved: abortBox?.observed == true, evidence: evidence)
     }
 
-    private func copyTimedResult(sampleCount: Int) -> WhisperNativeDecode {
+    private func copyTimedResult(sampleCount: Int, wordTiming: Bool) -> WhisperNativeDecode {
         let count = api.count()
         guard count >= 0, count <= RecognitionSegments.maximumCount else { return .init(status: 0) }
         var cues: [RecognitionSegments.Cue] = []
@@ -478,8 +495,30 @@ public final class WhisperCContext: WhisperNativeContext {
             cues.append(.init(text: text, start: api.start(index), end: api.end(index)))
         }
         let timing = try? RecognitionSegments(clock: .whisper191PCM10ms, sourceSampleCount: sampleCount, cues: cues)
+        // Words never invalidate the qualified segments: any refusal drops only the words.
+        let words = wordTiming && timing != nil ? copyWords(segments: count, sampleCount: sampleCount) : nil
         // A timing-only refusal may retain the complete independently bounded raw text.
-        return .init(status: 0, segments: cues.map(\.text), timing: timing)
+        return .init(status: 0, segments: cues.map(\.text), timing: timing, words: words)
+    }
+    private func copyWords(segments: Int32, sampleCount: Int) -> RecognitionWords? {
+        var tokens: [RecognitionWords.Token] = [], total = 0
+        for segment in 0..<segments {
+            let count = api.tokenCount(segment)
+            guard count >= 0, tokens.count + Int(count) <= RecognitionWords.maximumCount * 2 else { return nil }
+            for index in 0..<count {
+                guard let pointer = api.tokenText(segment, index) else { return nil }
+                let remaining = RecognitionSegments.maximumNativeBytes - total
+                var length = 0
+                while length <= remaining, pointer[length] != 0 { length += 1 }
+                guard length <= remaining else { return nil }
+                total += length
+                let data = api.tokenData(segment, index)
+                tokens.append(.init(id: data.id, bytes: Array(UnsafeRawBufferPointer(start: pointer, count: length)),
+                                    start: data.t0, end: data.t1, segment: Int(segment)))
+            }
+        }
+        return try? RecognitionWords(sourceSampleCount: sampleCount,
+                                     words: RecognitionWords.assemble(tokens: tokens, eot: api.eot))
     }
 }
 

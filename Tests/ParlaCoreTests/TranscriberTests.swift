@@ -87,6 +87,66 @@ final class TranscriberTests: XCTestCase {
         }
         XCTAssertEqual(WhisperExperiment().label, "")
     }
+    /// Fake timed API: one segment " Hi." over 16 000 samples, tokens " Hi" and ".".
+    private final class WordTimingAPI {
+        var params: [whisper_full_params] = []
+        var tokenEnd: Int64 = 40
+        let segment = strdup(" Hi.")!, tokens = [strdup(" Hi")!, strdup(".")!]
+        deinit { free(segment); tokens.forEach { free($0) } }
+        func context() -> WhisperCContext {
+            var api = WhisperCContext.API()
+            api.full = { params, _, _ in self.params.append(params); return 0 }
+            api.count = { 1 }; api.text = { _ in UnsafePointer(self.segment) }
+            api.start = { _ in 0 }; api.end = { _ in 50 }
+            api.tokenCount = { _ in 2 }
+            api.tokenText = { _, index in UnsafePointer(self.tokens[Int(index)]) }
+            api.tokenData = { _, index in
+                var data = whisper_token_data(); data.id = index + 1
+                data.t0 = index == 0 ? 0 : 30; data.t1 = index == 0 ? 30 : self.tokenEnd; return data
+            }
+            return WhisperCContext(api: api)
+        }
+    }
+    func testWordTimingIsOptInAndNeverBreaksSegments() throws {
+        let fake = WordTimingAPI(), context = fake.context(), samples = [Float](repeating: 0.1, count: 16_000)
+        let plain = try XCTUnwrap(context.decodeTimed(samples, initialPrompt: nil, language: "en",
+                                                     configuration: WhisperDecodeConfiguration(timed: true), shouldAbort: nil))
+        XCTAssertFalse(fake.params[0].token_timestamps); XCTAssertNil(plain.words); XCTAssertNotNil(plain.timing)
+        let worded = try XCTUnwrap(context.decodeTimed(samples, initialPrompt: nil, language: "en",
+                                                      configuration: WhisperDecodeConfiguration(timed: true, wordTiming: true), shouldAbort: nil))
+        XCTAssertTrue(fake.params[1].token_timestamps); XCTAssertEqual(fake.params[1].max_len, 0)
+        XCTAssertEqual(worded.words?.words, [.init(text: "Hi.", start: 0, end: 40, segment: 0)])
+        XCTAssertEqual(worded.timing, plain.timing)
+        XCTAssertFalse(WhisperDecodeConfiguration(timed: false, wordTiming: true).wordTiming)
+        fake.tokenEnd = 10_000  // past the source: words drop, segments stay
+        let refused = try XCTUnwrap(context.decodeTimed(samples, initialPrompt: nil, language: "en",
+                                                       configuration: WhisperDecodeConfiguration(timed: true, wordTiming: true), shouldAbort: nil))
+        XCTAssertNil(refused.words); XCTAssertEqual(refused.timing, plain.timing)
+    }
+    /// Local only: needs the default model and a system voice. If this fails, the per-call
+    /// token_timestamps flag perturbs the qualified segment result and word timing must not ship.
+    func testSegmentsAreUnchangedByWordTiming() throws {
+        let path = WhisperTranscriber.defaultModelPath()
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: path), "no default model")
+        let wav = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: wav) }
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-v", "Samantha", "-o", wav.path, "--data-format=LEI16@16000", "--channels=1",
+                         "Tomorrow at ten I have a meeting with the team. After that, we review the release notes."]
+        try say.run(); say.waitUntilExit()
+        try XCTSkipUnless(say.terminationStatus == 0, "no Samantha system voice")
+        let samples = try Eval.loadSamples(url: wav)
+        let context = try WhisperCContext(path, .nativeDefaults)
+        let plain = try XCTUnwrap(context.decodeTimed(samples, initialPrompt: nil, language: "en",
+                                                     configuration: WhisperDecodeConfiguration(timed: true), shouldAbort: nil))
+        let worded = try XCTUnwrap(context.decodeTimed(samples, initialPrompt: nil, language: "en",
+                                                      configuration: WhisperDecodeConfiguration(timed: true, wordTiming: true), shouldAbort: nil))
+        let cues = try XCTUnwrap(plain.timing?.cues)
+        XCTAssertFalse(cues.isEmpty)
+        XCTAssertEqual(worded.timing?.cues, cues)
+        XCTAssertNotNil(worded.words)
+    }
     func testShippedMultilingualModelKeepsCantonese() throws {
         let model = ModelCatalog.path(for: ModelCatalog.all.first { $0.id.hasPrefix("large") }!)
         try XCTSkipUnless(FileManager.default.fileExists(atPath: model), "no large-v3-turbo-q5_0 model installed")

@@ -105,10 +105,12 @@ public struct RecognitionPayload: Equatable, Sendable {
     public let requestedLocale: String?
     public let resolvedLocale: String?
     public let segments: RecognitionSegments?
+    /// Experimental heuristic word times; only an explicit timed word-timing request fills it.
+    public let words: RecognitionWords?
     public init(text: String, detectedLanguage: String? = nil, requestedLocale: String? = nil, resolvedLocale: String? = nil,
-                segments: RecognitionSegments? = nil) {
+                segments: RecognitionSegments? = nil, words: RecognitionWords? = nil) {
         self.text = text; self.detectedLanguage = detectedLanguage; self.requestedLocale = requestedLocale; self.resolvedLocale = resolvedLocale
-        self.segments = segments
+        self.segments = segments; self.words = words
     }
 }
 public enum RecognitionNativeOutcome: Equatable, Sendable {
@@ -130,6 +132,11 @@ public struct RecognitionPassResult: Equatable, Sendable {
               let segments = payload.segments, sampleRange == 0..<segments.sourceSampleCount else { return nil }
         return segments
     }
+    public var words: RecognitionWords? {
+        guard !canceled, pass == .fullFinal, case .completed(let payload) = native,
+              let words = payload.words, sampleRange == 0..<words.sourceSampleCount else { return nil }
+        return words
+    }
 }
 public struct RecognitionFinalResult: Equatable, Sendable {
     public enum Provenance: Equatable, Sendable {
@@ -143,6 +150,10 @@ public struct RecognitionFinalResult: Equatable, Sendable {
     public var segments: RecognitionSegments? {
         guard text != nil, case .pass(let pass) = provenance else { return nil }
         return pass.segments
+    }
+    public var words: RecognitionWords? {
+        guard text != nil, case .pass(let pass) = provenance else { return nil }
+        return pass.words
     }
 }
 
