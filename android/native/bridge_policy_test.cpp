@@ -59,5 +59,9 @@ int main() {
 
     assert(parla::split_lines("").empty());
     assert((parla::split_lines("a\n\nb\n") == std::vector<std::string>{"a", "b"}));
+    assert(parla::language_count(50258, 50358) == 99);   // 51865 vocabulary
+    assert(parla::language_count(50258, 50359) == 100);  // 51866 vocabulary
+    assert(parla::language_count(50258, 50258) == 0);    // degenerate
+    assert(parla::language_count(50258, 50000) == 0);
     std::puts("bridge_policy_test: PASS");
 }

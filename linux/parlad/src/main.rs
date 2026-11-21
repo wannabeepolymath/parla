@@ -9,8 +9,10 @@ use parla_core::config::{config_path, Config};
 use parla_core::prompt::Context;
 use parla_core::text::{audio_worth_transcribing, flatten_newlines, rms};
 use session::{Command, Edge, Session};
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tokio::task::JoinError;
 
@@ -19,6 +21,10 @@ use tokio::task::JoinError;
 /// point: one sends the user to look at their microphone, the other at the log.
 const NOTHING_HEARD: &str = "Nothing heard";
 const TRANSCRIPTION_FAILED: &str = "Transcription failed — see log";
+/// A job revoked by `cancel`: nothing reached the clipboard.
+const CANCELLED: &str = "Cancelled — nothing copied";
+
+type Message = (&'static str, String, deliver::Timeout);
 
 /// How much of the result a notification body shows. A dictation is often a
 /// paragraph; a toast is one line.
@@ -35,6 +41,104 @@ const TOAST: deliver::Timeout = deliver::Timeout::Milliseconds(4_000);
 struct App {
     cfg: Config,
     transcriber: whisper::Transcriber,
+    ledger: Arc<StdMutex<Ledger>>,
+}
+
+/// Job ownership. One lock, so a job passing its last ownership check and an
+/// idle `cancel` cannot interleave: either the cancel lands first and the job
+/// is revoked, or the job is committed and the cancel does not claim it.
+#[derive(Default)]
+struct Ledger {
+    /// Bumped by a `cancel` while idle; a job whose epoch no longer matches is
+    /// revoked.
+    epoch: u64,
+    /// Jobs queued or running. Up under the session lock, down by the worker.
+    pending: usize,
+    /// The running job passed its last check and is on its way to the
+    /// clipboard. One worker, so at most one.
+    committed: bool,
+}
+
+impl Ledger {
+    /// A finished recording joins the queue; returns its epoch.
+    fn enqueue(&mut self) -> u64 {
+        self.pending += 1;
+        self.epoch
+    }
+
+    /// The last ownership check. `true` commits the job to delivery.
+    fn commit(&mut self, mine: u64) -> bool {
+        self.committed = !is_stale(mine, self.epoch);
+        self.committed
+    }
+
+    /// The worker is done with a job, whatever became of it.
+    fn done(&mut self) {
+        self.pending -= 1;
+        self.committed = false;
+    }
+}
+
+fn lock(l: &StdMutex<Ledger>) -> std::sync::MutexGuard<'_, Ledger> {
+    // Nothing panics while holding it; a poisoned ledger is still accurate.
+    l.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One finished recording. `epoch` is the ledger's when the key was released.
+struct Job {
+    epoch: u64,
+    recording: audio::Recording,
+}
+
+fn is_stale(job_epoch: u64, current: u64) -> bool {
+    job_epoch != current
+}
+
+/// `cancel` with nothing recording: revoke every pending job, or say there was
+/// nothing to cancel. A committed job is past revoking. Called under the
+/// session lock.
+fn cancel_idle(ledger: &StdMutex<Ledger>) -> &'static str {
+    let mut l = lock(ledger);
+    if l.pending > usize::from(l.committed) {
+        l.epoch += 1;
+        "cancelled"
+    } else {
+        "ignored"
+    }
+}
+
+/// The single job worker: one job at a time, in the order the recordings
+/// ended, each awaited to the end — whisper included — before the next starts.
+/// So the clipboard ends with the newest dictation and two whisper passes never
+/// compete. `run` is the pipeline; a parameter so tests can drive this loop.
+async fn work<F: Future<Output = ()>>(mut rx: UnboundedReceiver<Job>, mut run: impl FnMut(Job) -> F) {
+    while let Some(job) = rx.recv().await {
+        run(job).await;
+    }
+}
+
+/// The ownership checks around the pipeline's two slow steps, which are
+/// injected so tests can run them without a model or a clipboard. `produce`
+/// is lazy: it does not start unless the job is still owned.
+async fn owned<D: Future<Output = anyhow::Result<()>>>(
+    stale: impl Fn() -> bool,
+    commit: impl FnOnce() -> bool,
+    produce: impl Future<Output = Result<Outcome, &'static str>>,
+    deliver: impl FnOnce(String) -> D,
+) -> Message {
+    if stale() {
+        return ("Parla", CANCELLED.into(), TOAST);
+    }
+    let out = match produce.await {
+        Ok(out) => out,
+        Err(refusal) => return ("Parla", refusal.into(), TOAST),
+    };
+    // The last check: nothing reaches the clipboard for a revoked job, and a
+    // `cancel` from here on does not claim this one.
+    if !commit() {
+        return ("Parla", CANCELLED.into(), TOAST);
+    }
+    delivered(deliver(out.text.clone()).await, out)
 }
 
 impl App {
@@ -47,8 +151,8 @@ impl App {
     ///
     /// The whole pipeline's single notification is sent from here, and it is the
     /// only `notify` on this path.
-    async fn finish(self: Arc<Self>, samples: Vec<f32>) {
-        let (summary, body, timeout) = self.dictate(samples).await;
+    async fn finish(self: Arc<Self>, job: Job) {
+        let (summary, body, timeout) = self.dictate(job).await;
         // Journalled as well as shown. A notification the user looked away from
         // — or that a dead notification daemon swallowed — is otherwise the only
         // record that the dictation happened at all.
@@ -72,26 +176,44 @@ impl App {
     /// starves everything sharing that runtime — including the once-a-second
     /// watchdog tick, which is the one thing guaranteed to be needed if a
     /// dictation goes wrong.
-    async fn dictate(self: Arc<Self>, samples: Vec<f32>) -> (&'static str, String, deliver::Timeout) {
-        let samples = match worth_transcribing(samples) {
-            Ok(s) => s,
-            Err(refusal) => return ("Parla", refusal.into(), TOAST),
+    async fn dictate(self: Arc<Self>, job: Job) -> Message {
+        let mine = job.epoch;
+        let stale = {
+            let l = self.ledger.clone();
+            move || is_stale(mine, lock(&l).epoch)
         };
+        let commit = || lock(&self.ledger).commit(mine);
+        let produce = self.clone().produce(job.recording, stale.clone());
+        owned(stale, commit, produce, |text| async move { deliver::to_clipboard(&text).await }).await
+    }
 
-        // The one number that says whether the ring was marked on key-down:
-        // an unmarked ring hands back everything since the last dictation, so a
-        // three-second phrase arriving as thirty seconds is the symptom.
-        eprintln!(
-            "parlad: transcribing {:.1}s of audio",
-            samples.len() as f32 / audio::TARGET_RATE as f32
-        );
-
+    /// Whisper then cleanup. `stale` also aborts the whisper pass natively.
+    async fn produce(
+        self: Arc<Self>,
+        recording: audio::Recording,
+        stale: impl Fn() -> bool + Clone + Send + 'static,
+    ) -> Result<Outcome, &'static str> {
         let me = self.clone();
-        let pass = move || me.transcriber.transcribe(&samples, &me.cfg.dictionary);
-        let raw = match transcript(tokio::task::spawn_blocking(pass).await) {
-            Ok(t) => t,
-            Err(refusal) => return ("Parla", refusal.into(), TOAST),
+        let abort = stale.clone();
+        // One blocking section: resampling a long recording is real work too.
+        let pass = move || {
+            let samples = audio::resample_to_16k(&recording.samples, recording.rate);
+            drop(recording);
+            // An empty transcript is `transcript`'s "Nothing heard", the same refusal.
+            let Ok(samples) = worth_transcribing(samples) else {
+                return Ok(String::new());
+            };
+            // The one number that says whether the ring was marked on key-down:
+            // an unmarked ring hands back everything since the last dictation,
+            // so a three-second phrase arriving as thirty seconds is the symptom.
+            eprintln!(
+                "parlad: transcribing {:.1}s of audio",
+                samples.len() as f32 / audio::TARGET_RATE as f32
+            );
+            me.transcriber.transcribe(&samples, &me.cfg.dictionary, abort)
         };
+        let done = tokio::task::spawn_blocking(pass).await;
+        let raw = transcript(stale(), done)?;
 
         let ctx = Context {
             dictionary: self.cfg.dictionary.clone(),
@@ -101,9 +223,7 @@ impl App {
         };
         // `clean` never returns Err: on any failure it hands back the raw
         // transcript plus a reason, so the user always gets their words.
-        let out = cleanup::clean(&raw, &ctx, &self.cfg.cleanup).await;
-
-        delivered(deliver::to_clipboard(&out.text).await, out)
+        Ok(cleanup::clean(&raw, &ctx, &self.cfg.cleanup).await)
     }
 }
 
@@ -125,7 +245,13 @@ fn worth_transcribing(samples: Vec<f32>) -> Result<Vec<f32>, &'static str> {
 /// pipeline that can be asserted without a microphone and a model, and the part
 /// where a wrong answer costs the most: reporting a broken whisper as "Nothing
 /// heard" sends the user to check a microphone that was working fine.
-fn transcript(done: Result<anyhow::Result<String>, JoinError>) -> Result<String, &'static str> {
+///
+/// `stale` is checked first: a pass aborted by `cancel` comes back as `Err`
+/// and must never read as a broken whisper.
+fn transcript(stale: bool, done: Result<anyhow::Result<String>, JoinError>) -> Result<String, &'static str> {
+    if stale {
+        return Err(CANCELLED);
+    }
     match done {
         // Empty is the genuine "no speech in the audio" case — the only one.
         Ok(Ok(t)) if t.is_empty() => Err(NOTHING_HEARD),
@@ -147,7 +273,7 @@ fn transcript(done: Result<anyhow::Result<String>, JoinError>) -> Result<String,
 /// clipboard's own `Result` as an argument so both halves can be asserted here
 /// — including the half that only happens when there is no Wayland clipboard to
 /// write to, which is the one path where the user's words exist nowhere else.
-fn delivered(copied: anyhow::Result<()>, out: Outcome) -> (&'static str, String, deliver::Timeout) {
+fn delivered(copied: anyhow::Result<()>, out: Outcome) -> Message {
     match copied {
         // `Outcome.failure` is surfaced rather than dropped: cleanup failing
         // means what landed on the clipboard is the raw transcript, and a user
@@ -221,15 +347,32 @@ async fn main() -> anyhow::Result<()> {
     // first-run user who has not downloaded the model yet would then never see
     // "whisper model not found at …", the one startup message that names both a
     // path and a fix.
-    let transcriber = whisper::Transcriber::new(&whisper::model_path(&cfg))?;
+    let transcriber = whisper::Transcriber::new(&whisper::model_path(&cfg), cfg.language.as_deref())?;
     // Opened once, here, and never closed: `mark()` only stamps a position in
     // an already-running ring, because opening the mic on key-down clips the
     // first syllable.
-    let capture = Arc::new(audio::Capture::start()?);
     let watchdog = Duration::from_secs(cfg.watchdog_secs);
+    let capture = Arc::new(audio::Capture::start(watchdog)?);
 
-    let app = Arc::new(App { cfg, transcriber });
+    let app = Arc::new(App {
+        cfg,
+        transcriber,
+        ledger: Arc::default(),
+    });
     let sess = Arc::new(Mutex::new(Session::new(watchdog)));
+
+    let (jobs, rx) = unbounded_channel::<Job>();
+    let worker = app.clone();
+    tokio::spawn(work(rx, move |job| {
+        let app = worker.clone();
+        async move {
+            // Spawned and awaited: a panic ends this job, not the queue.
+            if let Err(e) = tokio::spawn(app.clone().finish(job)).await {
+                eprintln!("parlad: dictation task panicked: {e}");
+            }
+            lock(&app.ledger).done();
+        }
+    }));
 
     // Watchdog: sway drops the --release edge if another key is pressed while
     // the hotkey is held (sway#6456), so a stop may never arrive.
@@ -268,6 +411,7 @@ async fn main() -> anyhow::Result<()> {
         let sess = sess.clone();
         let app = app.clone();
         let capture = capture.clone();
+        let jobs = jobs.clone();
         async move {
             // The `error:` prefix is the wire contract parlactl keys off to exit
             // non-zero; keep the two in step.
@@ -288,8 +432,8 @@ async fn main() -> anyhow::Result<()> {
             // that has been spawned but not yet polled.
             //
             // Nothing below awaits: `mark` is one store, `take_since_mark` is a
-            // memcpy, and `spawn` returns immediately. The watchdog waits for
-            // that copy and nothing more — never for whisper.
+            // memcpy, and an unbounded `send` never waits. The watchdog waits
+            // for that copy and nothing more — never for whisper.
             let reply = match s.handle(cmd, Instant::now()) {
                 Edge::Began => {
                     capture.mark();
@@ -300,13 +444,21 @@ async fn main() -> anyhow::Result<()> {
                     // block on whisper; do the work behind it, on the samples
                     // taken here rather than on whatever the ring happens to
                     // hold once that task is scheduled.
-                    tokio::spawn(app.finish(capture.take_since_mark()));
+                    let job = Job {
+                        epoch: lock(&app.ledger).enqueue(),
+                        recording: capture.take_since_mark(),
+                    };
+                    // The worker task owns the receiver for the daemon's life.
+                    jobs.send(job).expect("job worker stopped");
                     "processing"
                 }
                 Edge::Cancelled => {
                     capture.take_since_mark(); // discard
                     "cancelled"
                 }
+                // Pending jobs need a cancel of their own while idle; a cancel
+                // while recording discards only the recording.
+                Edge::Ignored if cmd == Command::Cancel => cancel_idle(&app.ledger),
                 Edge::Ignored => "ignored",
             };
             reply.into()
@@ -328,12 +480,12 @@ mod tests {
 
     #[test]
     fn a_transcript_with_speech_in_it_is_passed_through() {
-        assert_eq!(transcript(Ok(Ok("hello there".into()))), Ok("hello there".into()));
+        assert_eq!(transcript(false, Ok(Ok("hello there".into()))), Ok("hello there".into()));
     }
 
     #[test]
     fn an_empty_transcript_is_the_only_nothing_heard() {
-        assert_eq!(transcript(Ok(Ok(String::new()))), Err("Nothing heard"));
+        assert_eq!(transcript(false, Ok(Ok(String::new()))), Err("Nothing heard"));
     }
 
     #[test]
@@ -342,7 +494,7 @@ mod tests {
         // the user their microphone was silent; if the model actually errored,
         // they would spend the evening in their audio settings. The message
         // names where the detail is, because the notification cannot carry it.
-        let e = transcript(Ok(Err(anyhow::anyhow!("failed to decode the recording"))));
+        let e = transcript(false, Ok(Err(anyhow::anyhow!("failed to decode the recording"))));
         assert_eq!(e, Err("Transcription failed — see log"));
         assert_ne!(e, Err("Nothing heard"));
     }
@@ -357,7 +509,133 @@ mod tests {
         })
         .await;
         assert!(panicked.is_err(), "the test needs a genuine JoinError");
-        assert_eq!(transcript(panicked), Err("Transcription failed — see log"));
+        assert_eq!(transcript(false, panicked), Err("Transcription failed — see log"));
+    }
+
+    #[test]
+    fn an_aborted_pass_is_cancelled_not_failed() {
+        let aborted = transcript(true, Ok(Err(anyhow::anyhow!("aborted"))));
+        assert_eq!(aborted, Err(CANCELLED));
+        assert_eq!(transcript(true, Ok(Ok("late text".into()))), Err(CANCELLED));
+    }
+
+    #[test]
+    fn a_job_is_stale_only_once_the_epoch_moves() {
+        assert!(!is_stale(3, 3));
+        assert!(is_stale(3, 4));
+    }
+
+    #[test]
+    fn cancel_while_idle_revokes_pending_jobs_or_is_ignored() {
+        let ledger = StdMutex::new(Ledger { epoch: 7, ..Ledger::default() });
+        assert_eq!(cancel_idle(&ledger), "ignored");
+        assert_eq!(lock(&ledger).epoch, 7);
+        lock(&ledger).pending = 2;
+        assert_eq!(cancel_idle(&ledger), "cancelled");
+        assert_eq!(lock(&ledger).epoch, 8, "bumped exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_the_clipboard_handoff_does_not_claim_the_job() {
+        // The job passed its last check; while the handoff is suspended a
+        // cancel arrives. It must not answer "cancelled" for text that lands.
+        let ledger = StdMutex::new(Ledger::default());
+        let mine = lock(&ledger).enqueue();
+        let reply = std::cell::Cell::new("");
+        let msg = owned(
+            || is_stale(mine, lock(&ledger).epoch),
+            || lock(&ledger).commit(mine),
+            async { Ok(outcome("kept", None)) },
+            |_| async {
+                tokio::task::yield_now().await;
+                reply.set(cancel_idle(&ledger));
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(msg.1, "Copied: kept");
+        assert_eq!(reply.get(), "ignored");
+        lock(&ledger).done();
+        assert_eq!(cancel_idle(&ledger), "ignored", "nothing left pending");
+    }
+
+    fn job(epoch: u64, len: usize) -> Job {
+        Job { epoch, recording: audio::Recording { samples: vec![0.0; len], rate: audio::TARGET_RATE } }
+    }
+
+    /// Drives `work` with a pipeline that runs the real `owned` checks around
+    /// a fake whisper (which yields, so the next job could start if it were
+    /// allowed to) and a recording clipboard.
+    async fn run_jobs(jobs: Vec<Job>, bump_during: Option<u64>) -> (Vec<String>, Vec<String>) {
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let copied = Arc::new(StdMutex::new(Vec::new()));
+        let ledger = Arc::new(StdMutex::new(Ledger::default()));
+        let (tx, rx) = unbounded_channel();
+        for job in jobs {
+            tx.send(job).unwrap();
+        }
+        drop(tx);
+        let (l, c, e) = (log.clone(), copied.clone(), ledger.clone());
+        work(rx, move |job: Job| {
+            let (log, copied, ledger) = (l.clone(), c.clone(), e.clone());
+            async move {
+                let id = job.recording.samples.len();
+                let mine = job.epoch;
+                let produce = async {
+                    log.lock().unwrap().push(format!("start {id}"));
+                    tokio::task::yield_now().await;
+                    if bump_during == Some(id as u64) {
+                        lock(&ledger).epoch += 1; // cancel lands mid-whisper
+                    }
+                    tokio::task::yield_now().await;
+                    log.lock().unwrap().push(format!("end {id}"));
+                    Ok(Outcome { text: format!("text {id}"), failure: None })
+                };
+                let deliver = |t: String| async move {
+                    copied.lock().unwrap().push(t);
+                    Ok(())
+                };
+                let stale = || is_stale(mine, lock(&ledger).epoch);
+                owned(stale, || lock(&ledger).commit(mine), produce, deliver).await;
+            }
+        })
+        .await;
+        let out = (log.lock().unwrap().clone(), copied.lock().unwrap().clone());
+        out
+    }
+
+    #[tokio::test]
+    async fn jobs_run_one_at_a_time_in_recording_order() {
+        let jobs = vec![job(0, 1), job(0, 2)];
+        let (log, copied) = run_jobs(jobs, None).await;
+        assert_eq!(log, ["start 1", "end 1", "start 2", "end 2"]);
+        assert_eq!(copied, ["text 1", "text 2"]);
+    }
+
+    #[tokio::test]
+    async fn a_job_revoked_mid_whisper_never_reaches_the_clipboard() {
+        // Job 2 was made after the cancel (epoch 1), so it still delivers.
+        let jobs = vec![job(0, 1), job(1, 2)];
+        let (log, copied) = run_jobs(jobs, Some(1)).await;
+        assert_eq!(log, ["start 1", "end 1", "start 2", "end 2"]);
+        assert_eq!(copied, ["text 2"]);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_job_reports_cancelled_and_never_runs_whisper() {
+        let ran = std::cell::Cell::new(false);
+        let msg = owned(
+            || true,
+            || panic!("committed a revoked job"),
+            async {
+                ran.set(true);
+                Ok(outcome("x", None))
+            },
+            |_| async { panic!("delivered a revoked job") },
+        )
+        .await;
+        assert_eq!(msg, ("Parla", CANCELLED.to_string(), TOAST));
+        assert!(!ran.get());
     }
 
     #[test]

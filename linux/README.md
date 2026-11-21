@@ -42,6 +42,7 @@ stderr rather than refusing to start.
     dictionary = ["Kubernetes", "wlroots"]   # names whisper keeps mangling
     watchdog_secs = 30                       # see "If a recording never stops"
     # whisper_model = "/path/to/ggml-medium.en.bin"
+    # language = "auto"                     # see "Language"
 
     [cleanup]
     provider = "anthropic"          # or "openai-compatible", or "none"
@@ -68,6 +69,20 @@ raw transcript goes to the clipboard and the notification says so.
 `api_key_env` names an environment variable — the key is read from `parlad`'s
 own environment, so it has to be exported in the session that starts the daemon.
 An inline `api_key` works too, at the cost of putting the key in a file.
+
+## Language
+
+Omitted, `language` is `"en"`: every model decodes as English, so a
+multilingual custom model (one without `.en` in its name) still produces English
+until you set it. `language = "auto"` detects the spoken language on each
+dictation, at the cost of one extra encoder pass. A whisper code such as
+`"hi"` pins that language. An English-only model always decodes as English,
+and a code the model does not know falls back to English; both say so on
+stderr at startup.
+
+Known limit of `"auto"`: whisper.cpp 1.8.3's own detection scans its global
+language list, so on an older 51865-vocabulary multilingual model it also
+considers one token that is not a language.
 
 ## Hotkey
 
@@ -104,6 +119,15 @@ is optional: without one you lose the "copied" and "nothing heard" toasts, but
 dictation still works and the failure is logged rather than fatal. Then hold
 your hotkey, speak, release, and paste.
 
+Dictations are transcribed one at a time, in the order you released the key,
+so the clipboard always ends with the newest one. `parlactl cancel` while
+recording discards only that recording. `parlactl cancel` with nothing
+recording revokes every dictation still being transcribed: none of them
+reaches the clipboard, each shows "Cancelled — nothing copied", and the reply
+is `cancelled` (or `ignored` when nothing was pending, or the only one is
+already being copied). So a dictation still
+in progress after a cancelled recording needs a second cancel.
+
 `parlactl status` reports what the daemon is doing; `parlactl start` and
 `parlactl stop` are the same commands the keybinding runs, useful for testing
 without a hotkey.
@@ -118,12 +142,20 @@ long stretches — up to 300 seconds, the length of the capture buffer. Anything
 higher is clamped to that (and says so on stderr), because a recording that
 outlives the buffer loses its opening words.
 
+The capture buffer holds `watchdog_secs` plus one second of mono audio at the
+microphone's own rate (logged at startup with its size): about 6 MB at 48 kHz
+with the default 30 s, about 58 MB at 300 s. Each recording is resampled to
+16 kHz once, after you release the key.
+
 ## Known limitations in M1
 
 - Output goes to the clipboard, not the focused window. You paste it yourself,
   and it overwrites whatever was on the clipboard before.
 - No password-field protection. Parla cannot tell what is focused, so nothing
   stops you dictating into a password prompt — don't dictate secrets.
+- The microphone is opened once, at startup, with its default format. A device
+  that changes rate or is unplugged afterwards is not followed; restart
+  `parlad`.
 - No pill overlay and no live partial transcript; notifications are the only
   feedback while it works.
 - Unless `provider = "none"`, the transcript is sent to whichever LLM endpoint

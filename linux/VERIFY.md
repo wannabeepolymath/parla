@@ -428,11 +428,130 @@ Notes:
 
 ## After checks — added by lane 09
 
-(Placeholder. Lane 09 appends its checks here.)
+Same setup and helpers as above. Each item compares against its baseline.
+
+- [ ] **L9.1. A-then-B ordering** (compare B3)
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl start; sleep 2; parlactl stop
+delivered 2; wl-paste
+```
+
+Expected: the clipboard ends with B; the log shows A's `parlad: Parla — Copied: …`
+line before B's.
+
+Result:
+
+Notes:
+
+- [ ] **L9.2. Cancel after release** (compare B4)
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl cancel
+delivered; wl-paste
+```
+
+Expected: `parlactl cancel` prints `cancelled`, nothing new on the clipboard,
+and a `Cancelled — nothing copied` notification and log line.
+
+Result:
+
+Notes:
+
+- [ ] **L9.3. Cancel mid-whisper on a long clip**
+
+Dictate for about 60 s, release, wait 1 s, then `time parlactl cancel` and
+`delivered`. Expected: the `Cancelled — nothing copied` line appears within a
+few seconds of the cancel, not after the full transcription time.
+
+Result:
+
+Notes:
+
+- [ ] **L9.4. Multilingual model, no `language` key** (compare B5)
+
+Same model and sentence as B5, `language` absent. Expected: output is English
+(transcribed or translated), as in B5.
+
+Result:
+
+Notes:
+
+- [ ] **L9.5. `language = "auto"`**
+
+Same model and sentence. Expected: output in the spoken language.
+
+Result:
+
+Notes:
+
+- [ ] **L9.6. Pinned language**
+
+`language = "<code of the spoken language>"`, same sentence. Expected: output
+in that language.
+
+Result:
+
+Notes:
+
+- [ ] **L9.7. Invalid `language`**
+
+`language = "zz"`, restart. Expected: a startup stderr line naming `"zz"` and
+saying it decodes as English; dictation works and is English.
+
+Result:
+
+Notes:
 
 ## After checks — added by lane 11
 
-(Placeholder. Lane 11 appends its checks here.)
+Same setup and helpers as above.
+
+- [ ] **L11.1. Startup log** — the `parlad: capturing … Hz, … ch, …; ring … s, … MB`
+  line. Record it.
+
+Result:
+
+Notes:
+
+- [ ] **L11.2. Duration fidelity** — a timed 10.0 s dictation logs
+  `transcribing 10.0s of audio` ± 0.1 s. Compare with the lane 06 baseline
+  number.
+
+Result:
+
+Notes:
+
+- [ ] **L11.3. Other devices** — repeat L11.1–L11.2 on a 44.1 kHz and a 48 kHz
+  device (or change the PipeWire clock rate) and on one USB microphone.
+
+Result:
+
+Notes:
+
+- [ ] **L11.4. Recognition sanity** — the same sentence dictated before and
+  after this lane is at least as accurate. Do not claim a WER number without the
+  lane 04 corpus.
+
+Result:
+
+Notes:
+
+- [ ] **L11.5. Memory** — `ps -o rss= -p $(pgrep parlad)` (or `smem`) after
+  5 minutes idle, with the default watchdog and with `watchdog_secs = 300`.
+  Record both.
+
+Result:
+
+Notes:
+
+- [ ] **L11.6. Five-minute dictation** — `watchdog_secs = 300`, dictate for
+  about 4.5 minutes; it finishes and delivers. Record the time from `stop` to
+  the `transcribing` log line (the resample step).
+
+Result:
+
+Notes:
 
 ---
 
