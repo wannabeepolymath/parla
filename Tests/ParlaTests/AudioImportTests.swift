@@ -532,6 +532,29 @@ extension AudioImportTests {
         XCTAssertEqual(panels, 0); XCTAssertNil(r.owner.review)
         try await r.close()
     }
+    @MainActor func testJSONExportCarriesNoWordsAndRefusesAStaleResult() async throws {
+        let (r, p, url) = try timedRig()
+        for timed in [false, true] {
+            if timed { await runTimed(r, url) } else { await r.run(url) }
+            let review = try XCTUnwrap(r.owner.review)
+            XCTAssertNotNil(review.recognition); XCTAssertNil(review.recognition?.words)
+            let destination = r.root.appendingPathComponent("result-\(timed).json")
+            r.hub.audioImportExportPanel = { name in XCTAssertEqual(name, "Parla-transcript.json"); return destination }
+            r.hub.exportAudioImportJSON()
+            let bytes = try Data(contentsOf: destination)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertTrue(json["words"] is NSNull)
+            XCTAssertEqual(json["segments"] is NSNull, !timed)
+            XCTAssertEqual(json["rawText"] as? String, review.entry.raw)
+            let text = String(decoding: bytes, as: UTF8.self)
+            XCTAssertFalse(text.contains(url.path)); XCTAssertFalse(text.contains("/fake/global.bin")); XCTAssertFalse(text.contains("Parla\""))
+        }
+        XCTAssertEqual(p.timed, [false, true])
+        r.hub.discardAudioImport(); var panels = 0
+        r.hub.audioImportExportPanel = { _ in panels += 1; return r.root.appendingPathComponent("stale.json") }
+        r.hub.exportAudioImportJSON(); XCTAssertEqual(panels, 0)
+        try await r.close()
+    }
     @MainActor func testB47T7CancelFailureExplicitDiskRetryAndInvalidTimingKeepReview() async throws {
         let (r, p, url) = try timedRig(); await runTimed(r, url)
         let token = r.owner.review?.entry.id, destination = r.root.appendingPathComponent("retry.vtt")

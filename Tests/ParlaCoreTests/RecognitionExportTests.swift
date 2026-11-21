@@ -27,6 +27,7 @@ final class RecognitionExportTests: XCTestCase {
             "language": ["requested": NSNull(), "detected": "en"],
             "source": ["sampleRate": 16_000, "sampleCount": 160_000],
             "segments": ["clock": "whisper-1.9.1-pcm-10ms", "cues": [["text": " Hello", "start": 0, "end": 250]]],
+            "words": NSNull(),
         ]
         XCTAssertEqual(json, expected)
     }
@@ -53,6 +54,14 @@ final class RecognitionExportTests: XCTestCase {
         XCTAssertEqual(cleaned["cleanedText"] as? String, "Hello.")
         raw["cleanedText"] = "Hello."
         XCTAssertEqual(cleaned, raw)
+    }
+    func testWordsAppearAsEstimatesWhenPresent() throws {
+        let words = try RecognitionWords(sourceSampleCount: 160_000, words: [.init(text: "Hello", start: 0, end: 40, segment: 0)])
+        let pass = RecognitionPassResult(identity: identity(.customRevisionUnknown), instance: instance, pass: .fullFinal, sampleRange: 0..<160_000,
+                                         native: .completed(.init(text: "Hello", words: words)), canceled: false)
+        let json = try decoded(RecognitionExport.encoded(result: RecognitionFinalResult(text: "Hello", provenance: .pass(pass)), requestedLanguage: nil))
+        XCTAssertEqual(json["words"] as? NSDictionary, ["clock": "whisper-1.9.1-pcm-10ms", "estimate": true,
+                                                        "items": [["text": "Hello", "start": 0, "end": 40, "segment": 0]]])
     }
     func testSizeCapRefuses() throws {
         XCTAssertThrowsError(try RecognitionExport.encoded(result: result(), requestedLanguage: nil, cleanedText: nil, maximumBytes: 64))

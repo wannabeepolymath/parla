@@ -53,11 +53,14 @@ struct HubAudioImportView: View {
                         Button("Export WebVTT…", action: model.exportAudioImportVTT)
                         Button("Export SRT…", action: model.exportAudioImportSRT)
                     }
+                    Button("Export JSON…", action: model.exportAudioImportJSON)
                     if review.saved { Text("Saved").foregroundStyle(.secondary) }
                     else if model.settings.historyEnabled {
                         Button(review.saveFailed ? "Try saving again" : "Save to history", action: model.saveAudioImport)
                     } else { Text("History is off.").foregroundStyle(.secondary) }
                 }.disabled(model.hasPendingSettingsSave || model.loadError != nil || model.saveError != nil)
+                Text("Raw recognition with model and timing details.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }

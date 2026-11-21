@@ -49,12 +49,15 @@ final class AudioImportOwner: ObservableObject {
         let raw: String
         let sourceInfo: ImportedAudio.SourceFacts
         var segments: RecognitionSegments? = nil
+        var recognition: RecognitionFinalResult? = nil
     }
     struct Review {
         let job: Job
         let entry: HistoryEntry
         let sourceInfo: ImportedAudio.SourceFacts
         let segments: RecognitionSegments?
+        /// Same lifetime as `segments`: dropped with the review on invalidate.
+        var recognition: RecognitionFinalResult? = nil
         var saved = false, saveFailed = false
     }
     @Published private(set) var source: FileImportSource?
@@ -123,7 +126,7 @@ final class AudioImportOwner: ObservableObject {
                 var metrics = PipelineMetrics(); metrics.model = job.configuration.request.metricLabel
                 let timing = job.mode == .experimentalTimed && completed.sourceInfo.profile == .wavPCM && completed.sourceInfo.origin == .strictPCM16k
                     && completed.segments?.sourceSampleCount == completed.sourceInfo.sourceFrames ? completed.segments : nil
-                self.review = Review(job: job, entry: HistoryEntry(id: job.resultID, date: completedAt, raw: completed.raw, metrics: metrics), sourceInfo: completed.sourceInfo, segments: timing)
+                self.review = Review(job: job, entry: HistoryEntry(id: job.resultID, date: completedAt, raw: completed.raw, metrics: metrics), sourceInfo: completed.sourceInfo, segments: timing, recognition: completed.recognition)
                 self.message = job.mode == .experimentalTimed && timing == nil
                     ? "Transcript ready. Timestamps aren’t available for this file."
                     : "Transcript ready."
@@ -243,7 +246,8 @@ final class AudioImportOwner: ObservableObject {
                     validate: { guard job.current else { throw CancellationError() } }, active: { job.current },
                     authorize: { job.authorize(store) }, rawOnly: true, timed: job.mode == .experimentalTimed, enter: enter, load: load)
                 guard let sourceInfo else { throw CancellationError() }
-                result = .success(AudioImportOwner.Completed(raw: recognition.raw, sourceInfo: sourceInfo, segments: recognition.segments))
+                result = .success(AudioImportOwner.Completed(raw: recognition.raw, sourceInfo: sourceInfo, segments: recognition.segments,
+                                                             recognition: recognition.recognition))
             } catch { result = .failure(error) }
             await MainActor.run { completion.result = result }
         }, finished: {

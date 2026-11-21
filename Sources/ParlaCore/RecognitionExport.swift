@@ -41,11 +41,19 @@ public enum RecognitionExport {
             "language": ["requested": orNull(requestedLanguage), "detected": orNull(detected)],
             "source": orNull(sampleCount.map { ["sampleRate": 16_000, "sampleCount": $0] }),
             "segments": NSNull(),
+            "words": NSNull(),
         ]
         if let segments {
             object["segments"] = [
                 "clock": segments.clock == .whisper191PCM10ms ? "whisper-1.9.1-pcm-10ms" : "unknown",
                 "cues": segments.cues.map { ["text": $0.text, "start": $0.start, "end": $0.end] as [String: Any] },
+            ] as [String: Any]
+        }
+        // Heuristic estimates; `estimate: true` is the machine-readable form of that.
+        if let words = result.words {
+            object["words"] = [
+                "clock": "whisper-1.9.1-pcm-10ms", "estimate": true,
+                "items": words.words.map { ["text": $0.text, "start": $0.start, "end": $0.end, "segment": $0.segment] as [String: Any] },
             ] as [String: Any]
         }
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
