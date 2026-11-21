@@ -16,19 +16,20 @@ public enum RecognitionExport {
 
     static func encoded(result: RecognitionFinalResult, requestedLanguage: String?, cleanedText: String?,
                         maximumBytes: Int) throws -> Data {
-        let pass: RecognitionPassResult?
+        let pass: RecognitionPassResult?, passRange: Range<Int>?
         switch result.provenance {
         case .canceled: throw Refusal.canceled
         case .skipped: throw Refusal.skipped
-        case .pass(let p): pass = p
-        case .assembled(_, _, let tail, _): pass = tail
+        case .pass(let p): pass = p; passRange = p.sampleRange
+        // The tail's range covers only the tail, not the assembled rawText: source stays null.
+        case .assembled(_, _, let tail, _): pass = tail; passRange = nil
         }
         guard let text = result.text else { throw Refusal.noText }
         let identity = pass?.identity
         var detected: String?
         if case .completed(let payload)? = pass?.native { detected = payload.detectedLanguage }
         let segments = result.segments
-        let sampleCount = segments?.sourceSampleCount ?? pass?.sampleRange?.count
+        let sampleCount = segments?.sourceSampleCount ?? passRange?.count
 
         // ponytail: JSONSerialization, as the spec allows; NSNull keeps every unknown key explicit.
         var object: [String: Any] = [

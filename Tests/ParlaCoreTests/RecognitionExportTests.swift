@@ -39,10 +39,22 @@ final class RecognitionExportTests: XCTestCase {
     }
     func testCanceledSkippedAndNilTextAreRefused() throws {
         let pass = RecognitionPassResult(identity: nil, instance: instance, pass: .fullFinal, sampleRange: nil, native: .canceled, canceled: true)
-        for refused in [RecognitionFinalResult(text: "x", provenance: .canceled), RecognitionFinalResult(text: nil, provenance: .skipped(.silence)),
-                        RecognitionFinalResult(text: nil, provenance: .pass(pass))] {
+        for refused in [RecognitionFinalResult(text: "x", provenance: .canceled), RecognitionFinalResult(text: nil, provenance: .pass(pass))] {
             XCTAssertThrowsError(try RecognitionExport.encoded(result: refused, requestedLanguage: nil))
         }
+        // Text present, so only the skipped refusal can stop it.
+        XCTAssertThrowsError(try RecognitionExport.encoded(result: RecognitionFinalResult(text: "", provenance: .skipped(.silence)), requestedLanguage: nil)) {
+            guard case RecognitionExport.Refusal.skipped = $0 else { return XCTFail("\($0)") }
+        }
+    }
+    func testAssembledResultNeverReportsTheTailAsTheSource() throws {
+        let tail = RecognitionPassResult(identity: nil, instance: instance, pass: .fullFinal, sampleRange: 1_000..<8_000,
+                                         native: .completed(.init(text: "tail")), canceled: false)
+        let ownership = StreamWindow.Ownership(instance: instance, identity: nil, capture: UUID(), request: RecognitionRequest(settings: Settings()))
+        let assembled = RecognitionFinalResult(text: "confirmed tail",
+                                               provenance: .assembled(ownership: ownership, confirmedSamples: 0..<1_000, tail: tail, skipped: nil))
+        let json = try decoded(RecognitionExport.encoded(result: assembled, requestedLanguage: nil))
+        XCTAssertEqual(json["source"] as? NSNull, NSNull())
     }
     func testPrivateFieldsNeverAppear() throws {
         let text = String(decoding: try RecognitionExport.encoded(result: result(), requestedLanguage: nil), as: UTF8.self)
