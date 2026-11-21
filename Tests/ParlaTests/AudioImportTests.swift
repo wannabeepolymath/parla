@@ -171,7 +171,7 @@ final class AudioImportTests: XCTestCase {
             await r.run(try r.file(bytes: bytes)); XCTAssertNil(r.owner.review)
             XCTAssertFalse(r.owner.busy); XCTAssertTrue(r.probe.paths.isEmpty)
         }
-        r.hub.selectAudioImport(try r.file("other.mp3")); XCTAssertNil(r.owner.source)
+        r.hub.selectAudioImport(try r.file("other.mp4")); XCTAssertNil(r.owner.source)
         await r.run(try r.file()); XCTAssertEqual(r.probe.calls.count, 1)
         try await r.close()
     }
@@ -530,6 +530,29 @@ extension AudioImportTests {
         r.hub.discardAudioImport(); var panels = 0
         r.hub.audioImportExportPanel = { _ in panels += 1; return destination }; r.hub.exportAudioImportVTT()
         XCTAssertEqual(panels, 0); XCTAssertNil(r.owner.review)
+        try await r.close()
+    }
+    @MainActor func testJSONExportCarriesNoWordsAndRefusesAStaleResult() async throws {
+        let (r, p, url) = try timedRig()
+        for timed in [false, true] {
+            if timed { await runTimed(r, url) } else { await r.run(url) }
+            let review = try XCTUnwrap(r.owner.review)
+            XCTAssertNotNil(review.recognition); XCTAssertNil(review.recognition?.words)
+            let destination = r.root.appendingPathComponent("result-\(timed).json")
+            r.hub.audioImportExportPanel = { name in XCTAssertEqual(name, "Parla-transcript.json"); return destination }
+            r.hub.exportAudioImportJSON()
+            let bytes = try Data(contentsOf: destination)
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertTrue(json["words"] is NSNull)
+            XCTAssertEqual(json["segments"] is NSNull, !timed)
+            XCTAssertEqual(json["rawText"] as? String, review.entry.raw)
+            let text = String(decoding: bytes, as: UTF8.self)
+            XCTAssertFalse(text.contains(url.path)); XCTAssertFalse(text.contains("/fake/global.bin")); XCTAssertFalse(text.contains("Parla\""))
+        }
+        XCTAssertEqual(p.timed, [false, true])
+        r.hub.discardAudioImport(); var panels = 0
+        r.hub.audioImportExportPanel = { _ in panels += 1; return r.root.appendingPathComponent("stale.json") }
+        r.hub.exportAudioImportJSON(); XCTAssertEqual(panels, 0)
         try await r.close()
     }
     @MainActor func testB47T7CancelFailureExplicitDiskRetryAndInvalidTimingKeepReview() async throws {
@@ -1345,5 +1368,31 @@ extension AudioImportTests {
         XCTAssertThrowsError(try rig.hub.validateExportDestination(url,fileExtension:"mov"))
         XCTAssertNoThrow(try rig.hub.validateExportDestination(rig.root.appendingPathComponent("safe.txt"),fileExtension:"txt"))
         try await rig.close()
+    }
+}
+
+final class CompressedAudioImportRoutingTests: XCTestCase {
+    func testRoutingIsExtensionClosedTimedIsRefusedAndKeepIsUnavailable() throws {
+        let physical = try XCTUnwrap(realpath(FileManager.default.temporaryDirectory.path, nil)); defer { free(physical) }
+        let directory = URL(fileURLWithPath: String(cString: physical)).appendingPathComponent("parla-routing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func file(_ name: String) throws -> URL {
+            let url = directory.appendingPathComponent(name); try Data([1, 2, 3, 4]).write(to: url); return url
+        }
+        XCTAssertEqual(try FileImportSource(url: file("a.m4a")).format, .m4a)
+        XCTAssertEqual(try FileImportSource(url: file("b.MP3")).format, .mp3)
+        for refused in ["c.mp4", "d.aac", "e.ogg", "noextension"] {
+            XCTAssertThrowsError(try FileImportSource(url: file(refused)), refused)
+        }
+        let facts = ImportedAudio.SourceFacts.compressed(.init(container: "M4A", codec: "aac ", sourceRate: 44_100, sourceChannels: 2,
+            reportedSourceFrames: 88_200, outputFrames: 32_000, clipped: 0))
+        XCTAssertThrowsError(try AudioImportExecution.validateSource(facts, mode: .experimentalTimed))
+        XCTAssertNoThrow(try AudioImportExecution.validateSource(facts, mode: .raw))
+        let owner = AudioImportOwner()
+        owner.select(try file("f.m4a"))
+        XCTAssertNil(owner.takeSourceForSaved())
+        XCTAssertNotNil(owner.source)
+        XCTAssertEqual(owner.message, "M4A and MP3 files can’t be kept yet. Use Transcribe for this file.")
     }
 }

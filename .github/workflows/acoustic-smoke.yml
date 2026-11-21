@@ -1,0 +1,43 @@
+name: Acoustic smoke
+
+# Real recognition on fixed audio with the pinned base.en model. Detects native
+# integration breakage (prompt wiring, resampling, marker stripping, language pin);
+# it does not qualify model quality. The offline tier stays in ci.yml.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  smoke:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on the pinned base.en sha256 (scripts/download-model.sh, ModelCatalog.all).
+      - uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/Parla/models
+          key: whisper-base.en-a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002
+
+      - run: scripts/download-model.sh base.en
+
+      - run: scripts/fetch-smoke-assets.sh
+
+      # The model-gated tests stop skipping once base.en is present.
+      - run: swift test --filter TranscriberTests
+
+      - name: parla-eval --asr-only on the smoke clips
+        run: |
+          if ls eval/smoke/cases/*.wav >/dev/null 2>&1; then
+            swift run parla-eval --asr-only eval/smoke/cases --out "$RUNNER_TEMP/smoke.json"
+          else
+            echo "SKIPPED: no smoke clips configured (eval/smoke/clips.tsv has no rows)"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke
+          path: ${{ runner.temp }}/smoke.json
+          if-no-files-found: ignore

@@ -199,6 +199,21 @@ final class RecognitionFactoryTests: XCTestCase {
             XCTAssertEqual(probe.calls.map(\.language), [expected]); XCTAssertEqual(probe.detections, 0)
         }
     }
+    func testLanguageHintsCarryTheDetectedLanguageToTheNextTranscriberOfTheSameModel() async throws {
+        let probe = NativeProbe(); probe.detected = "hi"
+        var factory = probe.factory(); factory.languageHints = WhisperLanguageHints()
+        _ = await (try await factory.acquire(request: request("/owned/multi.bin"))).recognize(audio, pass: .fullFinal)
+        XCTAssertEqual(probe.calls.map(\.language), ["en", "hi"])
+        probe.calls = []  // a second, non-resident handle for the same model starts at the hint
+        _ = await (try await factory.acquire(request: request("/owned/multi.bin"))).recognize(audio, pass: .fullFinal)
+        XCTAssertEqual(probe.calls.map(\.language), ["hi"])
+        probe.calls = []  // another model path starts at English
+        _ = await (try await factory.acquire(request: request("/owned/other.bin"))).recognize(audio, pass: .fullFinal)
+        XCTAssertEqual(probe.calls.first?.language, "en")
+        let hints = WhisperLanguageHints(); factory.languageHints = hints
+        _ = await (try await factory.acquire(request: request("/owned/multi.bin", language: "es"))).recognize(audio, pass: .fullFinal)
+        XCTAssertNil(hints.last(for: "/owned/multi.bin"))  // a pinned language never writes a hint
+    }
     func testRealWhisperAutoInvalidPinDetectionRetryAndExplicitAutoIgnoresMutablePin() async throws {
         for pin in [nil, "invalid-code"] as [String?] {
             let probe = NativeProbe(); probe.detected = "hi"

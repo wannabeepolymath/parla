@@ -67,6 +67,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
                       clipped >= 0, clipped <= outputFrames else { throw Failure.bounds }
             case .qtPCM16kV1:
                 guard rate == 16_000, (6_400...9_600_000).contains(frames), outputFrames == frames, clipped == 0 else { throw Failure.bounds }
+            case .compressedAVFoundationV1: throw Failure.bounds // transcribe-only; never stored
             }
         }
     }
@@ -277,6 +278,7 @@ public final class SavedAudioImportStore: @unchecked Sendable {
                 guard value.schema == 2, job.source.kind == .pcmMOVSource, !pcm.overflow,
                       pcm.partialValue > 0, pcm.partialValue < job.source.bytes,
                       job.source.bytes == job.original.bytes else { throw Failure.unknown }
+            case .compressedAVFoundationV1: throw Failure.unknown
             }
             if value.schema == 1 {
                 guard job.facts.profile == .wavPCM,

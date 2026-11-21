@@ -169,6 +169,18 @@ self-corrections, trailing-off). Record yourself:
 Then write `name.raw.txt` (what was actually said, verbatim — this scores the
 ASR leg) and `name.golden.txt` (what Parla should have inserted).
 
+## Decoder experiments
+
+`--experiment`, `--whisper-model`, `--language` and `--evidence-out` run eval-only decoder switches
+(non-speech suppression, carried prompt, beam search, native VAD, another model file) and record
+native decoder evidence. No app setting changes. See [`experiments.md`](experiments.md).
+
+## Acoustic smoke tier
+
+`eval/smoke/` holds a small, separate tier that runs real recognition with the pinned `base.en`
+model on a few licensed clips (`.github/workflows/acoustic-smoke.yml`, manual and weekly). It
+catches native integration breakage, not model quality. See [`smoke/README.md`](smoke/README.md).
+
 ## `verify` — the scorer-drift CI gate
 
 A full run writes `eval/results.json`: every scored leg with its reference and

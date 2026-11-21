@@ -8,3 +8,6 @@ models/
 
 .parla-debug.log
 *.dmg
+
+# Acoustic smoke clips are fetched, not committed, unless a licence allows it (git add -f).
+eval/smoke/cases/*.wav

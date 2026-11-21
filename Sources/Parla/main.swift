@@ -328,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let self else { return false }
         let settings = self.store.load()
         return self.store.lastError == nil && self.nativePreparation.core.matchesSavedPermission(settings)
-        })
+        }, languageHints: WhisperLanguageHints())
         MainActor.assumeIsolated { parakeetPreparation.bindFactory(&factory) }
         return factory
     }()

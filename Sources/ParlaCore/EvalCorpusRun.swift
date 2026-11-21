@@ -8,6 +8,7 @@ public enum EvalCorpusRun {
     struct Options: Equatable {
         let manifest: String, out: String, runID: String, configRevision: String
         let whisperModel: String?, context: String?
+        var language: String? = nil, experiment = WhisperExperiment(), evidenceOut: String? = nil
     }
     struct Engine: Encodable, Equatable {
         let leg = "asr"
@@ -56,7 +57,8 @@ public enum EvalCorpusRun {
         var index = 2
         while index < arguments.count {
             let flag = arguments[index]
-            guard ["--out", "--run-id", "--config-revision", "--whisper-model", "--context"].contains(flag),
+            guard ["--out", "--run-id", "--config-revision", "--whisper-model", "--context",
+                   "--experiment", "--language", "--evidence-out"].contains(flag),
                   values[flag] == nil, index + 1 < arguments.count,
                   !arguments[index + 1].hasPrefix("-"), !arguments[index + 1].isEmpty else { throw Failure.refused("arguments") }
             values[flag] = arguments[index + 1]
@@ -66,8 +68,15 @@ public enum EvalCorpusRun {
               (try? EvalCorpusJSON.string(runID).id()) != nil, (try? EvalCorpusJSON.string(config).id()) != nil,
               out.hasSuffix(".json"),
               (try? EvalCorpusIO.components(absolute(out), absolute: true)) != nil else { throw Failure.refused("arguments") }
+        var experiment = WhisperExperiment()
+        if let list = values["--experiment"] {
+            guard let parsed = WhisperExperiment.parse(list) else { throw Failure.refused("arguments") }
+            experiment = parsed
+        }
+        experiment.collectEvidence = values["--evidence-out"] != nil
         return Options(manifest: arguments[1], out: out, runID: runID, configRevision: config,
-                       whisperModel: values["--whisper-model"], context: values["--context"])
+                       whisperModel: values["--whisper-model"], context: values["--context"],
+                       language: values["--language"], experiment: experiment, evidenceOut: values["--evidence-out"])
     }
     private static func absolute(_ path: String) -> String {
         path.hasPrefix("/") ? path : FileManager.default.currentDirectoryPath + "/" + path
@@ -109,8 +118,11 @@ public enum EvalCorpusRun {
             guard !exists(options.out) else { throw Failure.refused("output exists") }
             do { _ = try EvalCorpus.evaluate(.init(manifest: options.manifest, results: nil, against: nil)) }
             catch let error as EvalCorpusError { throw Failure.refused(error.rawValue) }
+            let evidenceLog: EvalEvidenceLog?
+            do { evidenceLog = try options.evidenceOut.map { try EvalEvidenceLog(path: $0) } } catch { throw Failure.refused("output exists") }
             var settings = Settings()
             settings.whisperModelPath = options.whisperModel
+            settings.language = options.language
             if let context = options.context {
                 guard let data = try? Data(contentsOf: URL(fileURLWithPath: context)),
                       let fixture = try? JSONDecoder().decode(Settings.self, from: data) else { throw Failure.refused("context") }
@@ -120,8 +132,14 @@ public enum EvalCorpusRun {
             guard FileManager.default.fileExists(atPath: request.modelPath) else { throw Failure.refused("model") }
             do { try await recognition.acquire(needsASR: true, request: { request }) }
             catch { throw Failure.refused("engine") }
+            recognition.configure(options.experiment)
+            let model = (request.modelPath as NSString).lastPathComponent
             let report = try await produce(options, engine: Self.engine(modelPath: request.modelPath, configRevision: options.configRevision),
-                                           recognize: { await recognition.recognize($0) })
+                                           recognize: { await recognition.recognize($0) },
+                                           evidence: evidenceLog.map { log in { id, samples, seconds in
+                                               try log.append(name: id, audioSeconds: samples.map { Double($0) / 16_000 }, decodeSeconds: seconds,
+                                                               model: model, experiment: options.experiment, evidence: recognition.takeEvidence())
+                                           } })
             return (0, report)
         } catch let failure as Failure {
             return (failure.code, failure.message)
@@ -132,7 +150,8 @@ public enum EvalCorpusRun {
 
     /// Admits the manifest, recognizes every case in manifest order, writes `out` once, then self-verifies.
     static func produce(_ options: Options, engine: Engine,
-                        recognize: ([Float]) async -> RecognitionPassResult?) async throws -> String {
+                        recognize: ([Float]) async -> RecognitionPassResult?,
+                        evidence: ((String, Int?, Double?) throws -> Void)? = nil) async throws -> String {
         let manifestURL = URL(fileURLWithPath: absolute(options.manifest))
         let io: EvalCorpusIO, snapshot: EvalCorpusIO.Snapshot, manifest: EvalCorpus.Manifest
         let order: [(id: String, path: String)]
@@ -162,14 +181,19 @@ public enum EvalCorpusRun {
             // ponytail: AVAudioFile only opens URLs, so decode re-opens the path the digest was taken from;
             // io.revalidate() below and the self-verify rehash catch a file swapped after admission.
             guard let samples = try? Eval.loadSamples(url: manifestURL.deletingLastPathComponent().appendingPathComponent(path)) else {
+                // One evidence line per case even when nothing decoded: nil sizes/timings, no native evidence.
+                try evidence?(id, nil, nil)
                 rows.append(row("failed", "engine", nil, Date().timeIntervalSince(t0))); continue
             }
             if Pipeline.recognitionSkip(samples: samples) != nil {
+                try evidence?(id, samples.count, nil)
                 rows.append(row("skipped", "policy", nil, nil)); continue
             }
             let start = Date()
             let outcome = Self.row(await recognize(samples))
-            rows.append(row(outcome.status, outcome.reason, outcome.hypothesis, Date().timeIntervalSince(start)))
+            let seconds = Date().timeIntervalSince(start)
+            try evidence?(id, samples.count, seconds)
+            rows.append(row(outcome.status, outcome.reason, outcome.hypothesis, seconds))
         }
         do { try io.revalidate() } catch let error as EvalCorpusError { throw Failure.refused(error.rawValue) }
 
