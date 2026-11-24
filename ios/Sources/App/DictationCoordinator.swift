@@ -172,7 +172,20 @@ import ParlaCore
     }
     private func process(request: DictationSession, samples: [Float]?, duration: TimeInterval, existingRaw: String? = nil, warning: String? = nil) {
         backgroundTime.start { [weak self] in
-            self?.cancel(reason: "iOS ended background processing. Return to Parla and try again.")
+            guard let self else { return }
+            let reason = "iOS ended background processing before the text was ready. Return to Parla and try again."
+            let note = [warning, reason].compactMap { $0 }.joined(separator: " ")
+            // Save the take through the same failed-completion path as a recognition error, at expiration
+            // rather than before recognition: the success path stays unchanged, and one ≤5-minute 16 kHz
+            // WAV write plus one History insert fits in the seconds iOS gives this handler. `.never` keeps
+            // the old cancel, so nothing durable is written.
+            if library.library.preferences.retention != .never,
+               let owned = try? SessionStore().complete(request, final: "", failure: reason, note: note, save: {
+                   try self.save(request, transcript: Transcript(id: request.id, raw: existingRaw ?? "", cleaned: nil, final: nil, duration: duration, error: note), samples: samples, note: nil)
+               }, retain: { _ in }) {
+                // complete() already failed the shared session; cancel() would overwrite that with .cancelled.
+                session = owned; work?.cancel(); message = note; endActivity()
+            } else { cancel(reason: reason) }
         }
         let snapshot = settings.current
         let pipeline = DictationEngine.pipeline(snapshot, credentials: settings.store.credentials)
@@ -201,21 +214,8 @@ import ParlaCore
                 try Task.checkCancellation()
                 // The ownership lock covers both the local save and publication.
                 let owned = try SessionStore().complete(request, final: final, failure: failure, note: note, save: {
-                    try library.reload()
-                    var savedAudio: URL?
-                    var transcript = Transcript(id: request.id, raw: raw, cleaned: outcome?.cleaned, final: outcome?.final, duration: duration, error: note)
-                    do {
-                        if library.library.preferences.retention != .never, let samples {
-                            let target = library.audioDirectory.appendingPathComponent("\(request.id).wav")
-                            // Also remove a partial WAV if the writer throws.
-                            savedAudio = target
-                            try RecordingStore.writeWAV(samples, to: target); transcript.audioName = target.lastPathComponent
-                        }
-                        try library.mutate { state in
-                            if state.preferences.retention != .never { state.transcripts.insert(transcript, at: 0) }
-                            if failure == nil, !final.isEmpty, request.destination == .note { state.notes.insert(Note(text: final), at: 0) }
-                        }
-                    } catch { if let savedAudio { try? FileManager.default.removeItem(at: savedAudio) }; throw error }
+                    try save(request, transcript: Transcript(id: request.id, raw: raw, cleaned: outcome?.cleaned, final: outcome?.final, duration: duration, error: note),
+                             samples: samples, note: failure == nil && !final.isEmpty && request.destination == .note ? final : nil)
                 }, retain: { current in
                     lastResult = final; resultExpires = current.expires; message = current.error; retained = true
                 })
@@ -238,6 +238,24 @@ import ParlaCore
             }
             cleanupOperation()
         }
+    }
+    /// History entry, retained WAV and destination note for one take; runs under SessionStore's ownership lock.
+    private func save(_ request: DictationSession, transcript: Transcript, samples: [Float]?, note: String?) throws {
+        try library.reload()
+        var savedAudio: URL?
+        var transcript = transcript
+        do {
+            if library.library.preferences.retention != .never, let samples {
+                let target = library.audioDirectory.appendingPathComponent("\(request.id).wav")
+                // Also remove a partial WAV if the writer throws.
+                savedAudio = target
+                try RecordingStore.writeWAV(samples, to: target); transcript.audioName = target.lastPathComponent
+            }
+            try library.mutate { state in
+                if state.preferences.retention != .never { state.transcripts.insert(transcript, at: 0) }
+                if let note { state.notes.insert(Note(text: note), at: 0) }
+            }
+        } catch { if let savedAudio { try? FileManager.default.removeItem(at: savedAudio) }; throw error }
     }
     private func cleanupOperation() {
         started = nil; work = nil; session = try? SessionStore().read()
