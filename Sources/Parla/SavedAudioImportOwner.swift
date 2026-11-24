@@ -427,6 +427,10 @@ final class SavedAudioImportOwner: ObservableObject {
                     }
                 }
                 result = .success(.init(token:native.token,raw:native.raw,observed:native.observed,accepted:accepted,saveFailure:failure,resultDate:native.resultDate))
+            } else if case .success(let native) = result, store.failure == nil {
+                // Revoked after recognition succeeded: settle the attempt so the row
+                // doesn't stay running and block the next saved admission.
+                try? store.finish(native.token,canceled:true)
             }
             return result
     }
