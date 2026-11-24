@@ -87,12 +87,23 @@ final class FileImportSource: @unchecked Sendable {
             self.format = selectedFormat; self.url = url; self.access = access; self.scoped = scoped
             self.fd = parent; self.descriptors = opened; self.bindings = bindings; self.identity = st
             byteCount = Int(st.st_size)
-            // Escape controls and bidi format characters; retain ordinary Unicode/spaces.
-            displayName = String(url.lastPathComponent.unicodeScalars.prefix(160).map { scalar in
-                CharacterSet.controlCharacters.contains(scalar) || CharacterSet.illegalCharacters.contains(scalar)
-                    || (0x202A...0x202E).contains(scalar.value) || (0x2066...0x2069).contains(scalar.value)
-                    ? "\\u{\(String(scalar.value, radix: 16))}" : String(scalar)
-            }.joined().prefix(640))
+            // Escape controls and bidi format characters; retain ordinary Unicode/spaces,
+            // plus ZWJ and emoji tags so 👩‍💻 and subdivision flags stay intact.
+            var pieces: [String] = [], run = String.UnicodeScalarView()
+            for scalar in url.lastPathComponent.unicodeScalars.prefix(160) {
+                let v = scalar.value
+                if v != 0x200D, !(0xE0020...0xE007F).contains(v),
+                   CharacterSet.controlCharacters.contains(scalar) || CharacterSet.illegalCharacters.contains(scalar)
+                    || (0x202A...0x202E).contains(v) || (0x2066...0x2069).contains(v) {
+                    pieces += String(run).map(String.init); run = .init()
+                    pieces.append("\\u{\(String(v, radix: 16))}")
+                } else { run.append(scalar) }
+            }
+            pieces += String(run).map(String.init)
+            // Whole Characters/escape tokens only, within the saved store's 640 UTF-8 byte label limit.
+            var name = ""
+            for piece in pieces { guard name.utf8.count + piece.utf8.count <= 640 else { break }; name += piece }
+            displayName = name
         } catch {
             for descriptor in opened.reversed() { Darwin.close(descriptor) }
             if scoped { access.stop(url) }

@@ -224,6 +224,17 @@ final class AudioImportTests: XCTestCase {
             try await r.close()
         }
     }
+    @MainActor func testDisplayNameFitsSavedLabelBytesWithoutSplittingEscapesOrEmoji() async throws {
+        let r = try ImportRig()
+        // 640 Characters used to be 643 bytes, cutting the 128th "\\u{a}" mid-token; whole tokens stop at 4 + 127 × 5.
+        r.hub.selectAudioImport(try r.file("😀" + String(repeating:"\n",count:128) + ".wav"))
+        let long = try XCTUnwrap(r.owner.source).displayName
+        XCTAssertEqual(long.utf8.count,639); XCTAssertTrue(long.hasPrefix("😀\\u{a}")); XCTAssertTrue(long.hasSuffix("}\\u{a}"))
+        let flag = "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}"
+        r.hub.selectAudioImport(try r.file("👩‍💻 \(flag) \u{202e}.wav"))
+        XCTAssertEqual(try XCTUnwrap(r.owner.source).displayName,"👩‍💻 \(flag) \\u{202e}.wav")
+        try await r.close()
+    }
     @MainActor func testT05OrdinaryReadableWithoutScopeAndEscapedDisplayMissingAndGrowth() async throws {
         let r = try ImportRig(), url = try r.file("Unicode \u{202e}\n clip.wav")
         r.owner.sourceAccess.start = { _ in false }
