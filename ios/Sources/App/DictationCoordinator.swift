@@ -51,8 +51,9 @@ import ParlaCore
             guard let self else { return }
             // Keep what was already said: finish the take instead of discarding it.
             guard self.recording else { return self.cancel(reason: "Recording stopped because the microphone changed or another app interrupted it. Start again when ready.") }
-            self.stop()
-            self.message = "Recording stopped early because a call or another app took the microphone. What you said before that was kept."
+            let warning = "Recording stopped early because a call or another app took the microphone. What you said before that was kept."
+            self.stop(warning: warning)
+            self.message = warning
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
     }
@@ -117,7 +118,8 @@ import ParlaCore
             }
         }
     }
-    func stop() {
+    /// `warning` rides the existing note path, so it reaches the finished result, the keyboard and History.
+    func stop(warning: String? = nil) {
         guard recording, let request = session else { return }
         let samples = capture.stop(feedback: library.library.preferences.feedback)
         let duration = Date().timeIntervalSince(started ?? Date())
@@ -130,7 +132,7 @@ import ParlaCore
             if let activity {
                 Task { await activity.update(ActivityContent(state: .init(phase: "Processing", started: started ?? Date(), words: 0), staleDate: Date().addingTimeInterval(180))) }
             }
-            process(request: request, samples: samples, duration: duration)
+            process(request: request, samples: samples, duration: duration, warning: warning)
         } catch { cancel(reason: error.localizedDescription) }
     }
     func cancel(reason: String? = nil) {
@@ -168,7 +170,7 @@ import ParlaCore
             process(request: request, samples: samples, duration: transcript.duration, existingRaw: samples == nil ? transcript.raw : nil)
         } catch { if let created { fail(created, error: error) }; message = error.localizedDescription }
     }
-    private func process(request: DictationSession, samples: [Float]?, duration: TimeInterval, existingRaw: String? = nil) {
+    private func process(request: DictationSession, samples: [Float]?, duration: TimeInterval, existingRaw: String? = nil, warning: String? = nil) {
         backgroundTime.start { [weak self] in
             self?.cancel(reason: "iOS ended background processing. Return to Parla and try again.")
         }
@@ -192,7 +194,8 @@ import ParlaCore
             } catch is CancellationError { cleanupOperation(); return }
             catch { failure = error.localizedDescription }
             let final = outcome?.final ?? ""
-            let note = failure ?? outcome?.cleanupFailure.map { "Cleanup did not apply (\(($0 == "cleanup failed" ? issue : nil) ?? $0)). The raw transcript was kept." }
+            let reason = failure ?? outcome?.cleanupFailure.map { "Cleanup did not apply (\(($0 == "cleanup failed" ? issue : nil) ?? $0)). The raw transcript was kept." }
+            let joined = [warning, reason].compactMap { $0 }.joined(separator: " "), note = joined.isEmpty ? nil : joined
             var retained = false
             do {
                 try Task.checkCancellation()
