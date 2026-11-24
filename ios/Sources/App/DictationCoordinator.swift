@@ -51,8 +51,9 @@ import ParlaCore
             guard let self else { return }
             // Keep what was already said: finish the take instead of discarding it.
             guard self.recording else { return self.cancel(reason: "Recording stopped because the microphone changed or another app interrupted it. Start again when ready.") }
-            self.stop()
-            self.message = "Recording stopped early because a call or another app took the microphone. What you said before that was kept."
+            let warning = "Recording stopped early because a call or another app took the microphone. What you said before that was kept."
+            self.stop(warning: warning)
+            self.message = warning
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
     }
@@ -117,7 +118,8 @@ import ParlaCore
             }
         }
     }
-    func stop() {
+    /// `warning` rides the existing note path, so it reaches the finished result, the keyboard and History.
+    func stop(warning: String? = nil) {
         guard recording, let request = session else { return }
         let samples = capture.stop(feedback: library.library.preferences.feedback)
         let duration = Date().timeIntervalSince(started ?? Date())
@@ -130,7 +132,7 @@ import ParlaCore
             if let activity {
                 Task { await activity.update(ActivityContent(state: .init(phase: "Processing", started: started ?? Date(), words: 0), staleDate: Date().addingTimeInterval(180))) }
             }
-            process(request: request, samples: samples, duration: duration)
+            process(request: request, samples: samples, duration: duration, warning: warning)
         } catch { cancel(reason: error.localizedDescription) }
     }
     func cancel(reason: String? = nil) {
@@ -168,9 +170,22 @@ import ParlaCore
             process(request: request, samples: samples, duration: transcript.duration, existingRaw: samples == nil ? transcript.raw : nil)
         } catch { if let created { fail(created, error: error) }; message = error.localizedDescription }
     }
-    private func process(request: DictationSession, samples: [Float]?, duration: TimeInterval, existingRaw: String? = nil) {
+    private func process(request: DictationSession, samples: [Float]?, duration: TimeInterval, existingRaw: String? = nil, warning: String? = nil) {
         backgroundTime.start { [weak self] in
-            self?.cancel(reason: "iOS ended background processing. Return to Parla and try again.")
+            guard let self else { return }
+            let reason = "iOS ended background processing before the text was ready. Return to Parla and try again."
+            let note = [warning, reason].compactMap { $0 }.joined(separator: " ")
+            // Save the take through the same failed-completion path as a recognition error, at expiration
+            // rather than before recognition: the success path stays unchanged, and one ≤5-minute 16 kHz
+            // WAV write plus one History insert fits in the seconds iOS gives this handler. `.never` keeps
+            // the old cancel, so nothing durable is written.
+            if library.library.preferences.retention != .never,
+               let owned = try? SessionStore().complete(request, final: "", failure: reason, note: note, save: {
+                   try self.save(request, transcript: Transcript(id: request.id, raw: existingRaw ?? "", cleaned: nil, final: nil, duration: duration, error: note), samples: samples, note: nil)
+               }, retain: { _ in }) {
+                // complete() already failed the shared session; cancel() would overwrite that with .cancelled.
+                session = owned; work?.cancel(); message = note; endActivity()
+            } else { cancel(reason: reason) }
         }
         let snapshot = settings.current
         let pipeline = DictationEngine.pipeline(snapshot, credentials: settings.store.credentials)
@@ -192,27 +207,15 @@ import ParlaCore
             } catch is CancellationError { cleanupOperation(); return }
             catch { failure = error.localizedDescription }
             let final = outcome?.final ?? ""
-            let note = failure ?? outcome?.cleanupFailure.map { "Cleanup did not apply (\(($0 == "cleanup failed" ? issue : nil) ?? $0)). The raw transcript was kept." }
+            let reason = failure ?? outcome?.cleanupFailure.map { "Cleanup did not apply (\(($0 == "cleanup failed" ? issue : nil) ?? $0)). The raw transcript was kept." }
+            let joined = [warning, reason].compactMap { $0 }.joined(separator: " "), note = joined.isEmpty ? nil : joined
             var retained = false
             do {
                 try Task.checkCancellation()
                 // The ownership lock covers both the local save and publication.
                 let owned = try SessionStore().complete(request, final: final, failure: failure, note: note, save: {
-                    try library.reload()
-                    var savedAudio: URL?
-                    var transcript = Transcript(id: request.id, raw: raw, cleaned: outcome?.cleaned, final: outcome?.final, duration: duration, error: note)
-                    do {
-                        if library.library.preferences.retention != .never, let samples {
-                            let target = library.audioDirectory.appendingPathComponent("\(request.id).wav")
-                            // Also remove a partial WAV if the writer throws.
-                            savedAudio = target
-                            try RecordingStore.writeWAV(samples, to: target); transcript.audioName = target.lastPathComponent
-                        }
-                        try library.mutate { state in
-                            if state.preferences.retention != .never { state.transcripts.insert(transcript, at: 0) }
-                            if failure == nil, !final.isEmpty, request.destination == .note { state.notes.insert(Note(text: final), at: 0) }
-                        }
-                    } catch { if let savedAudio { try? FileManager.default.removeItem(at: savedAudio) }; throw error }
+                    try save(request, transcript: Transcript(id: request.id, raw: raw, cleaned: outcome?.cleaned, final: outcome?.final, duration: duration, error: note),
+                             samples: samples, note: failure == nil && !final.isEmpty && request.destination == .note ? final : nil)
                 }, retain: { current in
                     lastResult = final; resultExpires = current.expires; message = current.error; retained = true
                 })
@@ -235,6 +238,24 @@ import ParlaCore
             }
             cleanupOperation()
         }
+    }
+    /// History entry, retained WAV and destination note for one take; runs under SessionStore's ownership lock.
+    private func save(_ request: DictationSession, transcript: Transcript, samples: [Float]?, note: String?) throws {
+        try library.reload()
+        var savedAudio: URL?
+        var transcript = transcript
+        do {
+            if library.library.preferences.retention != .never, let samples {
+                let target = library.audioDirectory.appendingPathComponent("\(request.id).wav")
+                // Also remove a partial WAV if the writer throws.
+                savedAudio = target
+                try RecordingStore.writeWAV(samples, to: target); transcript.audioName = target.lastPathComponent
+            }
+            try library.mutate { state in
+                if state.preferences.retention != .never { state.transcripts.insert(transcript, at: 0) }
+                if let note { state.notes.insert(Note(text: note), at: 0) }
+            }
+        } catch { if let savedAudio { try? FileManager.default.removeItem(at: savedAudio) }; throw error }
     }
     private func cleanupOperation() {
         started = nil; work = nil; session = try? SessionStore().read()
@@ -264,8 +285,11 @@ import ParlaCore
             if busy {
                 // session remains the local operation's identity until teardown completes.
                 guard let own = session, let current, own.id == current.id,
-                      own.generation == current.generation, current.active,
+                      own.generation == current.generation,
+                      current.active || (own.phase == .failed && current.phase == .failed),
                       current.command != .cancel else { cancel(); return }
+                // Expiration already saved and failed this take; wait for its cancelled work to drain.
+                if !current.active { return }
                 if current.command == .stop && recording { stop(); return }
             }
             if !busy { session = current }

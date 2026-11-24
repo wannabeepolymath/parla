@@ -551,4 +551,33 @@ extension SavedAudioImportLifecycleTests {
         XCTAssertTrue(job.operation.hasExited); XCTAssertEqual(rig.originalReads,0); XCTAssertEqual(rig.faults.factoryEntries,0)
         XCTAssertTrue(rig.saved.rows.isEmpty); try await rig.close()
     }
+    @MainActor func testRevokeAfterRecognitionSuccessSettlesAttemptAndAllowsNextAdmission() async throws {
+        let rig = try SavedImportRig(); await rig.ready()
+        final class Revoker: @unchecked Sendable { var decoded = false, calls = 0 }
+        let revoker = Revoker(), fixed = rig.now
+        rig.native.decode = { revoker.decoded = true }
+        rig.saved.enqueue = { [unowned rig] job,done in
+            // After decode, now() is read by validate() and then for resultDate (past the last
+            // authorization guard). Revoking at the second read lands between success and persist.
+            let next = SavedAudioImportExecution.enqueue(previous:rig.chain,admission:rig.admission,store:rig.saved.store,
+                job:job,settings:rig.settings,now:{
+                    if revoker.decoded { revoker.calls += 1; if revoker.calls == 2 { job.revoke() } }
+                    return fixed
+                },load:{request in
+                    let factory = await MainActor.run {rig.native.factory()}
+                    return try await RecognitionAcquisition.acquire(request:request,resident:nil,factory:factory,operation:job.operation,
+                        selectionEpoch:job.authority.selectionEpoch,preparationEpoch:job.authority.preparationEpoch)
+                },done:done)
+            if let next { rig.chain = next }; return next
+        }
+        _ = try await rig.run()
+        XCTAssertEqual(rig.native.calls.count,1); XCTAssertEqual(revoker.calls,2)
+        let row = try XCTUnwrap(rig.saved.store.rows().first)
+        XCTAssertNil(row.result)
+        XCTAssertEqual(row.state,.canceled) // rows() projects a stuck queued/running attempt as .interrupted
+        revoker.decoded = false; rig.bind()
+        _ = try await rig.run()
+        XCTAssertNotNil(rig.saved.review?.accepted)
+        try await rig.close()
+    }
 }
