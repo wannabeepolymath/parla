@@ -20,44 +20,47 @@ public enum ImportedAudio {
         public let transientSourceInfo: SourceInfo
     }
     /// Closed, extension-selected source routing. No sniffing or native MOV fallback.
-    public enum SourceFormat: Equatable, Sendable { case wav, mov }
-    public enum SourceProfile: String, Codable, Sendable { case wavPCM, qtPCM16kV1 }
+    public enum SourceFormat: Equatable, Sendable { case wav, mov, m4a, mp3 }
+    public enum SourceProfile: String, Codable, Sendable { case wavPCM, qtPCM16kV1, compressedAVFoundationV1 }
     public enum SourceFacts: Equatable, Sendable {
         case wav(SourceInfo)
         case mov(ImportedPCMMOV.Facts)
-        public enum Origin: Equatable, Sendable { case strictPCM16k, systemPCMConversion, directMOVPCM16k }
+        case compressed(ImportedCompressedAudio.Facts)
+        public enum Origin: Equatable, Sendable { case strictPCM16k, systemPCMConversion, directMOVPCM16k, systemCompressedConversion }
         public var profile: SourceProfile {
-            switch self { case .wav: return .wavPCM; case .mov: return .qtPCM16kV1 }
+            switch self { case .wav: return .wavPCM; case .mov: return .qtPCM16kV1; case .compressed: return .compressedAVFoundationV1 }
         }
         public var container: String {
-            switch self { case .wav(let info): return info.container; case .mov(let facts): return facts.container }
+            switch self { case .wav(let info): return info.container; case .mov(let facts): return facts.container; case .compressed(let facts): return facts.container }
         }
         public var encoding: String {
-            switch self { case .wav(let info): return info.encoding; case .mov(let facts): return facts.encoding }
+            switch self { case .wav(let info): return info.encoding; case .mov(let facts): return facts.encoding; case .compressed(let facts): return facts.codec }
         }
         public var sourceRate: Int {
-            switch self { case .wav(let info): return info.sourceRate; case .mov(let facts): return facts.rate }
+            switch self { case .wav(let info): return info.sourceRate; case .mov(let facts): return facts.rate; case .compressed(let facts): return facts.sourceRate }
         }
         public var sourceChannels: Int {
-            switch self { case .wav(let info): return info.sourceChannels; case .mov(let facts): return facts.channels }
+            switch self { case .wav(let info): return info.sourceChannels; case .mov(let facts): return facts.channels; case .compressed(let facts): return facts.sourceChannels }
         }
+        /// For compressed sources this is the container-reported count, not a verified one.
         public var sourceFrames: Int {
-            switch self { case .wav(let info): return info.sourceFrames; case .mov(let facts): return facts.sourceFrames }
+            switch self { case .wav(let info): return info.sourceFrames; case .mov(let facts): return facts.sourceFrames; case .compressed(let facts): return facts.reportedSourceFrames }
         }
         public var outputFrames: Int {
-            switch self { case .wav(let info): return info.outputFrames; case .mov(let facts): return facts.outputFrames }
+            switch self { case .wav(let info): return info.outputFrames; case .mov(let facts): return facts.outputFrames; case .compressed(let facts): return facts.outputFrames }
         }
         public var outputRate: Int {
-            switch self { case .wav(let info): return info.outputRate; case .mov(let facts): return facts.outputRate }
+            switch self { case .wav(let info): return info.outputRate; case .mov(let facts): return facts.outputRate; case .compressed(let facts): return facts.outputRate }
         }
         public var clippedSamples: Int {
-            switch self { case .wav(let info): return info.clippedSamples; case .mov(let facts): return facts.clipped }
+            switch self { case .wav(let info): return info.clippedSamples; case .mov(let facts): return facts.clipped; case .compressed(let facts): return facts.clipped }
         }
         public var origin: Origin {
             switch self {
             case .wav(let info):
                 switch info.origin { case .strictPCM16k: return .strictPCM16k; case .systemPCMConversion: return .systemPCMConversion }
             case .mov: return .directMOVPCM16k
+            case .compressed: return .systemCompressedConversion
             }
         }
     }
@@ -70,6 +73,9 @@ public enum ImportedAudio {
         fileprivate init(_ decoded: ImportedPCMMOV.Decoded) {
             samples = decoded.samples; transientSourceInfo = .mov(decoded.facts)
         }
+        fileprivate init(_ decoded: ImportedCompressedAudio.Decoded) {
+            samples = decoded.samples; transientSourceInfo = .compressed(decoded.facts)
+        }
     }
     public static func decodeSource(_ bytes: Data, format: SourceFormat,
                                     canceled: () -> Bool = { false },
@@ -77,6 +83,7 @@ public enum ImportedAudio {
         switch format {
         case .wav: return SourceDecoded(try decode(bytes, canceled: canceled, native: makeNative()))
         case .mov: return SourceDecoded(try ImportedPCMMOV.decode(bytes, canceled: canceled))
+        case .m4a, .mp3: return SourceDecoded(try ImportedCompressedAudio.decode(bytes, format: format, canceled: canceled))
         }
     }
 

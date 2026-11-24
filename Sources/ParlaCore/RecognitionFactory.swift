@@ -20,6 +20,7 @@ public struct RecognitionFactory {
     public var directory: URL
     public var catalog: [ModelCatalog.Model]
     public var admit: (String, RecognitionAdmission) throws -> Void
+    public var languageHints: WhisperLanguageHints?
 
     public init(parakeetPreparedUse: @escaping (RecognitionSelection, PendingOperation?) async throws -> ParakeetInstallationLease = { _, _ in throw ParakeetRefusal.needsPreparation },
                 parakeetTrust: ParakeetTrustBottom = .system,
@@ -35,7 +36,8 @@ public struct RecognitionFactory {
                 runtime: @escaping () -> RecognitionRuntime = { WhisperCContext.runtime },
                 metadata: @escaping (String) -> RecognitionFileGeneration? = RecognitionFileGeneration.observe,
                 directory: URL = ModelCatalog.directory, catalog: [ModelCatalog.Model] = ModelCatalog.all,
-                admit: @escaping (String, RecognitionAdmission) throws -> Void = { try RecognitionFactory.admitInstalled($0, $1) }) {
+                admit: @escaping (String, RecognitionAdmission) throws -> Void = { try RecognitionFactory.admitInstalled($0, $1) },
+                languageHints: WhisperLanguageHints? = nil) {
         self.parakeetPreparedUse = parakeetPreparedUse; self.parakeetTrust = parakeetTrust
         self.parakeetApp = parakeetApp; self.parakeetWorker = parakeetWorker
         self.appleBottom = appleBottom; self.appleClock = appleClock; self.appleInstalledUse = appleInstalledUse
@@ -43,6 +45,7 @@ public struct RecognitionFactory {
         self.guardedNative = guardedNative; self.preparation = preparation
         self.preparationPermission = preparationPermission
         self.directory = directory; self.catalog = catalog; self.admit = admit
+        self.languageHints = languageHints
     }
     public static func ownedModel(path: String, directory: URL = ModelCatalog.directory,
                                   catalog: [ModelCatalog.Model] = ModelCatalog.all) -> ModelCatalog.Model? {
@@ -127,7 +130,7 @@ public struct RecognitionFactory {
             if permit != nil, policy == .readOnlyCatalog { throw PreparationRefusal.preparedResidentRequired }
             let client = try WhisperTranscriber(modelPath: request.modelPath, language: request.language,
                 native: permit.map { try guardedNative(request.modelPath, runtime.compute, $0) }
-                    ?? native(request.modelPath, runtime.compute))
+                    ?? native(request.modelPath, runtime.compute), hints: languageHints)
             // Native construction is not cancellable. Its owner stays alive until it actually returns.
             guard metadata(request.modelPath) == identity.generation else { throw TranscriberError(description: "Local model changed during acquisition") }
             guard shouldAbort?() != true else { throw CancellationError() }
@@ -150,8 +153,43 @@ public final class EvalRecognition {
         guard needsASR else { return }
         handle = try await factory.acquire(request: request())
     }
+    /// `prompt` is ignored: the handle derives it from its frozen `request.dictionary`, as the app does.
+    /// The parameter stays so `Pipeline`'s transcribe closure keeps its shape.
     public func transcribe(_ samples: [Float], prompt: String?) async -> String? {
-        await handle?.recognize(samples, pass: .fullFinal, initialPrompt: prompt).text
+        await recognize(samples)?.text
     }
+    /// Typed outcome for the corpus producer; nil when no engine was acquired.
+    public func recognize(_ samples: [Float]) async -> RecognitionPassResult? {
+        let result = await handle?.recognize(samples, pass: .fullFinal)
+        evidence = (handle?.client as? WhisperTranscriber)?.lastEvidence
+        return result
+    }
+    private var evidence: WhisperDecodeEvidence?
     public func release() { handle = nil }
+    /// Eval-only decoder switches; a no-op for engines other than Whisper.
+    public func configure(_ experiment: WhisperExperiment) { (handle?.client as? WhisperTranscriber)?.experiment = experiment }
+    /// Evidence of the last recognition, cleared on read so a case the floor skipped never reuses it.
+    public func takeEvidence() -> WhisperDecodeEvidence? { defer { evidence = nil }; return evidence }
+}
+
+/// `--evidence-out`: one JSON line per ASR case, never transcript text. Refuses an existing file.
+public final class EvalEvidenceLog {
+    struct Line: Encodable {
+        let name: String, audioSeconds: Double?, decodeSeconds: Double?, model: String, experiment: String
+        let evidence: WhisperDecodeEvidence?
+    }
+    private let handle: FileHandle
+    public init(path: String) throws {
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw TranscriberError(description: errno == EEXIST ? "evidence output exists" : "evidence output unwritable") }
+        handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    }
+    public func append(name: String, audioSeconds: Double?, decodeSeconds: Double?, model: String,
+                       experiment: WhisperExperiment, evidence: WhisperDecodeEvidence?) throws {
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        var data = try encoder.encode(Line(name: name, audioSeconds: audioSeconds, decodeSeconds: decodeSeconds, model: model,
+                                           experiment: experiment.label, evidence: evidence))
+        data.append(0x0A)
+        try handle.write(contentsOf: data)
+    }
 }

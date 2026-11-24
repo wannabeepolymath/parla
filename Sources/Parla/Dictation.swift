@@ -131,6 +131,7 @@ extension AppDelegate {
             let samples = captureDiagnostics.stop(discard: discard) { recorder.stop() }
             captured = discard ? [] : samples
             capturedGeneration = discard ? nil : generation
+            capturedSummary = discard ? nil : recorder.lastCapture
 
         case let .stopCapture(discard):
             let generation = recorderGeneration
@@ -138,6 +139,7 @@ extension AppDelegate {
             let samples = captureDiagnostics.stop(discard: discard) { recorder.stop() }
             captured = discard ? [] : samples
             capturedGeneration = discard ? nil : generation
+            capturedSummary = discard ? nil : recorder.lastCapture
 
         case let .abortOperation(operation):
             if activePreviewCapture?.operation == operation {
@@ -270,11 +272,12 @@ extension AppDelegate {
                 hud.show(.notice("Recording saved. It'll be processed when the last dictation finishes."))
             }
             let samples = takeCaptured()
+            captureSummaries[s.gen] = capturedSummary
             processTask = executionDispatcher.enqueue(.ordinary(s, samples: samples, ledger: ledger), previous: processTask,
                 finished: {
                     self.recognitionHandles[s.gen] = nil; self.previewCaptures[s.gen] = nil; self.recognitionErrors[s.gen] = nil
                     if self.windowGeneration == s.gen { self.window = nil; self.windowGeneration = nil }
-                    await MainActor.run { self.localCleanupAdmission.exited(s.operation); self.operationAudio[s.operation.id] = nil; self.send(.operationFinished(s.operation)) }
+                    await MainActor.run { self.captureSummaries[s.gen] = nil; self.localCleanupAdmission.exited(s.operation); self.operationAudio[s.operation.id] = nil; self.send(.operationFinished(s.operation)) }
                 })
 
         case let .transcribeCommand(s):
@@ -563,6 +566,12 @@ extension AppDelegate {
                         bundleID: probe.bundleID, browserURL: probe.browserURL)))
                 }
                 self.send(.transcribed(s, raw: raw, probe: probe))
+                // The reducer only hides the HUD on no text; say why, once, in the log
+                // and in the pill. Content-free: counts, levels and the device only.
+                if raw == nil, let report = self.captureSummaries.removeValue(forKey: s.gen)?.noRecognitionReport() {
+                    NSLog("%@", report.log)
+                    if let text = report.hud, s.delivery == .keyboard, s.gen == self.session.gen { self.hud.show(.error(text)) }
+                }
                 // Behind the landing keystrokes on purpose — a file delete must not
                 // sit between the transcript and the screen. `secure` is the same
                 // pair of signals the reducer just refused on inside that send, so

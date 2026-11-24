@@ -41,5 +41,12 @@ final class AndroidSharedPolicyTests: XCTestCase {
         for item in try XCTUnwrap(fixture["snippets"] as? [[String: String]]) {
             XCTAssertEqual(Pipeline.snippetExpansion(transcript: item["input"]!, snippets: [item["trigger"]!: item["expansion"]!]), item["expected"]!)
         }
+        let vectors = try XCTUnwrap(fixture["promptBudget"] as? [[String: Any]])
+        XCTAssertFalse(vectors.isEmpty)
+        for item in vectors {
+            let budget = PromptBudget(capacity: try XCTUnwrap(item["capacity"] as? Int), count: { $0.utf8.count })
+            XCTAssertEqual(VocabularyHints.select(try XCTUnwrap(item["words"] as? [String]), budget: budget),
+                           try XCTUnwrap(item["expected"] as? [String]), "\(item)")
+        }
     }
 }

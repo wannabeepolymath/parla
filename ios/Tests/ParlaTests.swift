@@ -135,13 +135,10 @@ final class DesktopCoreGlueTests: XCTestCase {
     }
     private let speech = (0..<16_000).map { Float(sin(Double($0) * 0.05)) * 0.2 }
 
-    func testRecognitionUsesPipelineVocabularyHintsAndCleanupOutput() async throws {
+    func testRecognitionProjectsTextAndCleanupOutput() async throws {
         let s = settings { $0.dictionary = ["Parla", "SwiftUI"] }
-        var prompt: String?
-        let raw = try await DictationEngine.recognize(speech, pipeline: pipeline(s) { _ in "unused" }) {
-            { _, hint in prompt = hint; return "  hello parla  " }
-        }
-        XCTAssertEqual(raw, "hello parla"); XCTAssertEqual(prompt, "Parla, SwiftUI")
+        let raw = try await DictationEngine.recognize(speech) { { _ in .completed(.init(text: "  hello parla  ")) } }
+        XCTAssertEqual(raw, "hello parla")
         let outcome = await DictationEngine.finish(raw: raw, pipeline: pipeline(s) { _ in "Hello, Parla." })
         XCTAssertEqual(outcome, .init(raw: "hello parla", cleaned: "Hello, Parla.", final: "Hello, Parla.", cleanupFailure: nil))
     }
@@ -149,11 +146,26 @@ final class DesktopCoreGlueTests: XCTestCase {
         var acquired = false
         for samples in [[Float](repeating: 0, count: 32_000), [Float](repeating: 0.3, count: 3_000)] {
             do {
-                _ = try await DictationEngine.recognize(samples, pipeline: pipeline(settings()) { $0 }) { acquired = true; return { _, _ in "invented" } }
+                _ = try await DictationEngine.recognize(samples) { acquired = true; return { _ in .completed(.init(text: "invented")) } }
                 XCTFail("The desktop floor must refuse silence and sub-0.4 s audio")
             } catch {}
         }
         XCTAssertFalse(acquired)
+    }
+    func testTypedResultsKeepEmptyFailureAndCancellationDistinct() async {
+        func message(_ outcome: RecognitionNativeOutcome) async -> String? {
+            do { _ = try await DictationEngine.recognize(speech) { { _ in outcome } }; return nil }
+            catch is CancellationError { return "canceled" }
+            catch { return error.localizedDescription }
+        }
+        let empty = await message(.completed(.init(text: " ")))
+        XCTAssertEqual(empty, "No speech was recognized in that recording.")
+        let failed = await message(.failed(.nativeDecode))
+        XCTAssertEqual(failed, "Speech recognition failed on this recording. Retry from History.")
+        let unready = await message(.failed(.clientUnavailable))
+        XCTAssertEqual(unready, "The speech model isn't ready. Open Models, then retry from History.")
+        let canceled = await message(.canceled)
+        XCTAssertEqual(canceled, "canceled")
     }
     func testCleanupFailureKeepsRawTextWithReason() async {
         let outcome = await DictationEngine.finish(raw: "keep me", pipeline: pipeline(settings()) { _ in throw CleanupError(description: "fixture", userMessage: "provider unavailable") })
@@ -414,5 +426,12 @@ final class CleanupTransportTests: XCTestCase {
                 XCTAssertEqual(calls, 1, "The redirected origin must receive no request")
             }
         }
+    }
+    @MainActor func testStartFailureNamesTheCall() {
+        let priority = NSError(domain: NSOSStatusErrorDomain, code: AVAudioSession.ErrorCode.insufficientPriority.rawValue)
+        XCTAssertEqual(AudioCapture.startFailure(priority, callActive: false).localizedDescription, AudioCapture.duringCall.localizedDescription)
+        XCTAssertEqual(AudioCapture.startFailure(CocoaError(.fileNoSuchFile), callActive: true).localizedDescription, AudioCapture.duringCall.localizedDescription)
+        XCTAssertEqual(AudioCapture.startFailure(ParlaError.message("Microphone is unavailable or in use."), callActive: false).localizedDescription,
+                       "Microphone is unavailable or in use.")
     }
 }

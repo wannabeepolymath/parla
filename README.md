@@ -74,13 +74,12 @@ is hashed once, not on every launch.
 | `small.en-q5_1` | 190 MB | Quantized middle rung |
 | `large-v3-turbo-q5_0` | 574 MB | Best quality that still fits a reasonable download |
 
-`scripts/download-model.sh [name]` fetches from the terminal instead, with no
-hash check: it pulls `ggml-<name>.bin` from the same HuggingFace repo, so it
-takes any whisper.cpp model name, and its usage line advertises `base.en`
-(default), `tiny.en` and `large-v3-turbo`. Only `base.en` overlaps the table
-above — `tiny.en` and the unquantized `large-v3-turbo` are not in the catalog,
-so the script is the only way to get those, and nothing verifies what it
-downloads. A `whisperModelPath` pointing outside Parla's own models directory is treated as
+`scripts/download-model.sh [ID] [--dir DIR]` fetches from the terminal instead
+and checks what it downloads: the three catalog ids above are pinned to the same
+size and sha256 as the app, the file is staged as `.part` and only renamed into
+place once it verifies, and an existing file is re-checked rather than trusted.
+Any other whisper.cpp model needs an explicit pin:
+`--sha256 HEX --bytes N`. A `whisperModelPath` pointing outside Parla's own models directory is treated as
 your model and is never verified: that's the escape hatch if HuggingFace ever
 re-uploads one of ours.
 

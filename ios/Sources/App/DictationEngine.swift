@@ -41,7 +41,9 @@ import ParlaCore
 
 /// The desktop core assembled for one iPhone dictation. No bundle ID or profile: iOS keyboards cannot learn the host app.
 enum DictationEngine {
-    typealias Transcribe = ([Float], String?) async -> String?
+    /// The typed outcome, so a decode failure, an unready model and silence stay distinct.
+    /// ponytail: the native outcome, not `RecognitionPassResult`, whose init is internal to ParlaCore.
+    typealias Transcribe = ([Float]) async -> RecognitionNativeOutcome
     struct Outcome: Equatable {
         var raw: String
         var cleaned: String?
@@ -50,7 +52,8 @@ enum DictationEngine {
     }
     /// 300 s of 16 kHz mono, the Android capture cap.
     static let maximumSamples = 300 * 16_000
-    static let factory = RecognitionFactory(appleInstalledUse: { locale, operation in try await AppleSpeechSetup.installedUse(locale, operation) })
+    static let factory = RecognitionFactory(appleInstalledUse: { locale, operation in try await AppleSpeechSetup.installedUse(locale, operation) },
+                                            languageHints: WhisperLanguageHints())
 
     /// Checked before the microphone opens so a missing model routes to Models, never to a key screen.
     static func recognitionIssue(_ settings: Settings) -> String? {
@@ -65,17 +68,23 @@ enum DictationEngine {
             try makeCleanupClient(settings: $0, env: [:], credentials: credentials, http: CleanupHTTP())
         }
     }
-    /// Desktop floor first (no model load for silence), then `Pipeline.transcript` with its vocabulary hints.
-    static func recognize(_ samples: [Float], pipeline: Pipeline, acquire: () async throws -> Transcribe) async throws -> String {
+    /// Desktop floor first (no model load for silence). The handle derives the vocabulary prompt from its frozen request.
+    static func recognize(_ samples: [Float], acquire: () async throws -> Transcribe) async throws -> String {
         if let skip = Pipeline.recognitionSkip(samples: samples) {
             throw ParlaError.message(skip == .minimumDuration ? "That recording was too short to transcribe." : "No speech was detected in that recording.")
         }
-        var pipeline = pipeline
-        pipeline.transcribe = try await acquire()
-        let text = await pipeline.transcript(samples: samples)
+        let result = await (try await acquire())(samples)
         try Task.checkCancellation()
-        guard let text else { throw ParlaError.message("Speech recognition returned no text. Retry from History.") }
-        return text
+        switch result {
+        case .canceled: throw CancellationError()
+        case .completed(let payload):
+            guard let text = Pipeline.transcriptProjection(payload.text) else { throw ParlaError.message("No speech was recognized in that recording.") }
+            return text
+        case .failed(.nativeDecode), .failed(.deadline), .failed(.appleSpeech), .failed(.parakeet):
+            throw ParlaError.message("Speech recognition failed on this recording. Retry from History.")
+        case .failed(.clientUnavailable), .failed(.preparationUnavailable), .failed(.unsupportedCapability):
+            throw ParlaError.message("The speech model isn't ready. Open Models, then retry from History.")
+        }
     }
     /// Never throws for cleanup: a failure keeps the raw text and carries the reason.
     static func finish(raw: String, pipeline: Pipeline) async -> Outcome {
@@ -90,7 +99,10 @@ enum DictationEngine {
         catch let refusal as AppleSpeechRefusal { throw ParlaError.message(refusal.message) }
         catch { throw ParlaError.message("The selected speech model is unavailable or failed verification. Open Models to download or select it.") }
         // The handle derives the same VocabularyHints prompt from its frozen request; Apple Speech refuses a manual one.
-        return { samples, _ in await handle.recognize(samples, pass: .fullFinal, shouldAbort: { operation.shouldAbort }).text }
+        return { samples in
+            let result = await handle.recognize(samples, pass: .fullFinal, shouldAbort: { operation.shouldAbort })
+            return result.canceled ? .canceled : result.native
+        }
     }
 }
 

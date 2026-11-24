@@ -43,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The callable production binder receives all authority as inert closures.
-    /// Production capture stays OFF pending separately scoped native qualification.
+    /// Production capture is ON: `captureCapability: true`, with microphone and
+    /// selected-application capture enabled.
     @MainActor private func configureMeetingHub() {
         meetingHub.discoverApplications = {
             NSWorkspace.shared.runningApplications.compactMap { app in
@@ -327,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let self else { return false }
         let settings = self.store.load()
         return self.store.lastError == nil && self.nativePreparation.core.matchesSavedPermission(settings)
-        })
+        }, languageHints: WhisperLanguageHints())
         MainActor.assumeIsolated { parakeetPreparation.bindFactory(&factory) }
         return factory
     }()
@@ -378,6 +379,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // three values the old inline flow passed from hand to hand.
     var capturedGeneration: Int?
     var captured: [Float] = []                   // .stopCapture(discard: false)
+    var capturedSummary: AudioRecorder.CaptureSummary? // set with `captured`, main only
+    var captureSummaries: [Int: AudioRecorder.CaptureSummary] = [:] // main only, per ordinary finish
     var pendingPolish: (DictationSession.Session, DictationSession.Landed)?  // .polish
     var selectionDestinations: [Int: Inserter.Destination] = [:] // main only; token captured before async work
     var pendingInstruction: String?              // .transform
@@ -507,6 +510,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { m.bindAppleSpeech(appleSpeechPreparation) }
         MainActor.assumeIsolated { m.bindParakeet(parakeetPreparation) }
         m.modelSelectionEpoch = preparationSelectionEpoch
+        m.vocabularyBudget = { [weak self] in
+            guard let resident = self?.residentRecognition, let budget = resident.client.promptBudget else { return nil }
+            return (budget, resident.instance)
+        }
         m.preparationSnapshot = nativePreparation.snapshot
         m.onRecognitionPreviewRevoked = { [weak self] in MainActor.assumeIsolated { self?.revokeRecognitionPreview() } }
         m.onPreparationDraftDisabled = { [weak self] in

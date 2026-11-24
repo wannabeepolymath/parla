@@ -49,12 +49,15 @@ final class AudioImportOwner: ObservableObject {
         let raw: String
         let sourceInfo: ImportedAudio.SourceFacts
         var segments: RecognitionSegments? = nil
+        var recognition: RecognitionFinalResult? = nil
     }
     struct Review {
         let job: Job
         let entry: HistoryEntry
         let sourceInfo: ImportedAudio.SourceFacts
         let segments: RecognitionSegments?
+        /// Same lifetime as `segments`: dropped with the review on invalidate.
+        var recognition: RecognitionFinalResult? = nil
         var saved = false, saveFailed = false
     }
     @Published private(set) var source: FileImportSource?
@@ -102,7 +105,7 @@ final class AudioImportOwner: ObservableObject {
         catch { message = Self.failure(error) }
     }
     func start(settings: Settings, selectionEpoch: UUID, preparationEpoch: UUID?, diagnostics: DiagnosticStore, mode: Mode = .raw) -> Job? {
-        guard !busy, let source else { message = "Choose a WAV or MOV file first."; return nil }
+        guard !busy, let source else { message = "Choose a WAV, MOV, M4A or MP3 file first."; return nil }
         guard mode != .experimentalTimed || source.format == .wav else {
             message = "Timestamps need a 16 kHz mono WAV. Use Transcribe for this file."
             return nil // Keep the untouched selection available for explicit raw Start.
@@ -123,7 +126,7 @@ final class AudioImportOwner: ObservableObject {
                 var metrics = PipelineMetrics(); metrics.model = job.configuration.request.metricLabel
                 let timing = job.mode == .experimentalTimed && completed.sourceInfo.profile == .wavPCM && completed.sourceInfo.origin == .strictPCM16k
                     && completed.segments?.sourceSampleCount == completed.sourceInfo.sourceFrames ? completed.segments : nil
-                self.review = Review(job: job, entry: HistoryEntry(id: job.resultID, date: completedAt, raw: completed.raw, metrics: metrics), sourceInfo: completed.sourceInfo, segments: timing)
+                self.review = Review(job: job, entry: HistoryEntry(id: job.resultID, date: completedAt, raw: completed.raw, metrics: metrics), sourceInfo: completed.sourceInfo, segments: timing, recognition: completed.recognition)
                 self.message = job.mode == .experimentalTimed && timing == nil
                     ? "Transcript ready. Timestamps aren’t available for this file."
                     : "Transcript ready."
@@ -133,6 +136,10 @@ final class AudioImportOwner: ObservableObject {
     }
     func takeSourceForSaved() -> FileImportSource? {
         guard !busy, let selected = source else { return nil }
+        // Saved imports re-validate container structure; compressed sources are transcribe-only in v1.
+        guard selected.format == .wav || selected.format == .mov else {
+            message = "M4A and MP3 files can’t be kept yet. Use Transcribe for this file."; return nil
+        }
         source = nil; invalidate(nil); return selected
     }
     func invalidate(_ message: String? = "Discarded.") {
@@ -181,6 +188,7 @@ final class AudioImportOwner: ObservableObject {
     static func failure(_ error: Error) -> String {
         if let error = error as? ImportedAudio.Failure { return error.message }
         if let error = error as? ImportedWAV.Failure { return error.message }
+        if let error = error as? ImportedCompressedAudio.Failure { return error.message }
         if let error = error as? ImportedPCMMOV.Failure {
             switch error {
             case .canceled: return "Import canceled."
@@ -206,6 +214,8 @@ final class AudioImportOwner: ObservableObject {
         try validateSource(.wav(info), mode: mode)
     }
     nonisolated static func validateSource(_ info: ImportedAudio.SourceFacts, mode: AudioImportOwner.Mode) throws {
+        // Only strict PCM WAV is timed. This also refuses compressed sources (systemCompressedConversion),
+        // whose encoder delay and priming are not mapped.
         guard mode != .experimentalTimed || (info.profile == .wavPCM && info.origin == .strictPCM16k) else {
             throw RecordingStore.Failure("Timestamps need a 16 kHz mono WAV. Use Transcribe for this file.")
         }
@@ -236,7 +246,8 @@ final class AudioImportOwner: ObservableObject {
                     validate: { guard job.current else { throw CancellationError() } }, active: { job.current },
                     authorize: { job.authorize(store) }, rawOnly: true, timed: job.mode == .experimentalTimed, enter: enter, load: load)
                 guard let sourceInfo else { throw CancellationError() }
-                result = .success(AudioImportOwner.Completed(raw: recognition.raw, sourceInfo: sourceInfo, segments: recognition.segments))
+                result = .success(AudioImportOwner.Completed(raw: recognition.raw, sourceInfo: sourceInfo, segments: recognition.segments,
+                                                             recognition: recognition.recognition))
             } catch { result = .failure(error) }
             await MainActor.run { completion.result = result }
         }, finished: {

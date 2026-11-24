@@ -7,6 +7,8 @@ enum FileRecognitionBatch {
         let raw: String
         let segments: RecognitionSegments?
         let observedIdentity: RecognitionIdentity?
+        /// The reviewed final result, for the structured JSON export.
+        var recognition: RecognitionFinalResult? = nil
     }
     static func run(request: RecognitionRequest, operation: PendingOperation,
                       samples read: () throws -> [Float], validate: () throws -> Void, active: @escaping () -> Bool,
@@ -49,7 +51,7 @@ enum FileRecognitionBatch {
         let observed: RecognitionIdentity?
         if case .pass(let pass) = recognition.provenance { observed = pass.identity ?? handle.identity }
         else { observed = handle.identity }
-        return Result(raw: raw, segments: timed ? recognition.segments : nil, observedIdentity: observed)
+        return Result(raw: raw, segments: timed ? recognition.segments : nil, observedIdentity: observed, recognition: recognition)
     }
 
 }

@@ -10,7 +10,7 @@ CORE_SWIFT = '''ActivityShadow AppleIntelligenceCleanup AppleSpeechAssets AppleS
 CleanupFactory CleanupFailover Credentials Diagnostics Eval GuidedTemplate History HistoryRetry HistoryRetryHTTP HistoryRetrySegmentation
 ModelCatalog MouseInput OpenAICompatClient ParakeetInstallation ParakeetModelManifest ParakeetProcess ParakeetRecognition
 ParakeetWire ParakeetWorker PendingOperation Pipeline PreparationBuild Profiles RecognitionFactory RecognitionIdentity
-RecognitionPreparation RecognitionPreviewPlan RecognitionRequest RecognitionSegments RecordingStore
+RecognitionPreparation RecognitionPreviewPlan RecognitionRequest RecognitionSegments RecognitionWords RecordingStore
 ScratchpadDictionaryConfiguration Settings Streaming TextRules Trace Transcriber SurroundingTextContext Transforms Vocabulary VocabularyTransfer'''.split()
 CORE_DIR = '../Sources/ParlaCore'
 SHIM = 'Sources/Core/ParlaCoreIOS.swift'

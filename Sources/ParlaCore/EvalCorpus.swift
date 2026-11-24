@@ -309,9 +309,10 @@ public enum EvalCorpus {
                   Set(entries.values.flatMap(\.cohorts)) == labels else { throw EvalCorpusError.coverage }
             try permission(runs: [], now: now)
         }
-        func permission(runs: [Run], now: Double) throws {
+        /// `legs`: uses a producer is about to exercise before any run file exists.
+        func permission(runs: [Run], now: Double, legs: Set<String> = []) throws {
             for c in cases.values where c.human {
-                var uses: Set<String> = ["binding-check", "reference-review"], destinations: Set<String> = ["local"]
+                var uses = Set(["binding-check", "reference-review"]).union(legs), destinations: Set<String> = ["local"]
                 for run in runs {
                     uses.formUnion(run.legs)
                     destinations.formUnion(run.engines.values.map(\.transport))

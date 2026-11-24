@@ -5,7 +5,54 @@ clipboard, D-Bus notifications, compositor keybindings, and cpal's
 PipeWire/PulseAudio backends have **never run**. That is why M1 is not "done"
 until this list passes on a real wlroots box.
 
-Ordered by how likely each is to be wrong.
+Checks 1–8 are ordered by how likely each is to be wrong. To execute them, do
+5 (build) and 8 (model) first: every other check needs a built daemon with a
+model. The baseline items B1–B5 record observations only; lanes 09 and 11 use
+them as their "before" numbers.
+
+How to fill this in: tick a box only after running it. On each `Result:` line
+write `pass`, `fail` or `not run`. Put what you saw (log lines, clipboard text,
+anything surprising) on the `Notes:` line. Leave nothing blank: an unrun item
+is `not run`, not empty.
+
+## Setup used by every check
+
+Unless a check says otherwise, set `[cleanup] provider = "none"` in
+`config.toml`, so a `Copied: …` result does not depend on API credentials
+(check 4 changes this and restores it). Then define these helpers in the
+shell you run the checks from:
+
+```sh
+LOG=~/parlad-verify.log
+start_parlad() { parlad >>"$LOG" 2>&1 & until parlactl status >/dev/null 2>&1; do sleep 0.5; done; }
+mark()      { MARK=$(grep -c 'parlad: Parla — ' "$LOG"); }
+# Wait for N more delivery log lines (default 1); give up after 60 s.
+delivered() { for _ in $(seq 120); do [ "$(grep -c 'parlad: Parla — ' "$LOG")" -ge $((MARK + ${1:-1})) ] && return; sleep 0.5; done; echo "no delivery within 60 s"; }
+```
+
+`parlactl stop` returns `processing` before transcription finishes, so always
+call `mark` before dictating and `delivered` before reading the clipboard.
+Start the daemon with `start_parlad`, never a bare `parlad &`: a `start` sent
+before the socket is up is lost.
+
+## Run record
+
+One table per run. Copy it for a second machine or audio stack.
+
+| Field | Value |
+|---|---|
+| Date | |
+| Tester | |
+| Distro and version | |
+| Compositor and version (`swaymsg -t get_version` / `hyprctl version`) | |
+| Audio server and version: PipeWire / PulseAudio / plain ALSA (`pactl info`, `pipewire --version`) | |
+| Microphone model and connection (built-in / USB / analog / Bluetooth) | |
+| `parlad` commit (`git rev-parse HEAD`) | |
+| Model file path | |
+| Model sha256 (`sha256sum <model>`) | |
+| Notifier and version (mako / dunst / swaync) | |
+
+---
 
 ## 1. The clipboard actually receives the dictation
 
@@ -16,6 +63,23 @@ anything about this path.
 The selection is served by a background thread inside `parlad` with
 `ServeRequests::Unlimited`, so repeated pastes over time are the thing to try.
 
+- [ ] **1. Clipboard receives the dictation and keeps serving it**
+
+Command (`parlad` started with `start_parlad`, speak during the sleep):
+
+```sh
+mark; parlactl start; sleep 3; parlactl stop; delivered
+wl-paste            # as soon as it is delivered
+sleep 30; wl-paste  # 30 s later
+wl-paste; wl-paste  # second and third paste
+```
+
+Expect: every `wl-paste` prints the dictated words.
+
+Result:
+
+Notes:
+
 ## 2. The clipboard does NOT survive the daemon — and that is correct
 
 `pkill parlad`, then `wl-paste`, comes back empty. The serving thread lives in
@@ -23,6 +87,21 @@ the `parlad` process, so the selection dies with it. This is expected
 behaviour, not a bug.
 
 Only worry if pastes fail *while the daemon is running*.
+
+- [ ] **2. Selection dies with the daemon**
+
+Command (after a successful dictation from check 1):
+
+```sh
+pkill parlad
+wl-paste
+```
+
+Expect: `wl-paste` comes back empty (or reports no selection).
+
+Result:
+
+Notes:
 
 ## 3. Notifications
 
@@ -39,17 +118,112 @@ failed` does not auto-dismiss**. That toast carries your entire untruncated
 dictation and is set to `Timeout::Never`, but some notifiers override that with
 their own default. If yours does, the text is still in the log.
 
+- [ ] **3a. `Copied: …` notification appears**
+
+Command (check 2 stopped the daemon, so restart it first; speak during the sleep):
+
+```sh
+start_parlad
+mark; parlactl start; sleep 3; parlactl stop; delivered
+```
+
+Expect: a `Parla` notification with `Copied: <preview>`, and the log line
+`parlad: Parla — Copied: …`.
+
+Result:
+
+Notes:
+
+- [ ] **3b. Dead notifier does not cost the dictation**
+
+Command:
+
+```sh
+pkill mako   # or dunst / swaync
+mark; parlactl start; sleep 3; parlactl stop; delivered
+wl-paste
+```
+
+Expect: `wl-paste` prints the words; the log shows `parlad: notify failed: …`
+and nothing else goes wrong.
+
+Result:
+
+Notes:
+
+- [ ] **3c. `Parla — clipboard failed` stays up**
+
+Command (notifier running again):
+
+```sh
+pkill parlad
+env -u WAYLAND_DISPLAY parlad >>"$LOG" 2>&1 &
+until parlactl status >/dev/null 2>&1; do sleep 0.5; done
+parlactl start; sleep 3; parlactl stop
+```
+
+Afterwards: `pkill parlad; start_parlad` to get a normal daemon back.
+
+Expect: a `Parla — clipboard failed` notification with the whole dictation and
+`(also in the log)`, which does not auto-dismiss; the log shows
+`parlad: clipboard failed: …`. If your notifier dismisses it anyway, note the
+notifier and its timeout setting.
+
+Result:
+
+Notes:
+
 ## 4. Cleanup failure still delivers
 
 Unset the cleanup API key and dictate. Expect `Copied (raw — no API key): …`
 and the raw transcript on the clipboard. Cleanup failing must never cost you
 your words.
 
+- [ ] **4. Missing API key delivers the raw transcript**
+
+Command. In `config.toml`, temporarily set a `[cleanup]` provider other than
+`"none"` and remove (or comment out) any inline `cleanup.api_key`: cleanup
+falls back to it, so unsetting the variable alone does not remove the key.
+
+```sh
+pkill parlad
+env -u ANTHROPIC_API_KEY parlad >>"$LOG" 2>&1 &   # the variable your api_key_env names
+until parlactl status >/dev/null 2>&1; do sleep 0.5; done
+mark; parlactl start; sleep 3; parlactl stop; delivered
+wl-paste
+```
+
+Afterwards, restore `config.toml` (provider `"none"` for the remaining checks,
+and your `api_key` line), then `pkill parlad; start_parlad`.
+
+Expect: notification `Copied (raw — no API key): …`; `wl-paste` prints the raw
+transcript.
+
+Result:
+
+Notes:
+
 ## 5. The build itself
 
 cpal's `pipewire` and `pulseaudio` backends have never been compiled. Expect a
 first Linux build to break here rather than in the pipeline. You need cmake, a
 C/C++ toolchain, libclang, and your audio stack's development headers.
+
+- [ ] **5. Release build succeeds**
+
+Command:
+
+```sh
+cd linux && cargo build --release
+install -Dm755 target/release/parlad target/release/parlactl -t ~/.local/bin/
+```
+
+Expect: both binaries build and install. On failure, record the first error
+and the packages you had to add (with distro package names).
+
+Result:
+
+Notes:
 
 ## 6. A real hotkey, through the compositor
 
@@ -66,6 +240,31 @@ If you check `parlactl` by hand instead, put a `sleep 0.4` between `start` and
 `stop` — two back-to-back spawns take about 4 ms, inside the 200 ms
 accidental-tap guard, so `stop` correctly answers `cancelled`.
 
+- [ ] **6a. Compositor keybinding dictates**
+
+Command: `parlactl setup`, paste the snippet into your compositor config,
+reload (`swaymsg reload` / `hyprctl reload` / re-run `~/.config/river/init`).
+Hold Right Ctrl, speak, release, then `wl-paste`.
+
+Expect: the words on the clipboard and a `Copied: …` notification.
+
+Result:
+
+Notes:
+
+- [ ] **6b. Watchdog covers a dropped release (sway#6456)**
+
+Command: hold Right Ctrl, press and release another key, then release Right
+Ctrl. Wait up to `watchdog_secs` (default 30 s).
+
+Expect: log line `parlad: watchdog fired, discarding recording` and the
+notification `Recording timed out — discarded`. If the release was *not*
+dropped on your compositor, record that instead.
+
+Result:
+
+Notes:
+
 ## 7. Microphone and device selection under PipeWire
 
 `parlad: transcribing N.Ns of audio` in the log is the number to watch. It
@@ -79,11 +278,293 @@ Note: cpal's Linux `default_host()` ends in `AlsaHost::new().expect(...)`, so on
 a box with no working audio backend `parlad` **panics** rather than reporting a
 clean error. An abort at startup means the audio stack, not the app.
 
+- [ ] **7. Captured length matches the hold**
+
+Command: start `parlad` in a terminal, hold the hotkey about 5 s while
+speaking, release. Read the `parlad: transcribing N.Ns of audio` line.
+
+Expect: N close to the hold time — not much larger, and the line present.
+If `parlad` aborts at startup, record the panic message and your audio stack.
+
+Result:
+
+Notes:
+
 ## 8. The model
 
 Put one at `$XDG_DATA_HOME/parla/models/ggml-base.en.bin`, or set
 `whisper_model` in `config.toml`. The daemon refuses to start without it, by
 design, naming the path it looked in.
+
+- [ ] **8a. Missing model refuses to start, naming the path**
+
+Command (no file at the default path, no `whisper_model` set): `parlad`
+
+Expect: `parlad` exits with an error naming the path it looked in.
+
+Result:
+
+Notes:
+
+- [ ] **8b. Model at the default path loads**
+
+Command: place the model at
+`$XDG_DATA_HOME/parla/models/ggml-base.en.bin` (default
+`~/.local/share/parla/models/`), then `parlad`.
+
+Expect: `parlad: listening on …` and no model error. Record the model's sha256
+in the run record.
+
+Result:
+
+Notes:
+
+---
+
+## Baseline observations (before lanes 09 and 11)
+
+Observations only, no pass/fail threshold. Record the exact values asked for;
+lanes 09 and 11 compare their "after" checks against them. `Result:` here means
+`recorded` or `not run`.
+
+- [ ] **B1. Device default configuration**
+
+The daemon opens the device's default input configuration and does not log it.
+Record the sample rate, channel count and sample format it opened from the
+audio server instead, **while a recording is in progress**:
+
+```sh
+parlactl start         # leave it recording
+pw-top                 # PipeWire: the parlad row's RATE / FORMAT
+pactl list sources     # PulseAudio / pipewire-pulse: Sample Specification of the default source
+cat /proc/asound/card*/pcm*c/sub0/hw_params   # plain ALSA: rate, channels, format
+parlactl cancel
+```
+
+Record: sample rate (Hz), channel count, sample format, and which command the
+values came from (paste its relevant output in Notes). Lane 11 adds a startup
+log line for this.
+
+Result:
+
+Sample rate / channels / format:
+
+Notes:
+
+- [ ] **B2. Duration fidelity**
+
+Dictate a timed 10.0 s clip, speaking continuously for the whole interval:
+
+```sh
+parlactl start; sleep 10; parlactl stop
+```
+
+Record: the daemon's `parlad: transcribing N.Ns of audio` value, and the
+difference `10.0 − N`. (Callback-local resampling can shorten it; this is the
+"before" number for lane 11.)
+
+Result:
+
+N / difference:
+
+Notes:
+
+- [ ] **B3. Two quick dictations**
+
+Dictate A, and start B before A's notification appears. Say a different,
+recognisable phrase in each (for example "alpha one" then "bravo two"):
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl start; sleep 2; parlactl stop
+delivered 2; wl-paste
+```
+
+Record: which text is on the clipboard at the end (A, B, or something else),
+whether both notifications appeared and in which order, and the order of the
+two `parlad: Parla — …` log lines. ("Before" for lane 09.)
+
+Result:
+
+Clipboard / notifications / log order:
+
+Notes:
+
+- [ ] **B4. Cancel after release**
+
+Release the key, then immediately cancel:
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl cancel
+delivered; wl-paste   # "no delivery within 60 s" is a valid outcome here
+```
+
+Record: the reply `parlactl cancel` printed, whether the dictated text still
+reached the clipboard, and whether a `Copied: …` notification appeared.
+("Before" for lane 09.)
+
+Result:
+
+Cancel reply / clipboard / notification:
+
+Notes:
+
+- [ ] **B5. Multilingual model**
+
+With a multilingual ggml model configured (`whisper_model` pointing at a model
+without the `.en` suffix, for example `ggml-base.bin`), restart `parlad` and
+speak one non-English sentence.
+
+Record: the model file and its sha256, the language and the sentence you said,
+and the clipboard output verbatim (`wl-paste`). ("Before" for lane 09's
+language setting.)
+
+Result:
+
+Model / language / sentence spoken / output:
+
+Notes:
+
+---
+
+## After checks — added by lane 09
+
+Same setup and helpers as above. Each item compares against its baseline.
+
+- [ ] **L9.1. A-then-B ordering** (compare B3)
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl start; sleep 2; parlactl stop
+delivered 2; wl-paste
+```
+
+Expected: the clipboard ends with B; the log shows A's `parlad: Parla — Copied: …`
+line before B's.
+
+Result:
+
+Notes:
+
+- [ ] **L9.2. Cancel after release** (compare B4)
+
+```sh
+mark; parlactl start; sleep 2; parlactl stop; parlactl cancel
+delivered; wl-paste
+```
+
+Expected: `parlactl cancel` prints `cancelled`, nothing new on the clipboard,
+and a `Cancelled — nothing copied` notification and log line.
+
+Result:
+
+Notes:
+
+- [ ] **L9.3. Cancel mid-whisper on a long clip**
+
+Dictate for about 60 s, release, wait 1 s, then `time parlactl cancel` and
+`delivered`. Expected: the `Cancelled — nothing copied` line appears within a
+few seconds of the cancel, not after the full transcription time.
+
+Result:
+
+Notes:
+
+- [ ] **L9.4. Multilingual model, no `language` key** (compare B5)
+
+Same model and sentence as B5, `language` absent. Expected: output is English
+(transcribed or translated), as in B5.
+
+Result:
+
+Notes:
+
+- [ ] **L9.5. `language = "auto"`**
+
+Same model and sentence. Expected: output in the spoken language.
+
+Result:
+
+Notes:
+
+- [ ] **L9.6. Pinned language**
+
+`language = "<code of the spoken language>"`, same sentence. Expected: output
+in that language.
+
+Result:
+
+Notes:
+
+- [ ] **L9.7. Invalid `language`**
+
+`language = "zz"`, restart. Expected: a startup stderr line naming `"zz"` and
+saying it decodes as English; dictation works and is English.
+
+Result:
+
+Notes:
+
+## After checks — added by lane 11
+
+Same setup and helpers as above.
+
+- [ ] **L11.1. Startup log** — the `parlad: capturing … Hz, … ch, …; ring … s, … MB`
+  line. Record it.
+
+Result:
+
+Notes:
+
+- [ ] **L11.2. Duration fidelity** — a timed 10.0 s dictation logs
+  `transcribing 10.0s of audio` ± 0.1 s. Compare with the lane 06 baseline
+  number.
+
+Result:
+
+Notes:
+
+- [ ] **L11.3. Other devices** — repeat L11.1–L11.2 on a 44.1 kHz and a 48 kHz
+  device (or change the PipeWire clock rate) and on one USB microphone.
+
+Result:
+
+Notes:
+
+- [ ] **L11.4. Recognition sanity** — the same sentence dictated before and
+  after this lane is at least as accurate. Do not claim a WER number without the
+  lane 04 corpus.
+
+Result:
+
+Notes:
+
+- [ ] **L11.5. Memory** — `ps -o rss= -p $(pgrep parlad)` (or `smem`) after
+  5 minutes idle, with the default watchdog and with `watchdog_secs = 300`.
+  Record both.
+
+Result:
+
+Notes:
+
+- [ ] **L11.6. Five-minute dictation** — `watchdog_secs = 300`, dictate for
+  about 4.5 minutes; it finishes and delivers. Record the time from `stop` to
+  the `transcribing` log line (the resample step).
+
+Result:
+
+Notes:
+
+---
+
+## Sign-off
+
+| Field | Value |
+|---|---|
+| Run by | |
+| Date | |
+| Run record used (date + machine) | |
+| Items failed (by number) | |
+| Items not run (by number, with reason) | |
+| Lanes 09 and 11 may proceed (yes / no, and why) | |
 
 ---
 

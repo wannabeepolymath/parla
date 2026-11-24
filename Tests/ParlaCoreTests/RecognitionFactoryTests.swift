@@ -199,6 +199,21 @@ final class RecognitionFactoryTests: XCTestCase {
             XCTAssertEqual(probe.calls.map(\.language), [expected]); XCTAssertEqual(probe.detections, 0)
         }
     }
+    func testLanguageHintsCarryTheDetectedLanguageToTheNextTranscriberOfTheSameModel() async throws {
+        let probe = NativeProbe(); probe.detected = "hi"
+        var factory = probe.factory(); factory.languageHints = WhisperLanguageHints()
+        _ = await (try await factory.acquire(request: request("/owned/multi.bin"))).recognize(audio, pass: .fullFinal)
+        XCTAssertEqual(probe.calls.map(\.language), ["en", "hi"])
+        probe.calls = []  // a second, non-resident handle for the same model starts at the hint
+        _ = await (try await factory.acquire(request: request("/owned/multi.bin"))).recognize(audio, pass: .fullFinal)
+        XCTAssertEqual(probe.calls.map(\.language), ["hi"])
+        probe.calls = []  // another model path starts at English
+        _ = await (try await factory.acquire(request: request("/owned/other.bin"))).recognize(audio, pass: .fullFinal)
+        XCTAssertEqual(probe.calls.first?.language, "en")
+        let hints = WhisperLanguageHints(); factory.languageHints = hints
+        _ = await (try await factory.acquire(request: request("/owned/multi.bin", language: "es"))).recognize(audio, pass: .fullFinal)
+        XCTAssertNil(hints.last(for: "/owned/multi.bin"))  // a pinned language never writes a hint
+    }
     func testRealWhisperAutoInvalidPinDetectionRetryAndExplicitAutoIgnoresMutablePin() async throws {
         for pin in [nil, "invalid-code"] as [String?] {
             let probe = NativeProbe(); probe.detected = "hi"
@@ -362,9 +377,10 @@ final class RecognitionFactoryTests: XCTestCase {
         var requests = 0
         try await eval.acquire(needsASR: false, request: { requests += 1; return self.request() }, factory: probe.factory())
         XCTAssertEqual(requests, 0); XCTAssertEqual(probe.admissions, 0); XCTAssertTrue(probe.constructions.isEmpty)
-        try await eval.acquire(needsASR: true, request: { requests += 1; return self.request() }, factory: probe.factory())
-        recognitionAssertEqual(await eval.transcribe(audio, prompt: "fixture"), "transcript")
-        XCTAssertEqual(probe.calls.last?.prompt, "fixture")
+        try await eval.acquire(needsASR: true, request: { requests += 1; return self.request(words: ["Kubernetes", "Parla"]) }, factory: probe.factory())
+        recognitionAssertEqual(await eval.transcribe(audio, prompt: "ignored"), "transcript")
+        // The handle derives the shipped prompt from request.dictionary; the explicit one is ignored.
+        XCTAssertEqual(probe.calls.last?.prompt, VocabularyHints.asrPrompt(["Kubernetes", "Parla"]))
         probe.outputs = [.init(status: 0)]; recognitionAssertEqual(await eval.transcribe(audio, prompt: nil), "")
         probe.outputs = [.init(status: 1)]; recognitionAssertNil(await eval.transcribe(audio, prompt: nil))
         XCTAssertEqual(probe.releases, 0); eval.release(); XCTAssertEqual(probe.releases, 1)

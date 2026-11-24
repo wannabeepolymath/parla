@@ -71,19 +71,32 @@ extension HubModel {
     }
     func exportAudioImportVTT() { exportAudioImport(.webVTT) }
     func exportAudioImportSRT() { exportAudioImport(.srt) }
+    /// Raw recognition with model and timing details; app imports never request word timing.
+    func exportAudioImportJSON() {
+        exportAudioImport(fileExtension: "json", formatName: "JSON") { review in
+            guard let result = review.recognition,
+                  let data = try? RecognitionExport.encoded(result: result, requestedLanguage: review.job.configuration.request.language) else {
+                self.audioImport.notice("This transcript can’t be exported as JSON. Copy or save it instead."); return nil
+            }
+            return data
+        }
+    }
     private func exportAudioImport(_ format: SubtitleExport.Format) {
-        let fileExtension = format == .srt ? "srt" : "vtt"
         let formatName = format == .srt ? "SRT" : "WebVTT"
+        exportAudioImport(fileExtension: format == .srt ? "srt" : "vtt", formatName: formatName) { review in
+            guard let segments = review.segments else {
+                self.audioImport.notice("No timestamps for this file. Copy or save the text instead."); return nil
+            }
+            do { return try SubtitleExport.encoded(segments, format: format) }
+            catch SubtitleExport.Refusal.markup {
+                self.audioImport.notice("This text has characters SRT can’t show. Export WebVTT instead."); return nil
+            } catch { self.audioImport.notice("This text can’t be exported as \(formatName). Copy or save it instead."); return nil }
+        }
+    }
+    private func exportAudioImport(fileExtension: String, formatName: String, encode: (AudioImportOwner.Review) -> Data?) {
         guard let review = audioImport.review,
               audioImportExportIsCurrent(job: review.job, resultID: review.entry.id) else { return }
-        guard let segments = review.segments else {
-            audioImport.notice("No timestamps for this file. Copy or save the text instead."); return
-        }
-        let data: Data
-        do { data = try SubtitleExport.encoded(segments, format: format) }
-        catch SubtitleExport.Refusal.markup {
-            audioImport.notice("This text has characters SRT can’t show. Export WebVTT instead."); return
-        } catch { audioImport.notice("This text can’t be exported as \(formatName). Copy or save it instead."); return }
+        guard let data = encode(review) else { return }
         // Freeze bytes AND authority before the reentrant modal boundary.
         let job = review.job, resultID = review.entry.id
         guard let url = audioImportExportPanel("Parla-transcript.\(fileExtension)") else { return }
@@ -170,7 +183,7 @@ extension HubModel {
         let panel = NSOpenPanel()
         panel.title = "Choose an audio file"
         panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.wav, .quickTimeMovie]; panel.resolvesAliases = false
+        panel.allowedContentTypes = [.wav, .quickTimeMovie, .mpeg4Audio, .mp3]; panel.resolvesAliases = false
         return panel.runModal() == .OK ? panel.url : nil
     }
 }

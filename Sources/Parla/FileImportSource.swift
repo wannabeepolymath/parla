@@ -9,7 +9,7 @@ final class FileImportSource: @unchecked Sendable {
         case unavailable, unsafe, changed, read
         var message: String {
             switch self {
-            case .unavailable: return "Choose a WAV or MOV file on this Mac."
+            case .unavailable: return "Choose a WAV, MOV, M4A or MP3 file on this Mac."
             case .unsafe: return "Choose a file stored on this Mac, not an alias or iCloud placeholder."
             case .changed: return "The file changed. Choose it again."
             case .read: return "Couldn’t read the whole file. Choose it again."
@@ -54,6 +54,8 @@ final class FileImportSource: @unchecked Sendable {
         switch url.pathExtension.lowercased() {
         case "wav": selectedFormat = .wav
         case "mov": selectedFormat = .mov
+        case "m4a": selectedFormat = .m4a
+        case "mp3": selectedFormat = .mp3
         default: throw Failure.unsafe
         }
         let parts = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
@@ -77,6 +79,7 @@ final class FileImportSource: @unchecked Sendable {
                   st.st_flags & Self.datalessFlag == 0 else { throw Failure.unsafe }
             guard st.st_size > 0, st.st_size <= ImportedWAV.maximumBytes else {
                 if selectedFormat == .mov { throw ImportedPCMMOV.Failure.encodedLimit }
+                if selectedFormat == .m4a || selectedFormat == .mp3 { throw ImportedCompressedAudio.Failure.duration }
                 throw ImportedWAV.Failure.size
             }
             try access.metadata(url, parent)

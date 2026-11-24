@@ -83,7 +83,10 @@ The cleanup context is pinned to `eval/context.json` (dictionary, snippets and r
 **not** to your live Settings — an eval that reads the developer's settings is
 not reproducible. Only provider credentials (key, model, base URL) still come
 from Settings. Omitted replacement rules default to an empty list; without a
-fixture, all three vocabulary fields are empty.
+fixture, all three vocabulary fields are empty. The ASR leg uses the same
+fixture dictionary: the engine is acquired with it and derives the Whisper prompt
+exactly as the app does. The ASR rows in the committed `eval/results.json` were
+produced before this, through an explicit prompt path; they have not been regenerated.
 
 ## A/B: comparing two cleanup models
 
@@ -166,6 +169,18 @@ self-corrections, trailing-off). Record yourself:
 Then write `name.raw.txt` (what was actually said, verbatim — this scores the
 ASR leg) and `name.golden.txt` (what Parla should have inserted).
 
+## Decoder experiments
+
+`--experiment`, `--whisper-model`, `--language` and `--evidence-out` run eval-only decoder switches
+(non-speech suppression, carried prompt, beam search, native VAD, another model file) and record
+native decoder evidence. No app setting changes. See [`experiments.md`](experiments.md).
+
+## Acoustic smoke tier
+
+`eval/smoke/` holds a small, separate tier that runs real recognition with the pinned `base.en`
+model on a few licensed clips (`.github/workflows/acoustic-smoke.yml`, manual and weekly). It
+catches native integration breakage, not model quality. See [`smoke/README.md`](smoke/README.md).
+
 ## `verify` — the scorer-drift CI gate
 
 A full run writes `eval/results.json`: every scored leg with its reference and
@@ -243,3 +258,22 @@ contract and proposed human collection/reference/withdrawal protocol](human-corp
 Consent/engine declarations are not truth certification. No actual human corpus
 or live quality evidence is supplied; B02 remains partial. Existing verify,
 quality-check, comparison, scorer arithmetic and live-run contracts are unchanged.
+
+## Human corpus
+
+1. Collect consented audio and reviewed references per the
+   [protocol](human-corpus-protocol.md); author `manifest.json`.
+2. `parla-eval corpus-check MANIFEST` — admission only.
+3. `parla-eval corpus-run MANIFEST --out RUN.json --run-id ID --config-revision ID [--whisper-model PATH] [--context FILE]`
+   — runs the local ASR leg once and writes only `RUN.json` (new file, 0600),
+   then re-admits it. Exit 0 written and admitted, 2 refused input or arguments,
+   3 infrastructure. Keep corpus and run files out of git unless consent covers
+   publication. Paths must be canonical (for example `/private/tmp`, not `/tmp`).
+4. `parla-eval corpus-check MANIFEST --results RUN.json [--against OTHER.json]`
+   — scores and, with two runs, pairs them.
+
+For WER comparable to published Whisper numbers, use OpenAI's English text
+normalizer **externally**: export each row's `hypothesis` and the manifest's
+verbatim reference from a run file, then score them with the upstream `whisper`
+Python package's normalizer in a separate environment. Nothing in this repo
+ports or vendors it, and those numbers are not what `corpus-check` reports.

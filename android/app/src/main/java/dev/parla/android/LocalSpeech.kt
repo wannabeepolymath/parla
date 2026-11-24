@@ -38,7 +38,7 @@ internal class LocalSpeech(private val native: SpeechNative = WhisperJni) {
                 if(revoked.get()) return@nativeSubmit
                 validate()
                 val bytes = native.recognize(token, model.absolutePath.toByteArray(Charsets.UTF_8), samples,
-                    VocabularyHints.asrPrompt(words).toByteArray(Charsets.UTF_8), SpeechLanguagePolicy.language(catalog,language).toByteArray(Charsets.UTF_8))
+                    VocabularyHints.asrTerms(words).toByteArray(Charsets.UTF_8), SpeechLanguagePolicy.language(catalog,language).toByteArray(Charsets.UTF_8))
                 val text = bytes?.toString(Charsets.UTF_8)?.let(TextRules::stripNonSpeech).orEmpty().trim()
                 if(c.isActive && !revoked.get()) {
                     if(text.isEmpty()) c.resumeWithException(IllegalStateException("No speech recognized. Try a longer recording closer to the microphone.")) else c.resume(text)

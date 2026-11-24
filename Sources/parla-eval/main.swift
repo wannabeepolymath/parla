@@ -10,6 +10,16 @@ import ParlaCore
 //                               settings.json is never written
 //   parla-eval --out <path>     read/write fixtures at <path> instead of
 //                               eval/results.json, so two runs can sit side by side
+//   parla-eval --experiment <list>
+//                               eval-only decoder switches for the whisper leg:
+//                               suppress-nst, carry-prompt, beam=N (2…8), vad=PATH
+//                               (see eval/experiments.md); shown in the ASR engine label
+//   parla-eval --whisper-model <path> / --language <code>
+//                               recognition model file / pinned language for this
+//                               run only; settings.json is never written
+//   parla-eval --evidence-out <file>
+//                               new file; one JSON line of native decoder evidence
+//                               per ASR case, never transcript text
 //   parla-eval --cleanup-cmd <exe>
 //                               run the cleanup leg through an external command
 //                               (system prompt as argv[1], --model as argv[2],
@@ -98,6 +108,12 @@ if args.contains("corpus-check") {
         exit(2)
     }
 }
+// Same strict refusal rules; every refusal precedes the engine, which is released before exit.
+if args.contains("corpus-run") {
+    let run = await EvalCorpusRun.main(arguments: args)
+    if run.code == 0 { print(run.output) } else { FileHandle.standardError.write(Data((run.output + "\n").utf8)) }
+    exit(run.code)
+}
 
 
 /// Removes `--flag value` from `args` and returns the value. Value-taking flags
@@ -117,6 +133,19 @@ let modelOverride = takeOption("--model")
 let outPath = takeOption("--out")
 let cleanupCmd = takeOption("--cleanup-cmd")
 let policyPath = takeOption("--policy")
+// Eval-only recognition switches (eval/experiments.md). None of them touches settings.json.
+let experimentList = takeOption("--experiment")
+let whisperModelOverride = takeOption("--whisper-model")
+let languageOverride = takeOption("--language")
+let evidenceOut = takeOption("--evidence-out")
+var experiment = WhisperExperiment()
+if let experimentList {
+    guard let parsed = WhisperExperiment.parse(experimentList) else {
+        die("--experiment \(experimentList): use suppress-nst, carry-prompt, beam=2…8, vad=EXISTING_PATH", 2)
+    }
+    experiment = parsed
+}
+experiment.collectEvidence = evidenceOut != nil
 
 let mode: Mode = args.contains("compare") ? .compare
     : args.contains("quality-check") ? .qualityCheck
@@ -540,19 +569,32 @@ let needsCleanup = mode != .asrOnly
 
 // MARK: - Engines
 
+// Loaded before the engine so the handle's frozen request carries the fixture
+// dictionary and derives the same prompt the app ships.
+let contextFixture = (try? Data(contentsOf: contextURL)).flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
+
 var transcriber: EvalRecognition?
 var modelPath = ""
 if needsASR {
-    modelPath = WhisperTranscriber.defaultModelPath()
+    modelPath = whisperModelOverride ?? WhisperTranscriber.defaultModelPath()
     guard fm.fileExists(atPath: modelPath) else {
         die("whisper model not found at \(modelPath)", 2)
     }
     do {
         transcriber = EvalRecognition()
-        try await transcriber?.acquire(needsASR: true, request: { RecognitionRequest(settings: Settings()) })
+        var asrSettings = Settings()
+        asrSettings.dictionary = contextFixture?.dictionary ?? []
+        asrSettings.whisperModelPath = whisperModelOverride
+        asrSettings.language = languageOverride
+        try await transcriber?.acquire(needsASR: true, request: { RecognitionRequest(settings: asrSettings) })
+        transcriber?.configure(experiment)
     }
     catch { die("\(error)", 2) }
 }
+let evidenceLog: EvalEvidenceLog?
+do { evidenceLog = try evidenceOut.map { try EvalEvidenceLog(path: $0) } } catch { die("--evidence-out: \(error)", 2) }
+/// The shipping decode keeps the legacy label byte-identical; an experiment is always visible.
+let asrEngine = (modelPath as NSString).lastPathComponent + (experiment.label.isEmpty ? "" : "+" + experiment.label)
 
 // Cleanup context is PINNED to a committed fixture. Reading the developer's
 // dictionary, snippets and replacements would make every run unreproducible; only the
@@ -567,8 +609,7 @@ settings.transformPresets = []
 settings.selectedPresetID = nil
 settings.cleanupEnabled = true
 settings.cleanupStyle = .standard
-if let data = try? Data(contentsOf: contextURL),
-   let fixture = try? JSONDecoder().decode(Settings.self, from: data) {
+if let fixture = contextFixture {
     settings.dictionary = fixture.dictionary
     settings.snippets = fixture.snippets
     settings.replacements = fixture.replacements
@@ -723,10 +764,15 @@ for name in names {
         let t0 = Date()
         let heard = await pipeline.transcript(samples: samples) ?? ""
         let asr = Date().timeIntervalSince(t0)
+        do {
+            try evidenceLog?.append(name: name, audioSeconds: Double(samples.count) / 16_000, decodeSeconds: asr,
+                                    model: (modelPath as NSString).lastPathComponent, experiment: experiment,
+                                    evidence: transcriber?.takeEvidence())
+        } catch { print("ERROR \(name): could not write evidence: \(error)"); infraFailed = true }
         if let rawRef {
             results.append(CaseResult(name: name, category: category, leg: "asr",
                                       reference: rawRef, hypothesis: heard,
-                                      seconds: asr, engine: (modelPath as NSString).lastPathComponent,
+                                      seconds: asr, engine: asrEngine,
                                       wer: Eval.wer(reference: rawRef, hypothesis: heard).rate))
         } else {
             print("note: \(name) has no .raw.txt — ASR leg unscored")

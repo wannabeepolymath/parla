@@ -53,6 +53,19 @@ final class StreamingTests: XCTestCase {
         XCTAssertEqual(p, "K8s " + String(repeating: "a", count: 200))
     }
 
+    func testTailPromptReservesContextTokensWithABudget() {
+        let budget = PromptBudget(capacity: 20, count: { $0.utf8.count })
+        XCTAssertEqual(StreamWindow.tailPrompt(dictionary: ["alpha", "beta"], confirmed: "hello world",
+                                               budget: budget, reserve: 8), "alpha, beta lo world")
+    }
+
+    func testTailPromptGivesUnusedReserveToTheDictionary() {
+        let budget = PromptBudget(capacity: 18, count: { $0.utf8.count })
+        // "alpha, beta, gamma" is 18: the whole capacity, nothing held back for context.
+        XCTAssertEqual(StreamWindow.tailPrompt(dictionary: ["alpha", "beta", "gamma"], confirmed: "",
+                                               budget: budget, reserve: 8), "alpha, beta, gamma")
+    }
+
     // MARK: join
 
     func testJoin() {

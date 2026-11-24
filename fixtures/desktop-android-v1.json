@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "promptBudget": [
+    {"words":["alpha","beta","gamma"], "capacity":11, "expected":["alpha","beta"]},
+    {"words":["alpha","a-very-long-term","b"], "capacity":8, "expected":["alpha","b"]},
+    {"words":["Café","次","नमस्ते"], "capacity":10, "expected":["Café","次"]},
+    {"words":["  Name0 ","name0","Name1"], "capacity":100, "expected":["Name0","Name1"]},
+    {"words":["alpha"], "capacity":0, "expected":[]}
+  ],
   "normalization": [
     {"input":"Four hundred and twenty dollars", "expected":"420 dollar"},
     {"input":"$420", "expected":"420 dollar"},

@@ -6,7 +6,7 @@ struct HubAudioImportView: View {
     @ObservedObject var owner: AudioImportOwner
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Mono 16-bit WAV, or MOV with uncompressed 16 kHz mono audio. Up to 10 minutes and 20 MB.")
+            Text("Mono 16-bit WAV, MOV with uncompressed 16 kHz mono audio, M4A or MP3. Up to 10 minutes and 20 MB.")
                 .foregroundStyle(.secondary)
             Text("Language: \(model.settings.language ?? "auto-detect")")
                 .font(.caption)
@@ -53,11 +53,14 @@ struct HubAudioImportView: View {
                         Button("Export WebVTT…", action: model.exportAudioImportVTT)
                         Button("Export SRT…", action: model.exportAudioImportSRT)
                     }
+                    Button("Export JSON…", action: model.exportAudioImportJSON)
                     if review.saved { Text("Saved").foregroundStyle(.secondary) }
                     else if model.settings.historyEnabled {
                         Button(review.saveFailed ? "Try saving again" : "Save to history", action: model.saveAudioImport)
                     } else { Text("History is off.").foregroundStyle(.secondary) }
                 }.disabled(model.hasPendingSettingsSave || model.loadError != nil || model.saveError != nil)
+                Text("JSON includes the raw transcript, model, and timestamps when available.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
