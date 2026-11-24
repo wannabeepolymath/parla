@@ -90,7 +90,8 @@ final class FileImportSource: @unchecked Sendable {
             // Escape controls and bidi format characters; retain ordinary Unicode/spaces,
             // plus ZWJ and emoji tags so 👩‍💻 and subdivision flags stay intact.
             var pieces: [String] = [], run = String.UnicodeScalarView()
-            for scalar in url.lastPathComponent.unicodeScalars.prefix(160) {
+            // No scalar prefix: it could split a Character. A file name is ≤ 255 bytes; the loop below bounds the label.
+            for scalar in url.lastPathComponent.unicodeScalars {
                 let v = scalar.value
                 if v != 0x200D, !(0xE0020...0xE007F).contains(v),
                    CharacterSet.controlCharacters.contains(scalar) || CharacterSet.illegalCharacters.contains(scalar)

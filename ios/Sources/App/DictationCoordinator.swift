@@ -285,8 +285,11 @@ import ParlaCore
             if busy {
                 // session remains the local operation's identity until teardown completes.
                 guard let own = session, let current, own.id == current.id,
-                      own.generation == current.generation, current.active,
+                      own.generation == current.generation,
+                      current.active || (own.phase == .failed && current.phase == .failed),
                       current.command != .cancel else { cancel(); return }
+                // Expiration already saved and failed this take; wait for its cancelled work to drain.
+                if !current.active { return }
                 if current.command == .stop && recording { stop(); return }
             }
             if !busy { session = current }

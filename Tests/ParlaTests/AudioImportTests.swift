@@ -233,6 +233,9 @@ final class AudioImportTests: XCTestCase {
         let flag = "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}"
         r.hub.selectAudioImport(try r.file("👩‍💻 \(flag) \u{202e}.wav"))
         XCTAssertEqual(try XCTUnwrap(r.owner.source).displayName,"👩‍💻 \(flag) \\u{202e}.wav")
+        let ascii = String(repeating:"a",count:159)
+        r.hub.selectAudioImport(try r.file(ascii + "👩‍💻.wav"))
+        XCTAssertEqual(try XCTUnwrap(r.owner.source).displayName,ascii + "👩‍💻.wav")
         try await r.close()
     }
     @MainActor func testT05OrdinaryReadableWithoutScopeAndEscapedDisplayMissingAndGrowth() async throws {
