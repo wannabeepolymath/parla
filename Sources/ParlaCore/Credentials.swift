@@ -136,7 +136,8 @@ public final class CredentialStore {
         guard case .value(let verified) = backend.read(scope, interactive: true), verified == value else {
             throw CredentialFailure("Couldn’t save the key. Try again.")
         }
-        _ = replacement?.delete(scope) // the original is readable again; don't let a stale replacement win
+        // The original is readable again; a stale replacement must not keep winning reads.
+        if let result = replacement?.delete(scope), result != .success, result != .missing { throw failure(result) }
     }
     public func remove(_ scope: CredentialScope) throws {
         if let result = replacement?.delete(scope), result != .success, result != .missing { throw failure(result) }
