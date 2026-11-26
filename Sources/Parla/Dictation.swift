@@ -370,6 +370,7 @@ extension AppDelegate {
                 Inserter.typeBackspaces(erase, diagnostics: diagnostic)
                 Inserter.typeUnicode(append, diagnostics: diagnostic)
             }
+            if verifiedHUD == .done { cleanupFailures = nil } // cleanup replaced already-typed text
             hud.show(verifiedHUD)
             CorrectionWatcher.shared.arm(inserted: String(expect.dropLast(erase)) + append,
                                          dictionary: store.load().dictionary)
