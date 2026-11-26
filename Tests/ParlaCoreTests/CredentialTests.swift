@@ -167,6 +167,25 @@ final class CredentialTests: XCTestCase {
         backend.deleteResult = nil; try store.changeCredential(scope: .anthropic, replacement: nil)
         XCTAssertNil(backend.values[.anthropic])
     }
+    func testSaveOverUnreadableKeyUsesOwnedReplacementUntilOriginalIsReadable() throws {
+        // A key left by a differently signed build: unreadable, and macOS refuses to delete it.
+        let replacement = FakeCredentialBackend(), stuck = FakeCredentialBackend()
+        stuck.values[.anthropic] = "old"; stuck.readState = .denied; stuck.deleteResult = .error
+        let credentials = CredentialStore(backend: stuck, replacement: replacement)
+        try credentials.replace("new", scope: .anthropic)
+        XCTAssertEqual(replacement.values[.anthropic], "new"); XCTAssertEqual(stuck.updates, 0)
+        guard case .value("new") = credentials.read(.anthropic, interactive: false) else { return XCTFail() }
+        try credentials.replace("newer", scope: .anthropic) // still unreadable: update the replacement
+        XCTAssertEqual(replacement.values[.anthropic], "newer")
+        // Original readable again (e.g. deleted in Keychain Access): Save writes it and drops the replacement.
+        stuck.readState = nil; stuck.values[.anthropic] = nil; stuck.deleteResult = nil
+        XCTAssertEqual(credentials.status(.anthropic), .present) // the replacement still counts while the original is missing
+        try credentials.replace("final", scope: .anthropic)
+        XCTAssertEqual(stuck.values[.anthropic], "final"); XCTAssertNil(replacement.values[.anthropic])
+        try credentials.remove(.anthropic)
+        XCTAssertNil(stuck.values[.anthropic])
+        guard case .missing = credentials.read(.anthropic, interactive: false) else { return XCTFail() }
+    }
     func testEnvironmentPriorityIsolationAndSkipsBackendIncludingMigrationInput() async throws {
         var s = compatible(); s.cleanup.apiKeyEnvVar = "COMPAT_KEY"; s.cleanup.apiKey = "legacy-not-yet-migrated"
         backend.readState = .denied; backend.statusState = .denied
