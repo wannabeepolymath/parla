@@ -54,12 +54,14 @@ public enum CredentialStatus: String, Equatable, Sendable {
 
 /// Never Codable or printed. Only deliberate request preparation consumes a value.
 public enum CredentialRead {
-    case value(String), missing, denied, canceled, error
+    /// `foreign`: errSecAuthFailed, an item another signed build owns. Unlike `denied` (locked,
+    /// interaction not allowed), it won't become readable on its own.
+    case value(String), missing, denied, foreign, canceled, error
     var status: CredentialStatus {
         switch self {
         case .value: return .present
         case .missing: return .missing
-        case .denied: return .denied
+        case .denied, .foreign: return .denied
         case .canceled: return .canceled
         case .error: return .error
         }
@@ -98,12 +100,11 @@ public final class CredentialStore {
     public func migrate(_ value: String, scope: CredentialScope) throws {
         var target = backend, current = backend.read(scope, interactive: false)
         if let replacement {
-            // read() prefers the owned replacement, so migration checks against it too. An original whose
-            // attributes are visible but whose key is denied belongs to another build (a locked Keychain
-            // hides attributes too): move the key into the replacement, as Save does.
+            // read() prefers the owned replacement, so migration checks against it too. An original
+            // another build owns can't take the key: move it into the replacement, as Save does.
             let owned = replacement.read(scope, interactive: false)
             if case .value = owned { target = replacement; current = owned }
-            else if case .denied = current, backend.status(scope) == .present { target = replacement; current = owned }
+            else if case .foreign = current { target = replacement; current = owned }
         }
         switch current {
         case .value(let existing):
@@ -124,7 +125,7 @@ public final class CredentialStore {
     }
     public func replace(_ value: String, scope: CredentialScope) throws {
         guard !value.isEmpty else { return }
-        if let replacement, case .denied = backend.read(scope, interactive: true) {
+        if let replacement, case .foreign = backend.read(scope, interactive: true) {
             let added = replacement.add(value, scope: scope, interactive: true)
             let result = added == .duplicate ? replacement.update(value, scope: scope, interactive: true) : added
             guard case .success = result else { throw failure(result) }
@@ -213,8 +214,9 @@ public final class SecurityCredentialBackend: CredentialBackend {
         var q = query(scope, interactive: interactive)
         q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        let status = state(functions.copy(q as CFDictionary, &result))
-        switch status {
+        let code = functions.copy(q as CFDictionary, &result)
+        if code == errSecAuthFailed { return .foreign }
+        switch state(code) {
         case .present:
             guard let data = result as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty else { return .error }
             return .value(value)

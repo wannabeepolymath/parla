@@ -170,7 +170,7 @@ final class CredentialTests: XCTestCase {
     func testSaveOverUnreadableKeyUsesOwnedReplacementUntilOriginalIsReadable() throws {
         // A key left by a differently signed build: unreadable, and macOS refuses to delete it.
         let replacement = FakeCredentialBackend(), stuck = FakeCredentialBackend()
-        stuck.values[.anthropic] = "old"; stuck.readState = .denied; stuck.deleteResult = .error
+        stuck.values[.anthropic] = "old"; stuck.readState = .foreign; stuck.deleteResult = .error
         let credentials = CredentialStore(backend: stuck, replacement: replacement)
         try credentials.replace("new", scope: .anthropic)
         XCTAssertEqual(replacement.values[.anthropic], "new"); XCTAssertEqual(stuck.updates, 0)
@@ -189,7 +189,7 @@ final class CredentialTests: XCTestCase {
     func testMigrationOverUnreadableKeyMovesIntoOwnedReplacementAndStatusReportsIt() throws {
         let replacement = FakeCredentialBackend(), stuck = FakeCredentialBackend()
         let scope = try CredentialScope.compatible("https://HOST:443/v1/")
-        stuck.values[.anthropic] = "old"; stuck.values[scope] = "old"; stuck.readState = .denied; stuck.deleteResult = .error
+        stuck.values[.anthropic] = "old"; stuck.values[scope] = "old"; stuck.readState = .foreign; stuck.deleteResult = .error
         let credentials = CredentialStore(backend: stuck, replacement: replacement)
         var s = compatible("https://HOST:443/v1/")
         // Attributes exist, but the key can't be read: the footer must not claim it's stored.
@@ -210,9 +210,11 @@ final class CredentialTests: XCTestCase {
         let replacement = FakeCredentialBackend(), original = FakeCredentialBackend()
         let credentials = CredentialStore(backend: original, replacement: replacement)
         let store = SettingsStore(url: self.store.url, credentials: credentials)
-        // Locked/unavailable: attributes hidden too, so the key stays in settings.json.
-        original.values[.anthropic] = "kept"; original.readState = .denied; original.statusState = .denied
+        // Locked/interaction not allowed (attributes may stay visible): neither migration nor Save
+        // redirects, so the original isn't shadowed once it unlocks; the key stays in settings.json.
+        original.values[.anthropic] = "kept"; original.readState = .denied; original.updateResult = .denied
         try seed(); XCTAssertNotNil(store.migrateCredentials())
+        XCTAssertThrowsError(try credentials.replace("new", scope: .anthropic)) // update hits the same denial
         XCTAssertEqual(replacement.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
         // A different key in the owned replacement wins reads, so migration must refuse, not verify the original.
         original.readState = nil; original.statusState = nil; original.values = [:]
@@ -360,6 +362,9 @@ final class CredentialTests: XCTestCase {
         XCTAssertEqual(queries.last?[kSecReturnAttributes as String] as? Bool, true)
         XCTAssertNil(queries.last?[kSecReturnData as String])
         XCTAssertEqual((queries.last?[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed, true)
+        guard case .denied = adapter.read(.anthropic, interactive: false) else { return XCTFail() } // locked
+        copies = errSecAuthFailed // another build's item
+        guard case .foreign = adapter.read(.anthropic, interactive: false) else { return XCTFail() }
         copies = errSecSuccess
         guard case .value("fake") = adapter.read(.anthropic, interactive: true) else { return XCTFail() }
         guard case .duplicate = adapter.add("fake", scope: .anthropic, interactive: false) else { return XCTFail() }
