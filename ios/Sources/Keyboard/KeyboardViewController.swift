@@ -205,7 +205,9 @@ final class KeyboardViewController: UIInputViewController {
                 }
                 status.text = "Review your dictation"
                 let sameDocument = session.documentID == textDocumentProxy.documentIdentifier
-                detail.text = sameDocument ? "Check the text and cursor. Insert adds text at your current selection." : "You are in a different text field. Cancel and start dictation again here."
+                let hint = sameDocument ? "Check the text and cursor. Insert adds text at your current selection." : "You are in a different text field. Cancel and start dictation again here."
+                // A call/interruption warning or history-save warning must be seen before inserting partial text.
+                detail.text = session.error.map { "\($0) \(hint)" } ?? hint
                 transcript.text = session.result; transcript.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true; panel.addArrangedSubview(transcript)
                 addAction("Discard") { [weak self] in self?.discard() }
                 if sameDocument { addAction("Insert once") { [weak self] in self?.insertReviewed() } }

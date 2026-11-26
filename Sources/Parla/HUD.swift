@@ -395,7 +395,7 @@ final class HUD: @unchecked Sendable {
         case .rawFallback(let reason):
             dot.isHidden = true
             waveform.isHidden = true
-            label.stringValue = "✓ Pasted without cleanup (\(reason))"
+            label.stringValue = "⚠️ Pasted raw text: \(reason)"
             panel.orderFrontRegardless()
             scheduleHide()
         case .cancelled:

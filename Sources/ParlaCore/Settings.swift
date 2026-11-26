@@ -708,6 +708,7 @@ public final class SettingsStore {
             cached = nil; _migrationError = nil
         } catch {
             let message = (error as? CredentialFailure)?.description ?? "API keys still need to move to Keychain. Click Refresh in AI Cleanup."
+            if _migrationError != message { NSLog("Parla credential migration failed: %@", message) }
             _migrationError = message
             throw CredentialFailure(message)
         }
@@ -740,7 +741,7 @@ public final class SettingsStore {
             }
             let written = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
             try atomicWrite(written, url); observeSurroundingTextBytesLocked(written)
-            cached = nil
+            cached = nil; _migrationError = nil // a saved key supersedes the last failed migration
         }
     }
 

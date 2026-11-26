@@ -51,7 +51,7 @@ import ParlaCore
             guard let self else { return }
             // Keep what was already said: finish the take instead of discarding it.
             guard self.recording else { return self.cancel(reason: "Recording stopped because the microphone changed or another app interrupted it. Start again when ready.") }
-            let warning = "Recording stopped early because a call or another app took the microphone. What you said before that was kept."
+            let warning = "Recording stopped early because the microphone changed or a call or another app interrupted it. What you said before that was kept."
             self.stop(warning: warning)
             self.message = warning
         }

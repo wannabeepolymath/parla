@@ -42,6 +42,16 @@ extension AppDelegate: NSMenuDelegate {
             let local = NSMenuItem(title: "⚠️ " + status.message, action: #selector(openHub), keyEquivalent: "")
             local.target = self; menu.addItem(local)
         }
+        // Network cleanup that can't run (or keeps failing) stays visible here, not only in a 1 s HUD.
+        let cleanupSettings = hubModel.settings
+        let setupIssue = cleanupSettings.cleanupEnabled && !cleanupSettings.usesAppleIntelligence
+            // Only a selected-provider issue blocks cleanup (an env key wins); the migration error just explains it.
+            ? cleanupConfigurationIssue(settings: cleanupSettings, env: ProcessInfo.processInfo.environment, credentials: store.credentials).map { store.migrationError ?? $0 } : nil
+        let streak = cleanupFailures.flatMap { $0.count >= 3 ? "⚠️ AI cleanup failed \($0.count) times in a row: \($0.reason)" : nil }
+        if let title = setupIssue.map({ "⚠️ AI cleanup isn’t running: " + $0 }) ?? streak {
+            let item = NSMenuItem(title: title, action: #selector(openHub), keyEquivalent: "")
+            item.target = self; menu.addItem(item)
+        }
         Self.addScratchpadItem(to: menu, bindings: store.load().hotkeys,
                                formatter: hubModel.shortcutLabels.formatter, target: self)
         menu.addItem(.separator())

@@ -155,6 +155,10 @@ public struct Pipeline {
             logFailure(error)
             return (transcript, error.code == .timedOut
                     ? "cleanup timed out" : "cleanup network unavailable")
+        } catch let error as CredentialFailure {
+            // Key/provider setup, not a transient fault. The menu bar shows the full reason.
+            logFailure(error)
+            return (transcript, "check AI Cleanup")
         } catch {
             logFailure(error)
             return (transcript, "cleanup failed")

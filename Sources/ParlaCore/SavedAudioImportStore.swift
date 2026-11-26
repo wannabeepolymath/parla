@@ -485,8 +485,9 @@ public final class SavedAudioImportStore: @unchecked Sendable {
             guard issue == nil, storage.failure == nil else { throw Failure.unavailable }
             try initialize(budget)
             let date = try clock(now)
-            guard ledger!.jobs.count < 10, !ledger!.jobs.contains(where: { $0.candidate != nil || $0.retired != nil || $0.state == .staging || $0.state == .queued || $0.state == .running || $0.state == .deleting || $0.resourcesRetired }),
-                  issue == nil, !hasPendingStorage else { throw Failure.bounds }
+            guard ledger!.jobs.count < 10, issue == nil else { throw Failure.bounds }
+            guard !ledger!.jobs.contains(where: { $0.candidate != nil || $0.retired != nil || $0.state == .staging || $0.state == .queued || $0.state == .running || $0.state == .deleting || $0.resourcesRetired }) else { throw Failure.busy }
+            guard !hasPendingStorage else { throw Failure.bounds }
             let source = Payload(id: UUID(), hash: SavedAudioImportStorage.digest(stableData), bytes: Int64(stableData.count), member: nil, published: false, kind: facts.profile == .wavPCM ? .source : .pcmMOVSource)
             let job = Job(id: id, label: label, created: date, expires: date + 604_800, original: original, facts: facts, source: source, state: .staging, attempt: nil, accepted: nil, candidate: nil, retired: nil)
             if facts.profile == .qtPCM16kV1 {

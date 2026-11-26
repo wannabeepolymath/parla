@@ -385,6 +385,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var selectionDestinations: [Int: Inserter.Destination] = [:] // main only; token captured before async work
     var pendingInstruction: String?              // .transform
     var insertionFailure: String?
+    /// Consecutive identical cleanup fallbacks; a success (.done) clears it.
+    var cleanupFailures: (reason: String, count: Int)?
     /// Confirmed-prefix window for long dictations: written by stream(), consumed
     /// by the finish() queued right after it — the processTask chain serializes.
     var windowGeneration: Int?

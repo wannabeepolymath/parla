@@ -370,6 +370,7 @@ extension AppDelegate {
                 Inserter.typeBackspaces(erase, diagnostics: diagnostic)
                 Inserter.typeUnicode(append, diagnostics: diagnostic)
             }
+            if verifiedHUD == .done { cleanupFailures = nil } // cleanup replaced already-typed text
             hud.show(verifiedHUD)
             CorrectionWatcher.shared.arm(inserted: String(expect.dropLast(erase)) + append,
                                          dictionary: store.load().dictionary)
@@ -377,6 +378,9 @@ extension AppDelegate {
         // MARK: - UI
 
         case let .hud(state):
+            if case .rawFallback(let reason) = state {
+                cleanupFailures = (reason, cleanupFailures?.reason == reason ? cleanupFailures!.count + 1 : 1)
+            } else if state == .done { cleanupFailures = nil }
             if let failure = insertionFailure, state == .done || {
                 if case .rawFallback = state { return true }; return false
             }() {
