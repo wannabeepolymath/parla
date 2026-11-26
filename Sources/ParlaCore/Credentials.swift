@@ -54,12 +54,14 @@ public enum CredentialStatus: String, Equatable, Sendable {
 
 /// Never Codable or printed. Only deliberate request preparation consumes a value.
 public enum CredentialRead {
-    case value(String), missing, denied, canceled, error
+    /// `foreign`: errSecAuthFailed, an item another signed build owns. Unlike `denied` (locked,
+    /// interaction not allowed), it won't become readable on its own.
+    case value(String), missing, denied, foreign, canceled, error
     var status: CredentialStatus {
         switch self {
         case .value: return .present
         case .missing: return .missing
-        case .denied: return .denied
+        case .denied, .foreign: return .denied
         case .canceled: return .canceled
         case .error: return .error
         }
@@ -96,18 +98,28 @@ public final class CredentialStore {
 
     /// Migration is add-only. Duplicate races must be read back, never overwritten.
     public func migrate(_ value: String, scope: CredentialScope) throws {
-        switch backend.read(scope, interactive: false) {
+        var target = backend, current = backend.read(scope, interactive: false)
+        if let replacement {
+            // read() prefers the owned replacement, so migration checks against it too. An original
+            // another build owns can't take the key: move it into the replacement, as Save does.
+            // ponytail: errSecAuthFailed can also be a one-off auth glitch, so it must repeat; a glitch
+            // that repeats can still shadow the original (Save fixes it). Upgrade: ownership via ACL query.
+            let owned = replacement.read(scope, interactive: false)
+            if case .value = owned { target = replacement; current = owned }
+            else if case .foreign = current, case .foreign = backend.read(scope, interactive: false) { target = replacement; current = owned }
+        }
+        switch current {
         case .value(let existing):
             guard existing == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }
         case .missing:
-            let result = backend.add(value, scope: scope, interactive: false)
+            let result = target.add(value, scope: scope, interactive: false)
             switch result {
             case .success, .duplicate: break
             default: throw failure(result)
             }
         case let result: throw CredentialFailure(result.status.message + " Your API key hasn’t moved to Keychain yet.")
         }
-        switch backend.read(scope, interactive: false) {
+        switch target.read(scope, interactive: false) {
         case .value(let verified):
             guard verified == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }
         default: throw CredentialFailure("Couldn’t move your API key to Keychain. Click Refresh to try again.")
@@ -115,7 +127,7 @@ public final class CredentialStore {
     }
     public func replace(_ value: String, scope: CredentialScope) throws {
         guard !value.isEmpty else { return }
-        if let replacement, case .denied = backend.read(scope, interactive: true) {
+        if let replacement, case .foreign = backend.read(scope, interactive: true) {
             let added = replacement.add(value, scope: scope, interactive: true)
             let result = added == .duplicate ? replacement.update(value, scope: scope, interactive: true) : added
             guard case .success = result else { throw failure(result) }
@@ -204,8 +216,9 @@ public final class SecurityCredentialBackend: CredentialBackend {
         var q = query(scope, interactive: interactive)
         q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        let status = state(functions.copy(q as CFDictionary, &result))
-        switch status {
+        let code = functions.copy(q as CFDictionary, &result)
+        if code == errSecAuthFailed { return .foreign }
+        switch state(code) {
         case .present:
             guard let data = result as? Data, let value = String(data: data, encoding: .utf8), !value.isEmpty else { return .error }
             return .value(value)

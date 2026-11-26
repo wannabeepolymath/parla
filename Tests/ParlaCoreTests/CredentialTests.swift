@@ -170,7 +170,7 @@ final class CredentialTests: XCTestCase {
     func testSaveOverUnreadableKeyUsesOwnedReplacementUntilOriginalIsReadable() throws {
         // A key left by a differently signed build: unreadable, and macOS refuses to delete it.
         let replacement = FakeCredentialBackend(), stuck = FakeCredentialBackend()
-        stuck.values[.anthropic] = "old"; stuck.readState = .denied; stuck.deleteResult = .error
+        stuck.values[.anthropic] = "old"; stuck.readState = .foreign; stuck.deleteResult = .error
         let credentials = CredentialStore(backend: stuck, replacement: replacement)
         try credentials.replace("new", scope: .anthropic)
         XCTAssertEqual(replacement.values[.anthropic], "new"); XCTAssertEqual(stuck.updates, 0)
@@ -185,6 +185,49 @@ final class CredentialTests: XCTestCase {
         try credentials.remove(.anthropic)
         XCTAssertNil(stuck.values[.anthropic])
         guard case .missing = credentials.read(.anthropic, interactive: false) else { return XCTFail() }
+    }
+    func testMigrationOverUnreadableKeyMovesIntoOwnedReplacementAndStatusReportsIt() throws {
+        let replacement = FakeCredentialBackend(), stuck = FakeCredentialBackend()
+        let scope = try CredentialScope.compatible("https://HOST:443/v1/")
+        stuck.values[.anthropic] = "old"; stuck.values[scope] = "old"; stuck.readState = .foreign; stuck.deleteResult = .error
+        let credentials = CredentialStore(backend: stuck, replacement: replacement)
+        var s = compatible("https://HOST:443/v1/")
+        // Attributes exist, but the key can't be read: the footer must not claim it's stored.
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials, readsKey: true), CredentialStatus.denied.message)
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials), CredentialStatus.present.message) // view bodies: no secret read
+        XCTAssertEqual(stuck.reads, 1)
+        let store = SettingsStore(url: self.store.url, credentials: credentials)
+        try seed()
+        XCTAssertNil(store.migrateCredentials())
+        XCTAssertEqual(replacement.values[.anthropic], "ant-secret"); XCTAssertEqual(replacement.values[scope], "compat-secret")
+        XCTAssertEqual(stuck.adds, 0); XCTAssertEqual(stuck.updates, 0)
+        XCTAssertFalse(try persisted().contains("secret"))
+        s.cleanup.apiKey = nil
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials, readsKey: true), CredentialStatus.present.message)
+        guard case .value("compat-secret") = credentials.read(scope, interactive: false) else { return XCTFail() }
+    }
+    func testMigrationNeverRedirectsOnLockedKeychainAndRefusesConflictWithOwnedReplacement() throws {
+        let replacement = FakeCredentialBackend(), original = FakeCredentialBackend()
+        let credentials = CredentialStore(backend: original, replacement: replacement)
+        let store = SettingsStore(url: self.store.url, credentials: credentials)
+        // Locked/interaction not allowed (attributes may stay visible): neither migration nor Save
+        // redirects, so the original isn't shadowed once it unlocks; the key stays in settings.json.
+        original.values[.anthropic] = "kept"; original.readState = .denied; original.updateResult = .denied
+        try seed(); XCTAssertNotNil(store.migrateCredentials())
+        XCTAssertThrowsError(try credentials.replace("new", scope: .anthropic)) // update hits the same denial
+        XCTAssertEqual(replacement.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
+        // A one-off errSecAuthFailed (readable on the next try) doesn't redirect either.
+        original.readState = nil; original.values[.anthropic] = "different"
+        var first = true
+        original.onRead = { if first { first = false; original.readState = .foreign } else { original.readState = nil } }
+        XCTAssertNotNil(store.migrateCredentials()) // fails visibly; Refresh retries against the original
+        XCTAssertEqual(replacement.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
+        original.onRead = nil
+        // A different key in the owned replacement wins reads, so migration must refuse, not verify the original.
+        original.readState = nil; original.statusState = nil; original.values = [:]
+        replacement.values[.anthropic] = "chosen"
+        XCTAssertNotNil(store.migrateCredentials())
+        XCTAssertEqual(original.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
     }
     func testEnvironmentPriorityIsolationAndSkipsBackendIncludingMigrationInput() async throws {
         var s = compatible(); s.cleanup.apiKeyEnvVar = "COMPAT_KEY"; s.cleanup.apiKey = "legacy-not-yet-migrated"
@@ -326,6 +369,9 @@ final class CredentialTests: XCTestCase {
         XCTAssertEqual(queries.last?[kSecReturnAttributes as String] as? Bool, true)
         XCTAssertNil(queries.last?[kSecReturnData as String])
         XCTAssertEqual((queries.last?[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed, true)
+        guard case .denied = adapter.read(.anthropic, interactive: false) else { return XCTFail() } // locked
+        copies = errSecAuthFailed // another build's item
+        guard case .foreign = adapter.read(.anthropic, interactive: false) else { return XCTFail() }
         copies = errSecSuccess
         guard case .value("fake") = adapter.read(.anthropic, interactive: true) else { return XCTFail() }
         guard case .duplicate = adapter.add("fake", scope: .anthropic, interactive: false) else { return XCTFail() }
