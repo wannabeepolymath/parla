@@ -216,6 +216,13 @@ final class CredentialTests: XCTestCase {
         try seed(); XCTAssertNotNil(store.migrateCredentials())
         XCTAssertThrowsError(try credentials.replace("new", scope: .anthropic)) // update hits the same denial
         XCTAssertEqual(replacement.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
+        // A one-off errSecAuthFailed (readable on the next try) doesn't redirect either.
+        original.readState = nil; original.values[.anthropic] = "different"
+        var first = true
+        original.onRead = { if first { first = false; original.readState = .foreign } else { original.readState = nil } }
+        XCTAssertNotNil(store.migrateCredentials()) // fails visibly; Refresh retries against the original
+        XCTAssertEqual(replacement.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
+        original.onRead = nil
         // A different key in the owned replacement wins reads, so migration must refuse, not verify the original.
         original.readState = nil; original.statusState = nil; original.values = [:]
         replacement.values[.anthropic] = "chosen"

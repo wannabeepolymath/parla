@@ -102,9 +102,11 @@ public final class CredentialStore {
         if let replacement {
             // read() prefers the owned replacement, so migration checks against it too. An original
             // another build owns can't take the key: move it into the replacement, as Save does.
+            // ponytail: errSecAuthFailed can also be a one-off auth glitch, so it must repeat; a glitch
+            // that repeats can still shadow the original (Save fixes it). Upgrade: ownership via ACL query.
             let owned = replacement.read(scope, interactive: false)
             if case .value = owned { target = replacement; current = owned }
-            else if case .foreign = current { target = replacement; current = owned }
+            else if case .foreign = current, case .foreign = backend.read(scope, interactive: false) { target = replacement; current = owned }
         }
         switch current {
         case .value(let existing):
