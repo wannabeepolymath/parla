@@ -104,15 +104,16 @@ public func cleanupConfigurationIssue(settings: Settings, env: @autoclosure () -
     } catch { return "Check the cleanup service and base URL." }
 }
 
-public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore) -> String {
+/// `readsKey`: also try a non-interactive read, since another build's item has attributes but can't be
+/// read. Only at explicit refresh points (macOS Hub), never from a view body.
+public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> [String: String], credentials: @autoclosure () -> CredentialStore, readsKey: Bool = false) -> String {
     if settings.usesAppleIntelligence { return "Runs on this Mac. No API key needed." }
     if environmentKey(settings: settings, env: env()) != nil {
         return "Using the API key from an environment variable. It overrides the key saved here."
     }
     guard let scope = try? CredentialScope.selected(settings) else { return "Choose a cleanup service and base URL first." }
     let status = credentials().status(scope)
-    // Another build's item has attributes but can't be read; only a real (non-interactive) read tells.
-    return (status == .present ? credentials().read(scope, interactive: false).status : status).message
+    return (readsKey && status == .present ? credentials().read(scope, interactive: false).status : status).message
 }
 
 /// Warm requests carry no credentials, and cannot authorize a Keychain prompt.

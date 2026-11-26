@@ -96,9 +96,15 @@ public final class CredentialStore {
 
     /// Migration is add-only. Duplicate races must be read back, never overwritten.
     public func migrate(_ value: String, scope: CredentialScope) throws {
-        // An original this build can't read takes no key; move it into the owned replacement, as Save does.
         var target = backend, current = backend.read(scope, interactive: false)
-        if case .denied = current, let replacement { target = replacement; current = replacement.read(scope, interactive: false) }
+        if let replacement {
+            // read() prefers the owned replacement, so migration checks against it too. An original whose
+            // attributes are visible but whose key is denied belongs to another build (a locked Keychain
+            // hides attributes too): move the key into the replacement, as Save does.
+            let owned = replacement.read(scope, interactive: false)
+            if case .value = owned { target = replacement; current = owned }
+            else if case .denied = current, backend.status(scope) == .present { target = replacement; current = owned }
+        }
         switch current {
         case .value(let existing):
             guard existing == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }

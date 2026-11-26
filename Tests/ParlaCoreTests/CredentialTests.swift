@@ -193,7 +193,9 @@ final class CredentialTests: XCTestCase {
         let credentials = CredentialStore(backend: stuck, replacement: replacement)
         var s = compatible("https://HOST:443/v1/")
         // Attributes exist, but the key can't be read: the footer must not claim it's stored.
-        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials), CredentialStatus.denied.message)
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials, readsKey: true), CredentialStatus.denied.message)
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials), CredentialStatus.present.message) // view bodies: no secret read
+        XCTAssertEqual(stuck.reads, 1)
         let store = SettingsStore(url: self.store.url, credentials: credentials)
         try seed()
         XCTAssertNil(store.migrateCredentials())
@@ -201,9 +203,22 @@ final class CredentialTests: XCTestCase {
         XCTAssertEqual(stuck.adds, 0); XCTAssertEqual(stuck.updates, 0)
         XCTAssertFalse(try persisted().contains("secret"))
         s.cleanup.apiKey = nil
-        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials), CredentialStatus.present.message)
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials, readsKey: true), CredentialStatus.present.message)
         guard case .value("compat-secret") = credentials.read(scope, interactive: false) else { return XCTFail() }
-        // Without an owned replacement, denied still preserves the source (see testDeniedCanceledAndUnreadable…).
+    }
+    func testMigrationNeverRedirectsOnLockedKeychainAndRefusesConflictWithOwnedReplacement() throws {
+        let replacement = FakeCredentialBackend(), original = FakeCredentialBackend()
+        let credentials = CredentialStore(backend: original, replacement: replacement)
+        let store = SettingsStore(url: self.store.url, credentials: credentials)
+        // Locked/unavailable: attributes hidden too, so the key stays in settings.json.
+        original.values[.anthropic] = "kept"; original.readState = .denied; original.statusState = .denied
+        try seed(); XCTAssertNotNil(store.migrateCredentials())
+        XCTAssertEqual(replacement.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
+        // A different key in the owned replacement wins reads, so migration must refuse, not verify the original.
+        original.readState = nil; original.statusState = nil; original.values = [:]
+        replacement.values[.anthropic] = "chosen"
+        XCTAssertNotNil(store.migrateCredentials())
+        XCTAssertEqual(original.adds, 0); XCTAssertEqual(try Data(contentsOf: store.url), self.original)
     }
     func testEnvironmentPriorityIsolationAndSkipsBackendIncludingMigrationInput() async throws {
         var s = compatible(); s.cleanup.apiKeyEnvVar = "COMPAT_KEY"; s.cleanup.apiKey = "legacy-not-yet-migrated"

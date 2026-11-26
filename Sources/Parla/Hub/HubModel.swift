@@ -448,7 +448,7 @@ final class HubModel: ObservableObject {
     var credentialEnvironment: () -> [String: String] = { ProcessInfo.processInfo.environment }
 
     func refreshCredentialStatus() {
-        credentialStatus = cleanupCredentialSource(settings: settings, env: credentialEnvironment(), credentials: store.credentials)
+        credentialStatus = cleanupCredentialSource(settings: settings, env: credentialEnvironment(), credentials: store.credentials, readsKey: true)
         credentialIssue = cleanupConfigurationIssue(settings: settings, env: credentialEnvironment(), credentials: store.credentials)
     }
 
