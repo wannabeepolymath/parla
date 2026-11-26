@@ -243,6 +243,17 @@ extension SessionStorageTests {
             XCTAssertTrue(result?.error?.contains("Cleanup warning") == true)
         }
     }
+    func testExpiredTakeIsSavedAndFailsWithItsExplanation() throws {
+        // The background-expiration path: no text yet, the take is still saved, and the shared
+        // session ends failed with the note (not cancelled), so the keyboard can explain it.
+        let request = try store.request(destination: .keyboard)
+        try store.update(id: request.id, generation: request.generation) { $0.phase = .processing }
+        var saved = false
+        let result = try store.complete(request, final: "", failure: "iOS ended background processing", note: "Recording stopped early. iOS ended background processing", save: { saved = true }, retain: { _ in })
+        XCTAssertTrue(saved)
+        XCTAssertEqual(result?.phase, .failed); XCTAssertNil(result?.result)
+        XCTAssertEqual(try store.read()?.error, "Recording stopped early. iOS ended background processing")
+    }
     func testSharedWriteFailureRetainsLocalTextBeforeThrowing() throws {
         let request = try store.request(destination: .app)
         try store.update(id: request.id, generation: request.generation) { $0.phase = .processing }

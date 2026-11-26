@@ -178,8 +178,15 @@ extension SavedAudioImportStoreTests {
             _ = try store.saveResult(token,resultID:UUID(),bytes:Data("raw".utf8),observed:.init(observed:nil),now:Date(timeIntervalSince1970:1_000_000),authorized:{true})
         }
         let ids = store.rows().map(\.id)
-        XCTAssertEqual(ids.count,10); XCTAssertThrowsError(try input.admit(store)); XCTAssertEqual(store.rows().map(\.id),ids)
+        XCTAssertEqual(ids.count,10); XCTAssertThrowsError(try input.admit(store)) { XCTAssertEqual($0 as? SavedAudioImportStorage.Failure,.bounds) }; XCTAssertEqual(store.rows().map(\.id),ids)
         try store.close(); try fixture.closed()
+    }
+    func testInterruptedJobRefusesNextAdmissionAsBusyNotTooMany() throws {
+        let fixture = try SavedImportFixture(), input = try SavedFixtureInput(fixture), store = SavedAudioImportStore(storage:fixture.storage())
+        _ = try input.admit(store); try store.close() // left running, as after a crash
+        let reopened = SavedAudioImportStore(storage:fixture.storage()); _ = try reopened.bootstrap()
+        XCTAssertThrowsError(try input.admit(reopened)) { XCTAssertEqual($0 as? SavedAudioImportStorage.Failure,.busy) }
+        try reopened.close(); try fixture.closed()
     }
     func testPublicationFaultCutsNeverAcknowledgeOrModifyTheOriginal() throws {
         for boundary in [SavedAudioImportStorage.Boundary.create,.write,.fileSync,.rename,.directorySync,.verify,.hash,.freeSpace] {

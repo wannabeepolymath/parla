@@ -377,6 +377,9 @@ extension AppDelegate {
         // MARK: - UI
 
         case let .hud(state):
+            if case .rawFallback(let reason) = state {
+                cleanupFailures = (reason, cleanupFailures?.reason == reason ? cleanupFailures!.count + 1 : 1)
+            } else if state == .done { cleanupFailures = nil }
             if let failure = insertionFailure, state == .done || {
                 if case .rawFallback = state { return true }; return false
             }() {

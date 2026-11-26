@@ -6,12 +6,13 @@ import Foundation
 /// it makes no power-loss or hostile same-UID race guarantee.
 public final class SavedAudioImportStorage: @unchecked Sendable {
     public enum Failure: Error, Equatable {
-        case unavailable, changed, unknown, contended, bounds, clock, space, io, uncertain, revoked
+        case unavailable, changed, unknown, contended, bounds, busy, clock, space, io, uncertain, revoked
         public var message: String {
             switch self {
             case .contended: return "Saved files are in use. Try again in a moment."
             case .unknown: return "Saved files couldn’t be read. They haven’t been changed."
             case .bounds: return "Too many saved files. Delete one first."
+            case .busy: return "Another saved file is in progress or was interrupted. Finish or delete it first."
             case .clock: return "Saved files are unavailable because the system clock looks wrong."
             case .space: return "Not enough free space. Free up at least 512 MB."
             case .revoked: return "This is out of date. Try again."

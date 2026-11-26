@@ -94,6 +94,15 @@ final class VocabularyTests: XCTestCase {
         XCTAssertEqual(LiteralReplacement.apply([.init(source: "", replacement: "oops")], to: "same"), "same")
     }
 
+    func testCredentialFailureKeepsRawTextAndPointsToAICleanup() async {
+        let pipeline = Pipeline(transcribe: { _, _ in nil }, cleanup: { _, _ in
+            throw CredentialFailure("Your API key needs to move to Keychain. Open AI Cleanup and click Refresh.")
+        }, settings: { Settings() }, frontBundleID: { nil })
+        let result = await pipeline.clean(transcript: "meeting for 6 no no 7")
+        XCTAssertEqual(result.text, "meeting for 6 no no 7")
+        XCTAssertEqual(result.failure, "check AI Cleanup")
+    }
+
     func testPipelineAppliesOnceAfterSuccessAndFailureAndLocksSnippets() async {
         var settings = Settings()
         settings.replacements = [.init(source: "cat", replacement: "dog"), .init(source: "dog", replacement: "wolf")]
