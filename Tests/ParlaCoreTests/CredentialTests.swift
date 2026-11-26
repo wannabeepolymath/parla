@@ -186,6 +186,25 @@ final class CredentialTests: XCTestCase {
         XCTAssertNil(stuck.values[.anthropic])
         guard case .missing = credentials.read(.anthropic, interactive: false) else { return XCTFail() }
     }
+    func testMigrationOverUnreadableKeyMovesIntoOwnedReplacementAndStatusReportsIt() throws {
+        let replacement = FakeCredentialBackend(), stuck = FakeCredentialBackend()
+        let scope = try CredentialScope.compatible("https://HOST:443/v1/")
+        stuck.values[.anthropic] = "old"; stuck.values[scope] = "old"; stuck.readState = .denied; stuck.deleteResult = .error
+        let credentials = CredentialStore(backend: stuck, replacement: replacement)
+        var s = compatible("https://HOST:443/v1/")
+        // Attributes exist, but the key can't be read: the footer must not claim it's stored.
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials), CredentialStatus.denied.message)
+        let store = SettingsStore(url: self.store.url, credentials: credentials)
+        try seed()
+        XCTAssertNil(store.migrateCredentials())
+        XCTAssertEqual(replacement.values[.anthropic], "ant-secret"); XCTAssertEqual(replacement.values[scope], "compat-secret")
+        XCTAssertEqual(stuck.adds, 0); XCTAssertEqual(stuck.updates, 0)
+        XCTAssertFalse(try persisted().contains("secret"))
+        s.cleanup.apiKey = nil
+        XCTAssertEqual(cleanupCredentialSource(settings: s, env: [:], credentials: credentials), CredentialStatus.present.message)
+        guard case .value("compat-secret") = credentials.read(scope, interactive: false) else { return XCTFail() }
+        // Without an owned replacement, denied still preserves the source (see testDeniedCanceledAndUnreadable…).
+    }
     func testEnvironmentPriorityIsolationAndSkipsBackendIncludingMigrationInput() async throws {
         var s = compatible(); s.cleanup.apiKeyEnvVar = "COMPAT_KEY"; s.cleanup.apiKey = "legacy-not-yet-migrated"
         backend.readState = .denied; backend.statusState = .denied

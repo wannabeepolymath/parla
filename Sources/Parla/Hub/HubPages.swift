@@ -416,7 +416,7 @@ struct CleanupPage: View {
                 }
                 HubSection("Saved API keys", footer: "Moves API keys saved in settings.json into Keychain.") {
                     Button("Move keys to Keychain", action: model.retryCredentialMigration).padding(12)
-                    if let message = model.credentialMessage { Text(message).font(.caption) }
+                    if let message = model.credentialMessage { Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange) }
                 }
             } else if isAnthropic {
                 HubSection("Anthropic") {
@@ -456,7 +456,7 @@ struct CleanupPage: View {
                     Button("Remove", action: model.removeCredential)
                     Button("Refresh", action: model.retryCredentialMigration)
                 }
-                if let message = model.credentialMessage { Text(message).font(.caption).foregroundStyle(.secondary) }
+                if let message = model.credentialMessage { Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange) }
             }
 
             }

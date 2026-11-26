@@ -96,18 +96,21 @@ public final class CredentialStore {
 
     /// Migration is add-only. Duplicate races must be read back, never overwritten.
     public func migrate(_ value: String, scope: CredentialScope) throws {
-        switch backend.read(scope, interactive: false) {
+        // An original this build can't read takes no key; move it into the owned replacement, as Save does.
+        var target = backend, current = backend.read(scope, interactive: false)
+        if case .denied = current, let replacement { target = replacement; current = replacement.read(scope, interactive: false) }
+        switch current {
         case .value(let existing):
             guard existing == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }
         case .missing:
-            let result = backend.add(value, scope: scope, interactive: false)
+            let result = target.add(value, scope: scope, interactive: false)
             switch result {
             case .success, .duplicate: break
             default: throw failure(result)
             }
         case let result: throw CredentialFailure(result.status.message + " Your API key hasn’t moved to Keychain yet.")
         }
-        switch backend.read(scope, interactive: false) {
+        switch target.read(scope, interactive: false) {
         case .value(let verified):
             guard verified == value else { throw CredentialFailure("A different key is already in Keychain. Save your key again to replace it.") }
         default: throw CredentialFailure("Couldn’t move your API key to Keychain. Click Refresh to try again.")

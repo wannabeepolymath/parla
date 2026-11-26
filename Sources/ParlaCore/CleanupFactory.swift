@@ -110,7 +110,9 @@ public func cleanupCredentialSource(settings: Settings, env: @autoclosure () -> 
         return "Using the API key from an environment variable. It overrides the key saved here."
     }
     guard let scope = try? CredentialScope.selected(settings) else { return "Choose a cleanup service and base URL first." }
-    return credentials().status(scope).message
+    let status = credentials().status(scope)
+    // Another build's item has attributes but can't be read; only a real (non-interactive) read tells.
+    return (status == .present ? credentials().read(scope, interactive: false).status : status).message
 }
 
 /// Warm requests carry no credentials, and cannot authorize a Keychain prompt.
