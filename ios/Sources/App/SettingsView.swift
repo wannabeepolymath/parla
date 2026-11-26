@@ -277,7 +277,7 @@ enum ConsumerCopy {
             "Your API key needs to move to Keychain. Click Refresh or save the key again.": "Save your API key again to store it securely on this iPhone.",
             "Key stored in Keychain.": "API key saved securely on this iPhone.",
             "No key saved. Local servers may not need one.": "No API key saved. Your provider may require one.",
-            "Keychain access was denied. In Keychain Access, delete \"com.parla.provider-credentials.v1\", then add your key again.": "Parla could not access your saved API key. Unlock your iPhone and try again, or save the key again.",
+            "Keychain access was denied. Paste your key in AI Cleanup and click Save.": "Parla could not access your saved API key. Unlock your iPhone and try again, or save the key again.",
             "Keychain access was canceled. Try again.": "Access to your saved API key was cancelled. Try again.",
             "Enter a preset name (up to 120 characters).": "Enter a short preset name.",
             "Enter an instruction (it can’t be empty or very long).": "Describe how you want your words rewritten. Keep it brief.",

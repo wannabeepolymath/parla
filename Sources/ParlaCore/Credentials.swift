@@ -45,7 +45,7 @@ public enum CredentialStatus: String, Equatable, Sendable {
         switch self {
         case .present: return "Key stored in Keychain."
         case .missing: return "No key saved. Local servers may not need one."
-        case .denied: return "Keychain access was denied. In Keychain Access, delete \"com.parla.provider-credentials.v1\", then add your key again."
+        case .denied: return "Keychain access was denied. Paste your key in AI Cleanup and click Save."
         case .canceled: return "Keychain access was canceled. Try again."
         case .error: return "Couldn’t read the key. Try again or replace it."
         }
@@ -76,11 +76,23 @@ public protocol CredentialBackend {
 }
 
 public final class CredentialStore {
-    public static let shared = CredentialStore(backend: SecurityCredentialBackend())
+    public static let shared = CredentialStore(backend: SecurityCredentialBackend(),
+        replacement: SecurityCredentialBackend(service: "com.parla.provider-credentials.v1.replacement"))
     private let backend: CredentialBackend
-    public init(backend: CredentialBackend) { self.backend = backend }
-    public func status(_ scope: CredentialScope) -> CredentialStatus { backend.status(scope) }
-    public func read(_ scope: CredentialScope, interactive: Bool) -> CredentialRead { backend.read(scope, interactive: interactive) }
+    /// macOS lets only the build that created an item read, update or delete it (errSecAuthFailed /
+    /// errSecInvalidOwnerEdit, no dialog), so a key saved by a differently signed build is stuck.
+    /// An explicit Save then writes this second item, which this build owns; it wins while present.
+    private let replacement: CredentialBackend?
+    public init(backend: CredentialBackend, replacement: CredentialBackend? = nil) { self.backend = backend; self.replacement = replacement }
+    public func status(_ scope: CredentialScope) -> CredentialStatus {
+        let status = backend.status(scope)
+        guard status == .missing, let replacement else { return status }
+        return replacement.status(scope)
+    }
+    public func read(_ scope: CredentialScope, interactive: Bool) -> CredentialRead {
+        if let replacement, case .value(let key) = replacement.read(scope, interactive: interactive) { return .value(key) }
+        return backend.read(scope, interactive: interactive)
+    }
 
     /// Migration is add-only. Duplicate races must be read back, never overwritten.
     public func migrate(_ value: String, scope: CredentialScope) throws {
@@ -103,6 +115,15 @@ public final class CredentialStore {
     }
     public func replace(_ value: String, scope: CredentialScope) throws {
         guard !value.isEmpty else { return }
+        if let replacement, case .denied = backend.read(scope, interactive: true) {
+            let added = replacement.add(value, scope: scope, interactive: true)
+            let result = added == .duplicate ? replacement.update(value, scope: scope, interactive: true) : added
+            guard case .success = result else { throw failure(result) }
+            guard case .value(let verified) = replacement.read(scope, interactive: true), verified == value else {
+                throw CredentialFailure("Couldn’t save the key. Try again.")
+            }
+            return
+        }
         let result: CredentialMutation
         switch backend.status(scope) {
         case .missing:
@@ -115,8 +136,11 @@ public final class CredentialStore {
         guard case .value(let verified) = backend.read(scope, interactive: true), verified == value else {
             throw CredentialFailure("Couldn’t save the key. Try again.")
         }
+        // The original is readable again; a stale replacement must not keep winning reads.
+        if let result = replacement?.delete(scope), result != .success, result != .missing { throw failure(result) }
     }
     public func remove(_ scope: CredentialScope) throws {
+        if let result = replacement?.delete(scope), result != .success, result != .missing { throw failure(result) }
         switch backend.delete(scope) {
         case .success, .missing: return
         case let result: throw failure(result)
@@ -148,8 +172,8 @@ public final class SecurityCredentialBackend: CredentialBackend {
         public static let system = Functions(copy: SecItemCopyMatching, add: SecItemAdd,
                                              update: SecItemUpdate, delete: SecItemDelete)
     }
-    private let functions: Functions
-    public init(functions: Functions = .system) { self.functions = functions }
+    private let functions: Functions, service: String
+    public init(functions: Functions = .system, service: String = "com.parla.provider-credentials.v1") { self.functions = functions; self.service = service }
     /// LAContext/kSecUseAuthenticationUIFail do not stop the login-keychain
     /// "wants to access key" dialog (an item saved by a differently signed build).
     /// This process-wide switch does: such reads fail as .denied instead of prompting.
@@ -163,7 +187,7 @@ public final class SecurityCredentialBackend: CredentialBackend {
         Self.keychainUIDisabled
         let context = LAContext(); context.interactionNotAllowed = !interactive
         return [kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: "com.parla.provider-credentials.v1",
+                kSecAttrService as String: service,
                 kSecAttrAccount as String: scope.account,
                 kSecAttrSynchronizable as String: false,
                 kSecUseAuthenticationContext as String: context]
