@@ -38,6 +38,21 @@ internal object RecoveryVault {
     @Synchronized fun clear() { expiry?.cancel(); mutable.value = null }
     fun current(now: Long = System.currentTimeMillis()) = mutable.value?.takeIf { it.expiresAt > now }
 }
+/**
+ * Mac pendingHistory: rows whose history write failed, kept in memory until parla closes (newest 10).
+ * Retry only writes the kept row; it never recognizes, cleans or sends anything again.
+ */
+internal object PendingHistory {
+    const val MAX = 10
+    private val mutable = MutableStateFlow<List<HistoryEntry>>(emptyList())
+    val value = mutable.asStateFlow()
+    @Synchronized fun put(entry: HistoryEntry) { mutable.value = (listOf(entry) + mutable.value.filterNot { it.id == entry.id }).take(MAX) }
+    @Synchronized fun discard(id: String) { mutable.value = mutable.value.filterNot { it.id == id } }
+    @Synchronized fun retry(id: String, write: (HistoryEntry) -> Boolean): Boolean {
+        val entry = mutable.value.firstOrNull { it.id == id } ?: return false
+        return write(entry).also { if(it) discard(id) }
+    }
+}
 internal data class RetryProposal(val token: String, val source: HistoryEntry, val result: String, val summary: String)
 internal class HistoryRetry {
     private val owners = mutableMapOf<String,String>()

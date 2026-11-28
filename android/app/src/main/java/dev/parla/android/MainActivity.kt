@@ -127,6 +127,24 @@ private fun ParlaApp() {
             finally { retryBusy = false }
         }
     }
+    var segmented by remember { mutableStateOf<SegmentedRetry?>(null) }
+    fun reviewSegmented(source: HistoryEntry) {
+        try { segmented = SegmentedRetry(source, data); retrySource = null } catch(e: SegmentedFailure) { message(e.message.orEmpty()) }
+    }
+    fun startSegmented(review: SegmentedRetry) {
+        val token = retry.begin(review.source)
+        segmented = null; retryBusy = true
+        if(!review.deterministic) message("Cleaning up ${review.planned} sections…")
+        scope.launch {
+            try {
+                val out = review.run(store::readKey)
+                if(retry.valid(token,review.source,store.data.value.history)) proposal = RetryProposal(token,review.source,out.text,
+                    out.summary + (out.usage?.let { u -> if(u.input != null && u.output != null) " ${u.input} in / ${u.output} out tokens reported." else "" } ?: ""))
+            } catch(c: CancellationException) { throw c }
+            catch(e: SegmentedFailure) { message(e.message.orEmpty()) }
+            finally { retryBusy = false }
+        }
+    }
     // No on/off switch: once setup is done, arm the service whenever this activity is in the foreground.
     // The control itself appears only while a keyboard is open; notification "Stop parla" disarms until next open.
     val ready = data.settings.onboarded && store.accessibilityConsentGranted && microphone && overlay && accessibility
@@ -238,7 +256,7 @@ private fun ParlaApp() {
                 "Diagnostics" -> DiagnosticsScreen()
                 "History" -> HistoryScreen(data.history, onCopy = { copyPrivate(context, it); message("Copied to clipboard") },
                     onDelete = { id -> retry.invalidate(id); store.update { it.copy(history = it.history.filterNot { row -> row.id == id }) } },
-                    onRetry = { entry -> retrySource = entry }, message = ::message)
+                    onRetry = { entry -> retrySource = entry }, message = ::message, savePending = { savePendingEntry(store,it) })
                 "Scratchpad" -> ScratchpadScreen(onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
                 "Microphone test" -> MicrophoneTestScreen()
                 "Transcribe a file" -> AudioImportScreen(store, onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
@@ -283,9 +301,18 @@ private fun ParlaApp() {
     )
     retrySource?.let { source ->
         AlertDialog(onDismissRequest = { retrySource = null }, title = { Text("Retry original text") },
-            text = { Text("Rework the original text with your current settings. AI cleanup sends it to your chosen provider and may incur charges. Preview the result before saving. Nothing is inserted into another app.") },
+            text = { Column {
+                Text("Rework the original text with your current settings. AI cleanup sends it to your chosen provider and may incur charges. Preview the result before saving. Nothing is inserted into another app.")
+                TextButton(onClick = { reviewSegmented(source) }, enabled = !retryBusy) { Text("Clean up in sections…") }
+            } },
             confirmButton = { TextButton(onClick = { startRetry(source,false) }, enabled = !retryBusy) { Text("Clean up original") } },
             dismissButton = { Row { TextButton(onClick = { startRetry(source,true) }, enabled = !retryBusy && data.presets.any { it.id == data.settings.selectedPresetID }) { Text("Apply selected preset") }; TextButton(onClick = { retrySource = null }) { Text("Cancel") } } })
+    }
+    segmented?.let { review ->
+        AlertDialog(onDismissRequest = { segmented = null }, title = { Text("Clean up in sections") },
+            text = { Text(review.disclosure + " If any section fails, nothing is changed.") },
+            confirmButton = { TextButton(onClick = { startSegmented(review) }, enabled = !retryBusy) { Text("Start") } },
+            dismissButton = { TextButton(onClick = { segmented = null }) { Text("Cancel") } })
     }
     proposal?.let { p ->
         AlertDialog(onDismissRequest = { retry.invalidate(p.source.id); proposal = null }, title = { Text("Proposed text") },
@@ -293,6 +320,7 @@ private fun ParlaApp() {
             confirmButton = { TextButton(onClick = {
                 if(retry.valid(p.token,p.source,store.data.value.history)) {
                     if(store.update { it.copy(history = it.history.map { row -> if(row == p.source) row.copy(text = p.result,revision = row.revision+1,note = p.summary) else row }) }) { retry.invalidate(p.source.id); proposal = null; message("Proposed result saved") }
+                    else message("Not saved. Try Save again; nothing is sent again.")
                 } else { proposal = null; message("This entry changed or was deleted. Try again.") }
             }) { Text("Save to history") } },
             dismissButton = { Row { TextButton(onClick = { if(retry.valid(p.token,p.source,store.data.value.history)) { copyPrivate(context,p.result); message("Copied proposed text") } else message("This entry changed or was deleted") }) { Text("Copy") }; TextButton(onClick = { retry.invalidate(p.source.id); proposal = null }) { Text("Discard") } } })

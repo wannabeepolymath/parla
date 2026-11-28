@@ -46,14 +46,15 @@ data class AppProfile(val id: String = UUID.randomUUID().toString(), val name: S
         require(localModel.isEmpty() || ModelCatalog.all.any { it.id == localModel })
     }
 }
-/** app: target package (local only), model: speech model ID, latencyMs: recording end to text ready. Optional; empty/0 = unknown. */
-data class HistoryEntry(val id: String = UUID.randomUUID().toString(), val createdAt: Long = System.currentTimeMillis(), val raw: String, val text: String, val note: String = "", val durationMs: Long = 0, val revision: Long = 0, val app: String = "", val model: String = "", val latencyMs: Long = 0)
+/** app: target package (local only), model: speech model ID, latencyMs: recording end to text ready, cleanupModel/tokens: provider-reported usage. Optional; empty/0/null = unknown. */
+data class HistoryEntry(val id: String = UUID.randomUUID().toString(), val createdAt: Long = System.currentTimeMillis(), val raw: String, val text: String, val note: String = "", val durationMs: Long = 0, val revision: Long = 0, val app: String = "", val model: String = "", val latencyMs: Long = 0,
+    val cleanupModel: String = "", val inputTokens: Int? = null, val outputTokens: Int? = null)
 data class LocalData(val settings: Settings = Settings(), val dictionary: List<String> = emptyList(), val snippets: List<Snippet> = emptyList(), val history: List<HistoryEntry> = emptyList(), val replacements: List<LiteralReplacement> = emptyList(), val presets: List<TransformPreset> = emptyList(), val profiles: List<AppProfile> = emptyList()) {
     fun forApp(packageName: String?): LocalData {
         val p = profiles.firstOrNull { it.enabled && it.target == packageName } ?: return this
         return copy(settings = settings.copy(cleanupEnabled = when(p.cleanup) { "on" -> true; "off" -> false; else -> settings.cleanupEnabled }, style = p.style.ifEmpty { settings.style }, language = p.language.ifEmpty { settings.language }, localModel = p.localModel.ifEmpty { settings.localModel }, providers = if(p.cleanupModel.isEmpty()) settings.providers else settings.providers + (settings.provider to settings.active.copy(model = p.cleanupModel))), dictionary = p.vocabulary + dictionary)
     }
 }
-data class CleanupResult(val text: String, val warning: String? = null)
+data class CleanupResult(val text: String, val warning: String? = null, val usage: CleanupUsage? = null)
 enum class Phase { IDLE, RECORDING, PROCESSING, ERROR }
 data class DictationStatus(val phase: Phase = Phase.IDLE, val message: String = "Ready when you are", val level: Float = 0f)

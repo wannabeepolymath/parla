@@ -73,6 +73,23 @@ internal fun transportFailure(e: IOException): ApiFailure = when (e) {
     else -> ApiFailure("The connection to the provider failed. Try again.")
 }
 
+/** Mac CleanupUsageSink: response model (else the requested one) and reported tokens; null = not reported. */
+data class CleanupUsage(val model: String, val input: Int?, val output: Int?)
+internal data class Generated(val text: String, val usage: CleanupUsage)
+
+/**
+ * Anthropic `usage.input_tokens`/`output_tokens`, OpenAI-compatible `usage.prompt_tokens`/`completion_tokens`.
+ * ponytail: a malformed usage value is unknown, never a failed cleanup (Mac's decoder would reject the response).
+ */
+internal fun responseUsage(json: JSONObject, anthropic: Boolean, requested: String, key: String): CleanupUsage {
+    val usage = json.optJSONObject("usage")
+    fun tokens(name: String) = (usage?.opt(name) as? Number)?.takeIf { it is Int || it is Long }?.toLong()?.takeIf { it in 0..Int.MAX_VALUE }?.toInt()
+    val reported = (json.opt("model") as? String)?.takeIf { m -> m.isNotEmpty() && m.toByteArray().size <= 160 && m.none { it.isISOControl() } }
+    val model = (reported ?: requested).let { if(key.isEmpty()) it else it.replace(key, "[redacted]") }
+    return if(anthropic) CleanupUsage(model, tokens("input_tokens"), tokens("output_tokens"))
+        else CleanupUsage(model, tokens("prompt_tokens"), tokens("completion_tokens"))
+}
+
 /** Optional text-only transport. Model downloads have a separate unauthenticated client. */
 class ApiClient(client: OkHttpClient = OkHttpClient()) {
     // No silent retries: OkHttp would otherwise resend the transcript on 408 or a dropped connection.
@@ -85,15 +102,21 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
         transport.dns.lookup(hostname).also { if (it.isEmpty() || !it.all(::isPrivateAddress)) throw ApiFailure(PUBLIC_CLEARTEXT, ApiFailure.Kind.setup) } }).build()
 
     internal suspend fun generate(source: String, data: LocalData, category: AppCategory, singleLine: Boolean, instruction: String?,
-                                  endpoint: Endpoint, key: String, sendTimeoutMs: () -> Long = { TIMEOUT_MS }): String {
+                                  endpoint: Endpoint, key: String, sendTimeoutMs: () -> Long = { TIMEOUT_MS }): String =
+        generateWithUsage(source, data, category, singleLine, instruction, endpoint, key, sendTimeoutMs).text
+
+    internal suspend fun generateWithUsage(source: String, data: LocalData, category: AppCategory, singleLine: Boolean, instruction: String?,
+                                           endpoint: Endpoint, key: String, sendTimeoutMs: () -> Long = { TIMEOUT_MS }): Generated {
         requireKey(endpoint, key)
         val system = PromptBuilder.system(data, category, singleLine, instruction != null)
         val user = PromptBuilder.user(source, instruction)
         // Mac OpenAICompatClient: a blank custom model uses the server's first chat model.
         val model = endpoint.model.ifEmpty { if (endpoint.custom) listModels(endpoint, key).firstOrNull() ?: throw ApiFailure("The server listed no chat model. Enter a model ID in API connection.", ApiFailure.Kind.setup) else throw ApiFailure("Choose a text cleanup model in API connection.", ApiFailure.Kind.setup) }
         val json = complete(endpoint, model, key, system, user, if (endpoint.anthropic && instruction != null) 8192 else 4096, sendTimeoutMs)
+        // ponytail: usage rides only an accepted result; a truncated or refused reply's tokens are not recorded.
+        val usage = responseUsage(json, endpoint.anthropic, model, key)
         return try {
-            if (endpoint.anthropic) {
+            Generated(if (endpoint.anthropic) {
                 if (json.optString("stop_reason") in setOf("max_tokens", "model_context_window_exceeded", "refusal")) throw ApiFailure("Cleanup was truncated or refused.", ApiFailure.Kind.refused)
                 val blocks = json.getJSONArray("content")
                 (0 until blocks.length()).map { blocks.getJSONObject(it) }.filter { it.optString("type") == "text" }.joinToString("") { it.getString("text") }
@@ -106,7 +129,7 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
                     is JSONArray -> (0 until content.length()).joinToString("") { content.getJSONObject(it).optString("text") }
                     else -> throw ApiFailure("Cleanup returned no text", ApiFailure.Kind.malformed)
                 }
-            }
+            }, usage)
         } catch (e: org.json.JSONException) { throw MALFORMED }
     }
 
