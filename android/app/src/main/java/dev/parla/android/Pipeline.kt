@@ -84,9 +84,10 @@ class Pipeline(private val api: ApiClient = ApiClient(), private val clock: () -
         outputCheck(instruction.isNotBlank(), "No instruction was heard. Try again.")
         outputCheck(data.settings.cleanupEnabled, "Turn on AI cleanup in Output settings to change selected text.")
         val primary = data.settings.endpoint()
-        val result = api.generate(source, data, AppCategory.unknown, false, instruction, primary, keyFor(key, primary.scope)).trim()
+        val output = api.generateWithUsage(source, data, AppCategory.unknown, false, instruction, primary, keyFor(key, primary.scope))
+        val result = output.text.trim()
         outputCheck(result.isNotEmpty() && result.countCharacters() <= maxOf(2000, 6 * source.countCharacters()), "The provider returned no usable text.")
-        CleanupResult(result)
+        CleanupResult(result, usage = output.usage)
     } catch(c: CancellationException) { throw c }
     catch(e: Exception) { CleanupResult(source, (if(e is ApiFailure) e.message.orEmpty() else "Text change failed") + " · nothing changed") }
 

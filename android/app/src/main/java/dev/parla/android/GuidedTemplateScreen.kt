@@ -18,8 +18,11 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** Recognition inputs frozen when a form starts. Any saved change cancels the form (desktop GuidedTemplateOwner.Configuration). */
-internal data class TemplateConfig(val model: String, val language: String, val dictionary: List<String>)
+/**
+ * Recognition inputs frozen when a form starts. Any saved change cancels the form (desktop GuidedTemplateOwner.Configuration).
+ * [model] is the whole selected model, imported identity included, so a replaced import is a settings change.
+ */
+internal data class TemplateConfig(val model: SpeechModel, val language: String, val dictionary: List<String>)
 internal data class TemplateRun(val session: GuidedTemplateSession? = null, val config: TemplateConfig? = null, val recording: Boolean = false, val busy: Boolean = false, val message: String? = null)
 
 /**
@@ -120,7 +123,7 @@ internal class GuidedTemplateOwner(
         val run = value.value; val session = run.session ?: return; val completion = session.completion ?: return
         if(session.saved) return
         if(historyOff) { notice("Turn on text history in Privacy to save. You can still copy this text."); return }
-        val entry = HistoryEntry(completion.id.toString(),completion.date,completion.body,completion.body,"Voice template. Nothing inserted into an app.",model = run.config?.model.orEmpty())
+        val entry = HistoryEntry(completion.id.toString(),completion.date,completion.body,completion.body,"Voice template. Nothing inserted into an app.",model = run.config?.model?.id.orEmpty())
         if(write(entry)) value.value = value.value.copy(session = session.markSaved(completion.id),message = "Saved to history.")
         else notice("Couldn't save to history. Try again.")
     }
@@ -134,12 +137,15 @@ internal class GuidedTemplateOwner(
 
 private const val TAKE_LIMIT_MS = 30_000L
 
+/** The frozen model itself (catalog or imported), while its file is still installed. */
+internal fun TemplateConfig.installedModel(file: (SpeechModel) -> File): SpeechModel =
+    model.takeIf { file(it).isFile } ?: throw GuidedTemplateFailure("Select a downloaded speech model in Models.")
+
 /** One field: private WAV for at most 30 seconds, local Whisper with the frozen model/language/dictionary, then deleted. */
 internal suspend fun recordTemplateField(context: Context, config: TemplateConfig, stop: CompletableDeferred<Unit>): String {
     check(MicrophoneOwner.acquire(currentCoroutineContext().job)) { "Finish the current dictation or microphone test first." }
     val manager = ModelManager.get(context)
-    val model = ModelCatalog.all.firstOrNull { it.id == config.model }?.takeIf { manager.file(it).isFile }
-        ?: throw GuidedTemplateFailure("Select a downloaded speech model in Models.")
+    val model = config.installedModel(manager::file)
     val file = CaptureAudio.reserve(File(context.cacheDir,"audio"))
     try {
         var limited = false
@@ -167,7 +173,7 @@ internal suspend fun recordTemplateField(context: Context, config: TemplateConfi
             val doc = document?.getOrNull(); val d = store.data.value
             val manager = ModelManager.get(context); val model = manager.selected(d.settings)
             if(!store.ready || doc == null || model == null || !manager.file(model).isFile) null
-            else TemplateConfig(model.id,d.settings.language,d.dictionary) to doc
+            else TemplateConfig(model,d.settings.language,d.dictionary) to doc
         },take = { config,stop -> recordTemplateField(context,config,stop) })
     }
     val run by owner.state.collectAsState()
@@ -218,7 +224,7 @@ internal suspend fun recordTemplateField(context: Context, config: TemplateConfi
 @Composable private fun TemplateSession(state: GuidedTemplateSession, run: TemplateRun, owner: GuidedTemplateOwner, settings: Settings, onCopy: () -> Unit, onSave: () -> Unit) {
     val idle = !run.busy && !run.recording
     Text(state.definition.name,style = MaterialTheme.typography.titleLarge)
-    Text("Speech model: ${speechModelLabel(run.config?.model.orEmpty())} · Language: ${run.config?.language?.let { if(it == "auto") "auto-detect" else it }}",style = MaterialTheme.typography.bodySmall)
+    Text("Speech model: ${speechModelLabel(run.config?.model?.id.orEmpty())} · Language: ${run.config?.language?.let { if(it == "auto") "auto-detect" else it }}",style = MaterialTheme.typography.bodySmall)
     Text("${state.index+1} of ${state.definition.fields.size}: ${state.field.label} · ${if(state.field.required) "Required" else "Optional"}")
     val completion = state.completion; val preview = state.preview; val candidate = state.candidate
     when {

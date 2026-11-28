@@ -77,6 +77,16 @@ class OriginalCopyTest {
         owner.offer.value?.let { owner.copy(it.token) }
     }
 
+    @Test fun aSelectedTextChangeNeverOffersTheSelectionAsAnOriginal() = runBlocking {
+        owner.clear(); var wrote = false
+        DictationFlow(originals = owner).run(PendingOperation(),LocalData(Settings(outputMode = "raw")),AppCategory.unknown,false,0,
+            transcribe = { "the selected private text" },key = { error("no key") },save = { _,_ -> true },
+            deliver = { _,write -> wrote = write(); "Text inserted." },stage = { _,_ -> },
+            transform = { _,_ -> CleanupResult("Changed text.") })
+        RecoveryVault.clear()
+        assertTrue(wrote); assertNull(owner.offer.value)
+    }
+
     @Test fun dictationKeepsTheRawOriginalOnlyForAnOptedInDispatchedOrdinaryWrite() {
         assertEquals("um the raw words",dictate(Settings(outputMode = "raw")))
         assertEquals("um the raw words",dictate(Settings(outputMode = "raw",noHistory = true))) // independent of history

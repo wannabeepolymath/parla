@@ -10,7 +10,7 @@ class GuidedTemplateOwnerTest {
     private val a = GuidedTemplateField(key = "a",label = "Name")
     private val b = GuidedTemplateField(key = "b",label = "Notes",required = false)
     private val definition = GuidedTemplateDefinition(name = "Visit",body = "Name: {{a}}\nNotes: {{b}}",fields = listOf(a,b))
-    private var config = TemplateConfig("base.en","auto",listOf("Parla"))
+    private var config = TemplateConfig(ModelCatalog.all.first(),"auto",listOf("Parla"))
     private var document = GuidedTemplateDocument(listOf(definition))
     private var now = 0L
     /** Each take waits for Stop, then returns the next scripted result (or throws it). */
@@ -21,6 +21,18 @@ class GuidedTemplateOwnerTest {
         takes++
         try { stop.await(); results.removeFirst().getOrThrow() } finally { released++ }
     },date = { 42L })
+
+    @Test fun anImportedModelIsFrozenWithItsIdentityAndAReplacedImportCancelsTheForm() = runTest(UnconfinedTestDispatcher()) {
+        val imported = SpeechModel(SpeechModel.IMPORTED_ID,"Mine",1,"","11111111-1111-1111-1111-111111111111")
+        val installed = java.io.File.createTempFile("model",".bin").apply { deleteOnExit() }
+        config = config.copy(model = imported)
+        val owner = owner(); owner.begin(definition)
+        // Each take records with the frozen import itself, never a catalog lookup by id.
+        assertEquals(imported,owner.state.value.config!!.installedModel { m -> if(m == imported) installed else java.io.File("missing") })
+        config = config.copy(model = imported.copy(importID = "22222222-2222-2222-2222-222222222222")); owner.observe()
+        assertEquals("Form canceled because settings changed.",owner.state.value.message)
+        installed.delete()
+    }
 
     @Test fun recordAcceptSkipReviewFinishAndSaveOnce() = runTest(UnconfinedTestDispatcher()) {
         val owner = owner(); results += Result.success("Ada Lovelace")

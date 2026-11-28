@@ -30,7 +30,7 @@ class SelectionTransformTest {
                 snippets = listOf(Snippet(trigger = "ship", expansion = "bad")), replacements = listOf(LiteralReplacement("Friday", "bad")))
             server.enqueue(reply("  Ship it on Friday.  "))
             val result = Pipeline(ApiClient(OkHttpClient())).transform("ship it friday.", "make it formal", data) { "k" }
-            assertEquals(CleanupResult("Ship it on Friday."), result)
+            assertEquals(CleanupResult("Ship it on Friday.", usage = CleanupUsage("test-model", null, null)), result)
             val messages = JSONObject(server.takeRequest().body.readUtf8()).getJSONArray("messages")
             assertEquals(PromptBuilder.system(data, AppCategory.unknown, false, transforming = true), messages.getJSONObject(0).getString("content"))
             assertTrue(messages.getJSONObject(0).getString("content").startsWith("You transform text according to the user's explicit instruction."))
@@ -56,6 +56,29 @@ class SelectionTransformTest {
             server.enqueue(MockResponse().setResponseCode(500))
             assertTrue(pipeline.transform("text", "x", data) { "k" }.warning!!.endsWith("nothing changed"))
         }
+    }
+
+    @Test fun selectedTextChangeKeepsProviderUsage() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("""{"model":"m-2","choices":[{"finish_reason":"stop","message":{"content":"Ship it."}}],"usage":{"prompt_tokens":9,"completion_tokens":3}}"""))
+            val result = Pipeline(ApiClient(OkHttpClient())).transform("ship it", "make it formal", LocalData(compatible(server.url("/v1").toString()))) { "k" }
+            assertEquals(CleanupResult("Ship it.", usage = CleanupUsage("m-2", 9, 3)), result)
+        }
+    }
+
+    @Test fun failedChangeWhoseHistorySaveFailsIsKeptForStorageOnlyRetryButNeverForAPrivateField() = runBlocking {
+        PendingHistory.value.value.forEach { PendingHistory.discard(it.id) }
+        suspend fun change(noHistory: Boolean) = DictationFlow().run(PendingOperation(), LocalData(Settings(noHistory = noHistory)), AppCategory.unknown, false, 0,
+            transcribe = { "ship it friday." }, key = { error("no key") },
+            save = { _, _ -> check(!noHistory) { "private text must never reach history" }; false },
+            deliver = { _, _ -> fail("a failed change must not write"); "" }, stage = { _, _ -> },
+            transform = { source, _ -> CleanupResult(source, "Provider failed · nothing changed") })
+        val failed = change(noHistory = false)
+        assertEquals("Provider failed · nothing changed · History was not saved", failed.note)
+        assertEquals(listOf(failed.id), PendingHistory.value.value.map { it.id })
+        change(noHistory = true)
+        assertEquals(listOf(failed.id), PendingHistory.value.value.map { it.id })
+        PendingHistory.discard(failed.id)
     }
 
     @Test fun flowWritesTheChangeOnceAndAFailedChangeWritesNothing() = runBlocking {

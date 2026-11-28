@@ -46,9 +46,12 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
             active()
             if(transform != null && result.warning != null) {
                 val failed = HistoryEntry(raw = raw,text = raw,note = result.warning,durationMs = duration,app = app,model = frozen.settings.localModel,latencyMs = (clock()-begun)/1_000_000)
-                if(!frozen.settings.noHistory) save(failed,false)
-                advance(PendingOperation.Stage.finished,result.warning)
-                return failed
+                // Same storage-only retry as ordinary dictation. Private fields freeze noHistory, so never reach history.
+                val unsaved = !frozen.settings.noHistory && !save(failed,false)
+                if(unsaved) PendingHistory.put(failed)
+                val note = listOfNotNull(result.warning,if(unsaved) "History was not saved" else null).joinToString(" · ")
+                advance(PendingOperation.Stage.finished,note)
+                return failed.copy(note = note)
             }
             advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)
@@ -65,7 +68,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
             if(!saved) PendingHistory.put(entry)
             active()
             // Capture-time opt-in, like desktop permitsOriginalCopy: ordinary dictation only, not a preset transform.
-            val keepOriginal = frozen.settings.keepLastOriginal && frozen.settings.outputMode != "selectedPreset"
+            val keepOriginal = transform == null && frozen.settings.keepLastOriginal && frozen.settings.outputMode != "selectedPreset"
             var original: OriginalCopyOwner.Attempt? = null
             val insertion = timing.span(null,TimingStage.insertion,finish = { if(it == INSERTED) TimingOutcome.ok else TimingOutcome.unconfirmed }) { deliver(text) {
                 if(!operation.authorizeDispatch()) false else {

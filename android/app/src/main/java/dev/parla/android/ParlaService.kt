@@ -144,7 +144,7 @@ class ParlaService : Service() {
         val owner = ParlaAccessibilityService.instance ?: run { fail("Enable parla text insertion in accessibility settings, then return to your text field."); return }
         val anchor = capture(owner, selected = true) ?: return
         val effective = store.data.value.forApp(anchor.snapshot.packageName)
-        val frozen = if (anchor.privateEditor) effective.copy(settings = effective.settings.copy(noHistory = true)) else effective
+        val frozen = if (anchor.privateEditor) effective.copy(settings = effective.settings.copy(noHistory = true, keepLastOriginal = false)) else effective
         val instruction = runCatching { Pipeline().selectedIntent(frozen) }.getOrElse {
             owner.release(anchor); fail(it.message ?: "Choose a saved preset in Output settings."); return
         }
