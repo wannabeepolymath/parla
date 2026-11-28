@@ -21,6 +21,10 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
         /** Live saved data: enables reviewed backup cleanup for this ordinary dictation. */
         failover: kotlinx.coroutines.flow.StateFlow<LocalData>? = null,
         app: String = "",
+        /** Reviewed nearby text for this capture; its result is for insertion only. */
+        nearby: NearbyContext? = null,
+        /** Selected-text change of the recognized source. A failed change writes nothing. */
+        transform: (suspend (String, (String) -> String) -> CleanupResult)? = null,
     ): HistoryEntry {
         val begun = clock()
         suspend fun active() { currentCoroutineContext().ensureActive(); if(operation.revoked) throw CancellationException("Operation revoked") }
@@ -36,16 +40,26 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
             val result = timing.span(TimingStage.cleanup_start,TimingStage.cleanup_end,
                 provider = { if(networked) ProviderCategory.of(frozen.settings.provider) else ProviderCategory.local },
                 finish = { if(it.warning != null) TimingOutcome.fallback else TimingOutcome.ok }) {
-                pipeline.clean(raw,frozen,category,singleLine,failover = failover) { scope -> networked = true; key(scope) }
+                val networkKey = { scope: String -> networked = true; key(scope) }
+                transform?.invoke(raw,networkKey) ?: pipeline.clean(raw,frozen,category,singleLine,failover = failover,nearby = nearby,key = networkKey)
             }
-            active(); advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
+            active()
+            if(transform != null && result.warning != null) {
+                val failed = HistoryEntry(raw = raw,text = raw,note = result.warning,durationMs = duration,app = app,model = frozen.settings.localModel,latencyMs = (clock()-begun)/1_000_000)
+                if(!frozen.settings.noHistory) save(failed,false)
+                advance(PendingOperation.Stage.finished,result.warning)
+                return failed
+            }
+            advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)
+            // Mac raw-history/no-retrieval: a result shaped by nearby text is never kept, only inserted.
+            val kept = if(result.contextual) raw else text
             // Persist a conservative outcome first: later disk failures must never leave a durable no-write claim.
-            val entry = HistoryEntry(raw = raw,text = text,note = listOfNotNull(result.warning,"Text insertion is unconfirmed. Check the field before pasting.").joinToString(" · "),durationMs = duration,
+            val entry = HistoryEntry(raw = raw,text = kept,note = listOfNotNull(result.warning,"Text insertion is unconfirmed. Check the field before pasting.").joinToString(" · "),durationMs = duration,
                 app = app,model = frozen.settings.localModel,latencyMs = (clock()-begun)/1_000_000,
                 cleanupModel = result.usage?.model.orEmpty(),inputTokens = result.usage?.input,outputTokens = result.usage?.output)
             prepared = entry; operation.prepared = entry
-            val retained = RecoveryVault.retain(operation.id,raw,text,"Text ready. Nothing inserted yet.")
+            val retained = RecoveryVault.retain(operation.id,raw,kept,"Text ready. Nothing inserted yet.")
             saved = frozen.settings.noHistory || save(entry,false)
             // Mac pendingHistory: an unsaved row stays in memory for an explicit, storage-only retry.
             if(!saved) PendingHistory.put(entry)

@@ -7,6 +7,9 @@ import android.os.Looper
 import android.view.*
 import kotlin.math.abs
 
+/** Idle shortcuts beside the control: selected-text changes, and guarded undo after a verified dictation. */
+enum class BubbleAction(val label: String) { COMMAND("Command"), PRESET("Preset"), UNDO("Undo"), ORIGINAL("Original") }
+
 /** A non-focusable control leaves the originating editor and keyboard focused. */
 class BubbleWindow(
     private val context: Context,
@@ -14,7 +17,9 @@ class BubbleWindow(
     private val onHold: () -> Unit,
     private val onRelease: () -> Unit,
     private val onCancel: () -> Unit,
+    private val onAction: (BubbleAction) -> Unit,
 ) {
+    private var actions = emptyList<BubbleAction>()
     private val wm = context.getSystemService(WindowManager::class.java)
     private val density = context.resources.displayMetrics.density
     private val handler = Handler(Looper.getMainLooper())
@@ -46,12 +51,24 @@ class BubbleWindow(
         view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         view.isClickable = true
         view.setOnClickListener { onTap() }
+        // TalkBack can't target drawn segments, so each shortcut is also a named accessibility action.
+        view.accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                if (idle()) actions.forEach { info.addAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(ACTION_BASE + it.ordinal, it.label)) }
+            }
+            override fun performAccessibilityAction(host: View, action: Int, args: android.os.Bundle?): Boolean {
+                val chosen = actions.firstOrNull { ACTION_BASE + it.ordinal == action }
+                if (chosen != null && idle()) { onAction(chosen); return true }
+                return super.performAccessibilityAction(host, action, args)
+            }
+        }
         view.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.rawX; downY = event.rawY; originX = params.x; originY = params.y
                     dragging = false; holding = false
-                    if (state.phase == Phase.IDLE || state.phase == Phase.ERROR) handler.postDelayed(hold, 350)
+                    if (idle() && event.x < dp(56f * scale)) handler.postDelayed(hold, 350)
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (!holding && (abs(event.rawX - downX) > dp(10f) || abs(event.rawY - downY) > dp(10f))) {
@@ -69,6 +86,7 @@ class BubbleWindow(
                         Store.get(context).update { it.copy(settings = it.settings.copy(bubbleX = params.x, bubbleY = params.y, bubbleDocked = false)) }
                     }
                     else if (holding) onRelease()
+                    else if (idle() && event.x >= dp(56f * scale)) actionAt(event.x)?.let(onAction)
                     else if ((state.phase == Phase.RECORDING || state.phase == Phase.PROCESSING) && event.x < dp(56f * scale)) onCancel()
                     else if (state.phase != Phase.PROCESSING) { holdMode = false; view.performClick() }
                     holding = false
@@ -90,6 +108,15 @@ class BubbleWindow(
             runCatching { wm.removeView(view) }; shown = false
         }
     }
+    fun setActions(next: List<BubbleAction>) {
+        if (next == actions) return
+        actions = next; updateSize(); applyPlacement(); view.invalidate()
+    }
+    private fun idle() = state.phase == Phase.IDLE || state.phase == Phase.ERROR
+    private fun actionAt(x: Float): BubbleAction? {
+        val index = ((x / (density * scale) - 62f) / ACTION_STEP).toInt()
+        return actions.getOrNull(index).takeIf { x / (density * scale) >= 62f }
+    }
     fun configure(settings: Settings) {
         requestedScale = settings.bubbleSize.coerceIn(.7f, 1.5f)
         docked = settings.bubbleDocked
@@ -105,7 +132,7 @@ class BubbleWindow(
     fun close() { setVisible(false); handler.removeCallbacksAndMessages(null) }
     private fun updateSize() {
         val active = state.phase == Phase.RECORDING || state.phase == Phase.PROCESSING
-        val width = if (active) { if (holdMode) 160f else 230f } else 56f
+        val width = if (active) { if (holdMode) 160f else 230f } else 56f + actions.size * ACTION_STEP
         scale = minOf(requestedScale, safeArea().width.toFloat() / dp(width).coerceAtLeast(1), safeArea().height.toFloat() / dp(56f).coerceAtLeast(1))
         params.width = dp(width * scale).coerceAtLeast(1)
         params.height = dp(56f * scale)
@@ -125,6 +152,10 @@ class BubbleWindow(
         if (shown) wm.updateViewLayout(view, params)
     }
     private fun dp(value: Float) = (value * density).toInt()
+    private companion object {
+        const val ACTION_STEP = 90f // 84dp segment + 6dp gap
+        const val ACTION_BASE = 0x7f0a0100 // Custom accessibility action ids; any value outside the standard range.
+    }
 
     private inner class Pill(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -147,6 +178,13 @@ class BubbleWindow(
             if (!active) {
                 canvas.drawRoundRect(0f, 0f, h, h, 16f * unit, 16f * unit, paint)
                 icon(canvas, if (state.phase == Phase.ERROR) R.drawable.ic_retry_bubble else R.drawable.ic_parla_mark, 14f * unit, 14f * unit, 28f * unit)
+                actions.forEachIndexed { i, action ->
+                    val left = (62f + i * ACTION_STEP) * unit
+                    paint.color = Color.rgb(247, 235, 255)
+                    canvas.drawRoundRect(left, 0f, left + (ACTION_STEP - 6f) * unit, h, 16f * unit, 16f * unit, paint)
+                    paint.color = Color.rgb(26, 26, 26); paint.textSize = 14f * unit; paint.textAlign = Paint.Align.CENTER
+                    canvas.drawText(action.label, left + (ACTION_STEP - 6f) * unit / 2f, h / 2f - (paint.ascent() + paint.descent()) / 2f, paint)
+                }
                 return
             }
             val ptt = holdMode

@@ -219,7 +219,7 @@ private fun ParlaApp() {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             if (setup) {
-                SetupScreen(microphone, overlay, accessibility && data.settings.accessibilityConsentGranted, notifications,
+                SetupScreen(microphone, overlay, accessibility && data.settings.accessibilityConsentCurrent(), notifications,
                     recoveryEnabled = data.settings.recoveryAudioEnabled,
                     onRecovery = { enabled -> store.update { it.copy(settings = it.settings.copy(recoveryAudioEnabled = enabled)) } },
                     onMic = { permissions.launch(arrayOf(Manifest.permission.RECORD_AUDIO)) },
@@ -287,8 +287,11 @@ private fun ParlaApp() {
                 "parla uses Android’s Accessibility service to insert dictated words into the text field where you started.\n\n" +
                     "It reads that field’s text and cursor or selection to place your words safely. It also checks the app and field type. Password fields and fields marked as sensitive are skipped.\n\n" +
                     "It checks whether your keyboard is open and where it is on screen, so the voice control appears above your keyboard whenever you're typing.\n\n" +
-                    "parla does not take screenshots, and it doesn't use or keep text from other fields or the rest of your screen. The field’s text and cursor or selection stay on your phone and are not shared.\n\n" +
+                    "For up to 10 minutes after inserting, parla keeps that field’s text in memory so you can undo or restore your original words. For one minute it also watches whether you correct a word it wrote, and may suggest adding the correction to your dictionary. Suggestions stay on your phone until you add or dismiss them. Private (incognito) fields are never watched.\n\n" +
+                    "parla does not take screenshots, and it doesn't use or keep text from other fields or the rest of your screen. The field’s text and cursor or selection stay on your phone and are not shared, except as described below.\n\n" +
                     "If you enable AI cleanup, your chosen provider may also receive the type of app (such as chat or email) and whether the field is single-line, to format your dictated words.\n\n" +
+                    "If you tap Command or Preset on text you’ve selected, that selected text is sent to your chosen provider to be changed.\n\n" +
+                    "Nearby text is off. Only if you turn it on for an app in Profiles, after reviewing what’s sent, does parla send about 256 characters before the cursor with each dictation in that app to your provider.\n\n" +
                     "You can turn this service off at any time in Android’s Accessibility settings.",
                 modifier = Modifier.verticalScroll(rememberScrollState()), style = BodyStyle,
             )
@@ -456,7 +459,7 @@ private fun HistoryCard(entry: HistoryEntry, onCopy: (String) -> Unit, onDelete:
 }
 
 @Composable
-private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Unit) {
+private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Boolean) {
     var edit by remember { mutableStateOf<String?>(null) }
     var value by remember { mutableStateOf("") }
     var dialog by remember { mutableStateOf(false) }
@@ -466,6 +469,7 @@ private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Un
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             ListSearch(search) { search = it }
+            CorrectionProposalsSection(words) { onChange(words + it) }
             Text("Add names and words you use often. Words at the top have priority; some later words may be skipped.",Modifier.padding(horizontal = 16.dp),fontSize = 12.sp,color = Muted)
             if (filtered.isEmpty()) CenteredListMessage(if (words.isEmpty()) "Your dictionary words show up here." else "No words match your search")
             else LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp)) {
@@ -707,7 +711,7 @@ private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onCle
         var days by remember(data.settings.recoveryAudioDays) { mutableStateOf(data.settings.recoveryAudioDays.toString()) }
         OutlinedTextField(days,{ days = it.filter(Char::isDigit).take(2) },label = { Text("Keep recordings for (1–30 days)") })
         Button(onClick = { days.toIntOrNull()?.takeIf { it in 1..30 }?.let { onSettings(data.settings.copy(recoveryAudioDays = it)) } },enabled = days.toIntOrNull() in 1..30) { Text("Save audio retention") }
-        Text("Text already in your editor and app identities stay on this device. AI cleanup sends your transcript, vocabulary and snippets to your chosen provider, which has its own retention policy.",fontSize = 13.sp)
+        Text("App names and text already in your fields stay on this device, with two exceptions you choose: text you select is sent to your AI provider when you tap Command or Preset, and about 256 characters before the cursor are sent with each dictation in apps where you turn on nearby text. AI cleanup sends your transcript, vocabulary and snippets to your chosen provider, which has its own retention policy.",fontSize = 13.sp)
         OutlinedButton(onClick = { clear = true }, enabled = data.history.isNotEmpty(), modifier = Modifier.fillMaxWidth()) { Text("Clear saved history (${data.history.size})") }
         Text("Audio stays on this device and is never uploaded or backed up. With recovery on, failed or interrupted recordings stay until they expire or you delete them in Recovery audio. Successful, canceled and private recordings are removed. Limits: ${WavInput.MAX_SECONDS/60} minutes per recording, 134 MB or 128 files total. Turning this off stops saving new recordings; existing ones are kept until expiry or deletion. Text history and audio are managed separately.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
     }

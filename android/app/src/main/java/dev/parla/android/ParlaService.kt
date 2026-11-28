@@ -71,9 +71,18 @@ class ParlaService : Service() {
             val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
                 (if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)
             startForeground(NOTIFICATION, notification(), types)
-            bubble = BubbleWindow(this, ::toggle, ::beginRecording, ::stopRecording, ::cancelSession)
+            bubble = BubbleWindow(this, ::toggle, { beginRecording() }, ::stopRecording, ::cancelSession, ::action)
             mutableArmed.value = true
             scope.launch { store.data.collect { bubble?.configure(it.settings) } }
+            scope.launch {
+                combine(ParlaAccessibilityService.editActions, store.data, status) { edits, data, state ->
+                    if (state.phase == Phase.RECORDING || state.phase == Phase.PROCESSING) emptyList() else listOfNotNull(
+                        BubbleAction.COMMAND.takeIf { edits.selection },
+                        BubbleAction.PRESET.takeIf { edits.selection && data.presets.any { it.id == data.settings.selectedPresetID } },
+                        BubbleAction.UNDO.takeIf { edits.undo },
+                        BubbleAction.ORIGINAL.takeIf { edits.restore })
+                }.collect { bubble?.setActions(it) }
+            }
             scope.launch {
                 // Armed is service readiness; attached is whether the control is on screen right now.
                 combine(ParlaAccessibilityService.keyboardBounds, ParlaAccessibilityService.connected, ::Pair).collect { (keyboard, connected) ->
@@ -103,7 +112,75 @@ class ParlaService : Service() {
         }
     }
 
-    private fun beginRecording() {
+    private fun action(action: BubbleAction) {
+        when (action) {
+            BubbleAction.COMMAND -> beginRecording(command = true)
+            BubbleAction.PRESET -> runPreset()
+            BubbleAction.UNDO, BubbleAction.ORIGINAL -> {
+                if (!requireAccessibilityConsent() || session?.isCompleted == false) return
+                val owner = ParlaAccessibilityService.instance ?: return
+                scope.launch {
+                    val outcome = owner.edit(if (action == BubbleAction.UNDO) GuardedEdits.Action.undo else GuardedEdits.Action.restoreOriginal)
+                    mutableStatus.value = DictationStatus(Phase.IDLE, outcome)
+                }
+            }
+        }
+    }
+
+    /** The anchor for a capture, or null after reporting why. Selected-text changes need a non-empty selection. */
+    private fun capture(owner: ParlaAccessibilityService, selected: Boolean): EditorAnchor? {
+        val anchor = owner.captureAnchor({ pkg -> !selected && NearbyText.granted(store.data.value, pkg) }, selected) { cancelSession() }
+        if (anchor == null) fail(if (selected) "Select text in a non-sensitive field, keep your keyboard open, then try again."
+            else "Tap a non-sensitive text field, keep your keyboard open, then try again.")
+        return anchor
+    }
+
+    /** Mac runSelectedPreset: the selected preset's exact intent applied to the frozen selection, no microphone. */
+    private fun runPreset() {
+        if (!requireAccessibilityConsent()) return
+        if (session?.isCompleted == false || stopping) return
+        if (!store.ready) { fail("Reload or repair local data in Settings → Data recovery."); openApp("Data recovery"); return }
+        val owner = ParlaAccessibilityService.instance ?: run { fail("Enable parla text insertion in accessibility settings, then return to your text field."); return }
+        val anchor = capture(owner, selected = true) ?: return
+        val effective = store.data.value.forApp(anchor.snapshot.packageName)
+        val frozen = if (anchor.privateEditor) effective.copy(settings = effective.settings.copy(noHistory = true)) else effective
+        val instruction = runCatching { Pipeline().selectedIntent(frozen) }.getOrElse {
+            owner.release(anchor); fail(it.message ?: "Choose a saved preset in Output settings."); return
+        }
+        val selection = anchor.snapshot.text.substring(minOf(anchor.snapshot.selectionStart, anchor.snapshot.selectionEnd), maxOf(anchor.snapshot.selectionStart, anchor.snapshot.selectionEnd))
+        val op = PendingOperation(); operation = op; anchorOwner = owner; capturedAnchor = anchor
+        mutableStatus.value = DictationStatus(Phase.PROCESSING, "Changing selected text…")
+        session = scope.launch {
+            try {
+                op.advance(PendingOperation.Stage.recognizing)
+                transformFlow(op, owner, anchor, frozen, selection, 0) { instruction }
+            } catch (cancelled: CancellationException) { throw cancelled
+            } catch (error: Exception) { if (!op.revoked) fail(error.message?.take(250) ?: "Couldn’t change the selected text.")
+            } finally {
+                owner.release(anchor)
+                if (operation === op) { operation = null; capturedAnchor = null; anchorOwner = null }
+            }
+        }
+    }
+
+    private suspend fun transformFlow(op: PendingOperation, owner: ParlaAccessibilityService, anchor: EditorAnchor, frozen: LocalData,
+                                      selection: String, duration: Long, instruction: suspend () -> String) {
+        var spoken = ""
+        DictationFlow().run(op, frozen, TextRules.category(anchor.snapshot.packageName), anchor.snapshot.inputType and 0x20000 == 0, duration,
+            transcribe = { spoken = instruction(); selection },
+            key = store::readKey, save = ::saveHistory,
+            deliver = { text, authorize -> owner.insert(anchor, text, authorize, learn = frozen.dictionary.takeUnless { anchor.privateEditor }) },
+            stage = { stage, message -> if (!op.revoked) mutableStatus.value = DictationStatus(if (stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING, message) },
+            app = anchor.snapshot.packageName,
+            transform = { source, key -> Pipeline().transform(source, spoken, frozen, key) })
+    }
+
+    private fun saveHistory(entry: HistoryEntry, existing: Boolean) = store.update { local ->
+        if (existing) local.copy(history = local.history.map { if (it.id == entry.id) entry else it })
+        else if (local.settings.noHistory) local else local.copy(history = listOf(entry) + local.history)
+    }
+
+    private fun beginRecording(command: Boolean = false) {
         if (!requireAccessibilityConsent()) return
         if (session?.isCompleted == false || stopping) return
         val snapshot = store.data.value
@@ -116,8 +193,7 @@ class ParlaService : Service() {
         if (owner == null) {
             fail("Enable parla text insertion in accessibility settings, then return to your text field."); return
         }
-        val anchor = owner.captureAnchor(false) { cancelSession() }
-        if (anchor == null) { fail("Tap a non-sensitive text field, keep your keyboard open, then try again."); return }
+        val anchor = capture(owner, command) ?: return
         anchorOwner = owner
         capturedAnchor = anchor
         val effective = snapshot.forApp(anchor.snapshot.packageName)
@@ -139,7 +215,7 @@ class ParlaService : Service() {
         val capture = WavRecorder(this)
         recorder = capture
         startedAt = SystemClock.elapsedRealtime()
-        mutableStatus.value = DictationStatus(Phase.RECORDING, "Listening · tap to finish")
+        mutableStatus.value = DictationStatus(Phase.RECORDING, if (command) "Say how to change the selected text · tap to finish" else "Listening · tap to finish")
         val entered = java.util.concurrent.atomic.AtomicBoolean(false)
         val timing = TimingSession()
         session = scope.launch {
@@ -156,22 +232,34 @@ class ParlaService : Service() {
                     }
                 }
                 ensureActive()
-                recovery.prepare(file,anchor.privateEditor) { op.revoked }
+                // A spoken command is an instruction, not dictation: its audio is never kept for recovery.
+                recovery.prepare(file,anchor.privateEditor || command) { op.revoked }
                 ensureActive()
                 val category = TextRules.category(anchor.snapshot.packageName)
                 val singleLine = anchor.snapshot.inputType and 0x20000 == 0
-                DictationFlow().run(op,frozen,category,singleLine,SystemClock.elapsedRealtime()-startedAt,
-                    transcribe = {
-                        LocalSpeech().transcribe(file,manager.file(model),model,frozen.dictionary,settings.language).also(recovery::recognized)
-                    },
-                    key = store::readKey, failover = store.data,
-                    save = { entry, existing -> store.update { local ->
-                        if(existing) local.copy(history = local.history.map { if(it.id == entry.id) entry else it })
-                        else if(local.settings.noHistory) local else local.copy(history = listOf(entry)+local.history)
-                    } },
-                    deliver = { text, authorize -> owner.insert(anchor,text,authorize) },
-                    stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) },
-                    timing = timing, app = anchor.snapshot.packageName)
+                val speech: suspend () -> String = {
+                    LocalSpeech().transcribe(file,manager.file(model),model,frozen.dictionary,settings.language).also(recovery::recognized)
+                }
+                val elapsed = SystemClock.elapsedRealtime()-startedAt
+                val editor = anchor.snapshot
+                if (command) transformFlow(op, owner, anchor, frozen,
+                    editor.text.substring(minOf(editor.selectionStart, editor.selectionEnd), maxOf(editor.selectionStart, editor.selectionEnd)), elapsed, speech)
+                else {
+                    var spoken = ""
+                    // Re-checked against live settings before sending and before accepting the reply.
+                    val nearby = anchor.context.takeIf { it.isNotEmpty() }?.let { prefix ->
+                        NearbyContext(prefix) { anchor.valid && NearbyText.granted(store.data.value, editor.packageName) }
+                    }
+                    DictationFlow().run(op,frozen,category,singleLine,elapsed,
+                        transcribe = { speech().also { spoken = it } },
+                        key = store::readKey, failover = store.data, save = ::saveHistory,
+                        deliver = { text, authorize -> owner.insert(anchor,text,authorize,
+                            original = spoken.takeIf { frozen.settings.outputMode != "selectedPreset" },
+                            // Mac no-learning: a capture that read nearby text never teaches the dictionary.
+                            learn = frozen.dictionary.takeIf { !anchor.privateEditor && anchor.context.isEmpty() }) },
+                        stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) },
+                        timing = timing, app = editor.packageName, nearby = nearby)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -181,7 +269,7 @@ class ParlaService : Service() {
                 owner.release(anchor)
                 withContext(NonCancellable + Dispatchers.IO) {
                     // LocalSpeech cancellation revokes immediately; its serial barrier proves actual JNI exit.
-                    recovery.finish(op.revoked || anchor.privateEditor)
+                    recovery.finish(op.revoked || anchor.privateEditor || command)
                     CaptureAudio.release(file)
                 }
                 recorder = null

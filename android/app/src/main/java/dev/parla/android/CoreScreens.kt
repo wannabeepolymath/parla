@@ -135,6 +135,7 @@ internal fun profileWarnings(profiles: List<AppProfile>): List<String> {
             Row { Switch(p.enabled,{ enabled -> store.update { it.copy(profiles = it.profiles.map { row -> if(row.id == p.id) row.copy(enabled = enabled) else row }) } }); TextButton(onClick = { edit(p) }) { Text("Edit") }; TextButton(onClick = { store.update { it.copy(profiles = it.profiles.filterNot { row -> row.id == p.id }) } }) { Text("Delete") } }
         }
         Button(onClick = { edit(null) }) { Text("Add app profile") }
+        NearbyTextSection(data, store, message)
         HorizontalDivider()
         ProfileTester(data)
     }

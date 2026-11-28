@@ -37,7 +37,7 @@ object TextRules {
         "com.discord", "com.Slack", "com.whatsapp", "org.telegram.messenger", "com.google.android.apps.messaging", "com.microsoft.teams" -> AppCategory.chat
         "com.google.android.gm", "com.microsoft.office.outlook", "ch.protonmail.android", "com.readdle.spark" -> AppCategory.email
         "com.microsoft.office.word", "md.obsidian", "notion.id", "com.google.android.keep", "com.openai.chatgpt" -> AppCategory.prose
-        "com.foxdebug.acode", "io.spck" -> AppCategory.code
+        "com.foxdebug.acode", "com.foxdebug.acodefree", "io.spck" -> AppCategory.code
         else -> AppCategory.unknown
     }
     fun shape(text: String, category: AppCategory, singleLine: Boolean): String = if (singleLine || category == AppCategory.terminal || category == AppCategory.chat) text.replace(Regex("\\s*\\n\\s*"), " ").trim() else text

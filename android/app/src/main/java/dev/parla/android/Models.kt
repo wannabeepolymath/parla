@@ -2,9 +2,14 @@ package dev.parla.android
 
 import java.util.UUID
 
+/** The Accessibility disclosure text the user must have agreed to. Bump whenever that disclosure changes what it covers. */
+const val CURRENT_A11Y_CONSENT = 2
+
 data class Settings(
     val onboarded: Boolean = false,
     val accessibilityConsentGranted: Boolean = false,
+    /** Disclosure version behind [accessibilityConsentGranted]. Data saved before versioning (1.3.1) reads as 1. */
+    val accessibilityConsentVersion: Int = 1,
     /** A ProviderCatalog id. Each provider keeps its own saved address/model in [providers]. */
     val provider: String = "anthropic",
     val providers: Map<String, ProviderConfig> = emptyMap(),
@@ -30,7 +35,14 @@ data class Settings(
     val keepLastOriginal: Boolean = true,
     /** Desktop scratchpadDictionaryAlternativesEnabled. */
     val scratchpadSpelling: Boolean = false,
+    /** Per-app nearby-text grants: package → reviewed NearbyText.signature. Empty = off everywhere. */
+    val nearbyText: Map<String, String> = emptyMap(),
 )
+/** Consent counts only for the disclosure currently shown; an older agreement re-prompts. */
+fun Settings.accessibilityConsentCurrent(required: Int = CURRENT_A11Y_CONSENT) = accessibilityConsentGranted && accessibilityConsentVersion == required
+/** Agree records the version shown; No thanks keeps the old version, so it never upgrades a stale agreement. */
+fun Settings.withAccessibilityConsent(granted: Boolean) =
+    copy(accessibilityConsentGranted = granted, accessibilityConsentVersion = if (granted) CURRENT_A11Y_CONSENT else accessibilityConsentVersion)
 data class Snippet(val id: String = UUID.randomUUID().toString(), val trigger: String, val expansion: String)
 data class LiteralReplacement(val source: String, val replacement: String)
 data class TransformPreset(val id: String = UUID.randomUUID().toString(), val name: String, val kind: String = "rewrite", val instruction: String = "", val targetLanguage: String = "") {
@@ -61,6 +73,7 @@ data class LocalData(val settings: Settings = Settings(), val dictionary: List<S
         return copy(settings = settings.copy(cleanupEnabled = when(p.cleanup) { "on" -> true; "off" -> false; else -> settings.cleanupEnabled }, style = p.style.ifEmpty { settings.style }, language = p.language.ifEmpty { settings.language }, localModel = p.localModel.ifEmpty { settings.localModel }, providers = if(p.cleanupModel.isEmpty()) settings.providers else settings.providers + (settings.provider to settings.active.copy(model = p.cleanupModel))), dictionary = p.vocabulary + dictionary)
     }
 }
-data class CleanupResult(val text: String, val warning: String? = null, val usage: CleanupUsage? = null)
+/** [contextual]: nearby text was sent, so the result is for this insertion only (history keeps the original). */
+data class CleanupResult(val text: String, val warning: String? = null, val usage: CleanupUsage? = null, val contextual: Boolean = false)
 enum class Phase { IDLE, RECORDING, PROCESSING, ERROR }
 data class DictationStatus(val phase: Phase = Phase.IDLE, val message: String = "Ready when you are", val level: Float = 0f)

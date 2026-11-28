@@ -22,7 +22,19 @@ class InsertionPolicyTest {
             editor.copy(visible = false), editor.copy(password = true), editor.copy(dataSensitive = true),
             editor.copy(inputType = 0), editor.copy(inputType = 4), editor.copy(inputType = 2), editor.copy(inputType = 3), editor.copy(inputType = 0x81),
             editor.copy(inputType = 0x91), editor.copy(inputType = 0xe1), editor.copy(inputType = 0x12))
-            .forEach { assertFalse(InsertionPolicy.safe(it)); assertEquals("", InsertionPolicy.context(it, true)) }
+            .forEach { assertFalse(InsertionPolicy.safe(it)); assertEquals("", NearbyText.prefix(it.copy(selectionStart = 11))) }
+    }
+
+    @Test fun privacyMetadataIsRecheckedAgainstTheEditorBeforeEachRead() {
+        val noLearning = android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        assertFalse(InsertionPolicy.privateEditor(editor, "dev.test", 1, 0))
+        // The same editor restarting as private (incognito) stops the correction watch.
+        assertTrue(InsertionPolicy.privateEditor(editor, "dev.test", 1, noLearning))
+        assertTrue(InsertionPolicy.privateEditor(editor, "dev.test", 1, noLearning or android.view.inputmethod.EditorInfo.IME_ACTION_DONE))
+        // Metadata that can't be tied to this editor counts as private.
+        assertTrue(InsertionPolicy.privateEditor(editor, null, null, 0))
+        assertTrue(InsertionPolicy.privateEditor(editor, "other.app", 1, 0))
+        assertTrue(InsertionPolicy.privateEditor(editor, "dev.test", 0x81, 0))
     }
 
     @Test fun identitySurvivesOurWriteButRejectsChangedEditorMetadata() {
@@ -93,14 +105,5 @@ class InsertionPolicyTest {
         assertNull(InsertionPolicy.replacement(editor.copy(maxTextLength = 10), "friends"))
         assertNull(InsertionPolicy.replacement(editor, "a".repeat(100_001)))
         assertFalse(InsertionPolicy.safe(editor.copy(text = "a".repeat(100_001))))
-    }
-
-    @Test fun contextIsOptInBoundedAndExcludedForUrlEmailAndSensitiveFields() {
-        assertEquals("", InsertionPolicy.context(editor, false))
-        assertEquals(editor.text, InsertionPolicy.context(editor, true))
-        for (type in listOf(0x11, 0x21, 0xd1)) assertEquals("", InsertionPolicy.context(editor.copy(inputType = type), true))
-        val long = editor.copy(text = "a".repeat(10_000), selectionStart = 5_000, selectionEnd = 5_000)
-        assertEquals(1_500, InsertionPolicy.context(long, true).length)
-        assertEquals(1_500, InsertionPolicy.context(long.copy(selectionStart = 10_000), true).length)
     }
 }

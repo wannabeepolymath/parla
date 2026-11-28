@@ -19,15 +19,15 @@ class Store private constructor(context: Context) {
     @Volatile internal var accessibilityConsentDeclined = false
         private set
     val accessibilityConsentGranted: Boolean
-        get() = ready && !accessibilityConsentDeclined && data.value.settings.accessibilityConsentGranted
+        get() = ready && !accessibilityConsentDeclined && data.value.settings.accessibilityConsentCurrent()
     fun setAccessibilityConsent(granted: Boolean): Boolean {
         // A failed disk write must not leave declined access usable in this process.
         if (!granted) accessibilityConsentDeclined = true
-        val saved = update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = granted)) }
+        val saved = update { it.copy(settings = it.settings.withAccessibilityConsent(granted)) }
         if (granted && saved) accessibilityConsentDeclined = false
         return saved
     }
-    fun update(transform: (LocalData) -> LocalData) = local.update(transform)
+    fun update(transform: (LocalData) -> LocalData) = local.update { NearbyText.prune(transform(it)) }
     fun reload() = local.reload()
     fun recoverySource() = local.original()
     fun repair(json: String) = local.repair(json)
@@ -65,6 +65,7 @@ internal object LocalDataCodec {
         val settings = JSONObject()
             .put("onboarded", s.onboarded)
             .put("accessibilityConsentGranted", s.accessibilityConsentGranted)
+            .put("accessibilityConsentVersion", s.accessibilityConsentVersion)
             .put("provider", s.provider)
             .put("providers", JSONObject(s.providers.mapValues { (_, c) -> JSONObject().put("baseUrl", c.baseUrl).put("model", c.model) }))
             .put("backups", JSONArray(s.backups.map { JSONObject().put("provider", it.provider).put("baseUrl", it.baseUrl).put("model", it.model).put("keyless", it.keyless) }))
@@ -86,6 +87,7 @@ internal object LocalDataCodec {
             .put("bubbleDocked", s.bubbleDocked)
             .put("keepLastOriginal", s.keepLastOriginal)
             .put("scratchpadSpelling", s.scratchpadSpelling)
+            .put("nearbyText", JSONObject(s.nearbyText))
         return JSONObject().put("version", 5).put("settings", settings)
             .put("dictionary", JSONArray(data.dictionary))
             .put("snippets", JSONArray(data.snippets.map { JSONObject().put("id",it.id).put("trigger",it.trigger).put("expansion",it.expansion) }))
@@ -105,6 +107,8 @@ internal object LocalDataCodec {
         // Reject malformed known fields instead of opt* silently reusing defaults.
         require(!s.has("onboarded") || s.get("onboarded") is Boolean)
         require(!s.has("accessibilityConsentGranted") || s.get("accessibilityConsentGranted") is Boolean)
+        // Missing means the unversioned 1.3.1 disclosure. A newer version still loads; it just isn't current consent.
+        require(!s.has("accessibilityConsentVersion") || (s.get("accessibilityConsentVersion") as? Int ?: 0) >= 1)
         require(!s.has("provider") || s.get("provider") is String)
         require(!s.has("baseUrl") || s.get("baseUrl") is String)
         require(!s.has("cleanupModel") || s.get("cleanupModel") is String)
@@ -126,6 +130,8 @@ internal object LocalDataCodec {
         require(!s.has("backupReview") || s.get("backupReview") is String)
         require(!s.has("keepLastOriginal") || s.get("keepLastOriginal") is Boolean)
         require(!s.has("scratchpadSpelling") || s.get("scratchpadSpelling") is Boolean)
+        val nearby = if(s.has("nearbyText")) s.getJSONObject("nearbyText").let { o -> o.keys().asSequence().associateWith { o.get(it) as? String ?: error("Bad nearby text grant") } } else emptyMap()
+        require(nearby.all { (pkg, sig) -> pkg.length <= 255 && Regex("[0-9a-f]{64}").matches(sig) })
         // Schema 5 keeps one configuration per provider. Older schemas had one wire format + base + model.
         val savedProvider = if(version == 1) "openai-compatible" else if(s.has("provider")) s.getString("provider") else d.provider
         val legacyBase = if(s.has("baseUrl")) s.getString("baseUrl") else if(version == 1) "https://api.openai.com/v1" else "https://api.anthropic.com/v1"
@@ -142,6 +148,7 @@ internal object LocalDataCodec {
             onboarded = if(s.has("onboarded")) s.getBoolean("onboarded") else d.onboarded,
             // Earlier schemas never recorded this disclosure's explicit consent.
             accessibilityConsentGranted = version >= 4 && s.getBoolean("accessibilityConsentGranted"),
+            accessibilityConsentVersion = if(s.has("accessibilityConsentVersion")) s.getInt("accessibilityConsentVersion") else 1,
             provider = provider, providers = providers, backups = backups,
             backupReview = if(s.has("backupReview")) s.getString("backupReview") else d.backupReview,
             localModel = if(s.has("localModel")) s.getString("localModel") else d.localModel,
@@ -162,6 +169,7 @@ internal object LocalDataCodec {
             bubbleDocked = if(s.has("bubbleDocked")) s.getBoolean("bubbleDocked") else d.bubbleDocked,
             keepLastOriginal = if(s.has("keepLastOriginal")) s.getBoolean("keepLastOriginal") else d.keepLastOriginal,
             scratchpadSpelling = if(s.has("scratchpadSpelling")) s.getBoolean("scratchpadSpelling") else d.scratchpadSpelling,
+            nearbyText = nearby,
         )
         require(settings.language == "auto" || settings.language in SpeechLanguages.codes)
         require(settings.recoveryAudioDays in 1..30)
