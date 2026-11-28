@@ -83,6 +83,7 @@ internal class MicrophoneTest(context: Context) {
     fun start() {
         val previous = job
         clear()
+        OriginalCopy.clear() // desktop: starting a microphone test clears the last original
         if(app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { value.value = MicTestView("Allow microphone access in parla setup, then try again."); return }
         if(ParlaService.status.value.phase.let { it == Phase.RECORDING || it == Phase.PROCESSING }) { value.value = MicTestView("Finish the current dictation first."); return }
         val stop = AtomicBoolean(false); stopRequested = stop

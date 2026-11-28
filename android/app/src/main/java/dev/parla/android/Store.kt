@@ -84,6 +84,8 @@ internal object LocalDataCodec {
             .put("bubbleX", s.bubbleX)
             .put("bubbleY", s.bubbleY)
             .put("bubbleDocked", s.bubbleDocked)
+            .put("keepLastOriginal", s.keepLastOriginal)
+            .put("scratchpadSpelling", s.scratchpadSpelling)
         return JSONObject().put("version", 5).put("settings", settings)
             .put("dictionary", JSONArray(data.dictionary))
             .put("snippets", JSONArray(data.snippets.map { JSONObject().put("id",it.id).put("trigger",it.trigger).put("expansion",it.expansion) }))
@@ -122,6 +124,8 @@ internal object LocalDataCodec {
         require(!s.has("bubbleY") || s.get("bubbleY") is Number)
         require(!s.has("bubbleDocked") || s.get("bubbleDocked") is Boolean)
         require(!s.has("backupReview") || s.get("backupReview") is String)
+        require(!s.has("keepLastOriginal") || s.get("keepLastOriginal") is Boolean)
+        require(!s.has("scratchpadSpelling") || s.get("scratchpadSpelling") is Boolean)
         // Schema 5 keeps one configuration per provider. Older schemas had one wire format + base + model.
         val savedProvider = if(version == 1) "openai-compatible" else if(s.has("provider")) s.getString("provider") else d.provider
         val legacyBase = if(s.has("baseUrl")) s.getString("baseUrl") else if(version == 1) "https://api.openai.com/v1" else "https://api.anthropic.com/v1"
@@ -156,6 +160,8 @@ internal object LocalDataCodec {
             bubbleX = if(s.has("bubbleX")) s.getInt("bubbleX") else d.bubbleX,
             bubbleY = if(s.has("bubbleY")) s.getInt("bubbleY") else d.bubbleY,
             bubbleDocked = if(s.has("bubbleDocked")) s.getBoolean("bubbleDocked") else d.bubbleDocked,
+            keepLastOriginal = if(s.has("keepLastOriginal")) s.getBoolean("keepLastOriginal") else d.keepLastOriginal,
+            scratchpadSpelling = if(s.has("scratchpadSpelling")) s.getBoolean("scratchpadSpelling") else d.scratchpadSpelling,
         )
         require(settings.language == "auto" || settings.language in SpeechLanguages.codes)
         require(settings.recoveryAudioDays in 1..30)

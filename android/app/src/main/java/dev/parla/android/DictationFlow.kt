@@ -5,7 +5,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** Production session policy, independent of Android microphone/editor adapters. */
-internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), private val clock: () -> Long = System::nanoTime) {
+internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), private val clock: () -> Long = System::nanoTime, private val originals: OriginalCopyOwner = OriginalCopy) {
     suspend fun run(
         operation: PendingOperation,
         frozen: LocalData,
@@ -47,8 +47,12 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
             val retained = RecoveryVault.retain(operation.id,raw,text,"Text ready. Nothing inserted yet.")
             saved = frozen.settings.noHistory || save(entry,false)
             active()
+            // Capture-time opt-in, like desktop permitsOriginalCopy: ordinary dictation only, not a preset transform.
+            val keepOriginal = frozen.settings.keepLastOriginal && frozen.settings.outputMode != "selectedPreset"
+            var original: OriginalCopyOwner.Attempt? = null
             val insertion = timing.span(null,TimingStage.insertion,finish = { if(it == INSERTED) TimingOutcome.ok else TimingOutcome.unconfirmed }) { deliver(text) {
                 if(!operation.authorizeDispatch()) false else {
+                    if(keepOriginal) original = originals.dispatched() else originals.clear()
                     val uncertain = "Text may have been inserted. Check the field before pasting."
                     RecoveryVault.outcome(operation.id,uncertain)
                     if(!frozen.settings.noHistory && saved) save(entry.copy(note = listOfNotNull(result.warning,uncertain).joinToString(" · ")),true)
@@ -57,6 +61,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
                 }
             } }
             active()
+            original?.let { originals.completed(it,raw) }
             val note = listOfNotNull(result.warning,insertion,if(!saved) "History was not saved" else null,if(!retained) "Text is too long for temporary recovery" else null).joinToString(" · ")
             val finished = entry.copy(note = note)
             RecoveryVault.outcome(operation.id,note)

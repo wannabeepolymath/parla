@@ -115,13 +115,14 @@ class ParlaService : Service() {
         anchorOwner = owner
         capturedAnchor = anchor
         val effective = snapshot.forApp(anchor.snapshot.packageName)
-        val settings = if (anchor.privateEditor) effective.settings.copy(noHistory = true) else effective.settings
+        val settings = if (anchor.privateEditor) effective.settings.copy(noHistory = true, keepLastOriginal = false) else effective.settings
         val frozen = effective.copy(settings = settings)
         val model = manager.selected(settings)
         if (model == null || !manager.file(model).isFile) {
             owner.release(anchor); capturedAnchor = null; anchorOwner = null
             fail("Your speech model is missing. Download it in Models."); openApp(); return
         }
+        OriginalCopy.clear() // a new capture replaces the previous dictation's original
         val op = PendingOperation(); operation = op
         op.advance(PendingOperation.Stage.recording)
         val file = CaptureAudio.reserve(File(cacheDir, "audio"))
