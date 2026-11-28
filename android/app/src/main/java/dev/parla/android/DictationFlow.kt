@@ -13,11 +13,13 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         singleLine: Boolean,
         duration: Long,
         transcribe: suspend () -> String,
-        key: () -> String,
+        key: (String) -> String,
         save: (HistoryEntry, Boolean) -> Boolean,
         deliver: suspend (String, () -> Boolean) -> String,
         stage: (PendingOperation.Stage, String) -> Unit,
         timing: TimingSession = TimingSession(sink = {}),
+        /** Live saved data: enables reviewed backup cleanup for this ordinary dictation. */
+        failover: kotlinx.coroutines.flow.StateFlow<LocalData>? = null,
     ): HistoryEntry {
         suspend fun active() { currentCoroutineContext().ensureActive(); if(operation.revoked) throw CancellationException("Operation revoked") }
         fun advance(next: PendingOperation.Stage, message: String) { operation.advance(next); stage(next,message) }
@@ -27,12 +29,12 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
             active(); advance(PendingOperation.Stage.recognizing,"Transcribing on device…")
             val raw = timing.span(TimingStage.transcription_start,TimingStage.transcription_end) { transcribe() }
             active(); advance(PendingOperation.Stage.cleaning,"Preparing your text…")
-            // The pipeline reads the key only when it calls the provider, so that marks a network cleanup.
+            // The pipeline reads a key only when it calls a provider, so that marks a network cleanup.
             var networked = false
             val result = timing.span(TimingStage.cleanup_start,TimingStage.cleanup_end,
                 provider = { if(networked) ProviderCategory.of(frozen.settings.provider) else ProviderCategory.local },
                 finish = { if(it.warning != null) TimingOutcome.fallback else TimingOutcome.ok }) {
-                pipeline.clean(raw,frozen,category,singleLine) { networked = true; key() }
+                pipeline.clean(raw,frozen,category,singleLine,failover = failover) { scope -> networked = true; key(scope) }
             }
             active(); advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)

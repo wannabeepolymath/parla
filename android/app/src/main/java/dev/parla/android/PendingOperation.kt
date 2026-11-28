@@ -45,7 +45,7 @@ internal class HistoryRetry {
     @Synchronized fun invalidate(id: String) { owners.remove(id) }
     @Synchronized fun clear() { owners.clear() }
     @Synchronized fun valid(token: String, source: HistoryEntry, rows: List<HistoryEntry>) = owners[source.id] == token && rows.any { it == source }
-    suspend fun propose(token: String, source: HistoryEntry, frozen: LocalData, key: () -> String, applyPreset: Boolean = false, pipeline: Pipeline = Pipeline()): RetryProposal {
+    suspend fun propose(token: String, source: HistoryEntry, frozen: LocalData, key: (String) -> String, applyPreset: Boolean = false, pipeline: Pipeline = Pipeline()): RetryProposal {
         require(source.raw.isNotEmpty()) { "There is no original text to retry." }
         val settings = frozen.settings.copy(outputMode = if(applyPreset) "selectedPreset" else "cleanup")
         val result = pipeline.clean(source.raw,frozen.copy(settings = settings),key = key)

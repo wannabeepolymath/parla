@@ -5,9 +5,12 @@ import java.util.UUID
 data class Settings(
     val onboarded: Boolean = false,
     val accessibilityConsentGranted: Boolean = false,
+    /** A ProviderCatalog id. Each provider keeps its own saved address/model in [providers]. */
     val provider: String = "anthropic",
-    val baseUrl: String = "https://api.anthropic.com/v1",
-    val cleanupModel: String = "claude-haiku-4-5",
+    val providers: Map<String, ProviderConfig> = emptyMap(),
+    val backups: List<CleanupBackup> = emptyList(),
+    /** Digest of the reviewed chain; empty or stale means backups are off. */
+    val backupReview: String = "",
     val localModel: String = "base.en",
     val language: String = "auto",
     val style: String = "standard",
@@ -47,7 +50,7 @@ data class HistoryEntry(val id: String = UUID.randomUUID().toString(), val creat
 data class LocalData(val settings: Settings = Settings(), val dictionary: List<String> = emptyList(), val snippets: List<Snippet> = emptyList(), val history: List<HistoryEntry> = emptyList(), val replacements: List<LiteralReplacement> = emptyList(), val presets: List<TransformPreset> = emptyList(), val profiles: List<AppProfile> = emptyList()) {
     fun forApp(packageName: String?): LocalData {
         val p = profiles.firstOrNull { it.enabled && it.target == packageName } ?: return this
-        return copy(settings = settings.copy(cleanupEnabled = when(p.cleanup) { "on" -> true; "off" -> false; else -> settings.cleanupEnabled }, style = p.style.ifEmpty { settings.style }, language = p.language.ifEmpty { settings.language }, localModel = p.localModel.ifEmpty { settings.localModel }, cleanupModel = p.cleanupModel.ifEmpty { settings.cleanupModel }), dictionary = p.vocabulary + dictionary)
+        return copy(settings = settings.copy(cleanupEnabled = when(p.cleanup) { "on" -> true; "off" -> false; else -> settings.cleanupEnabled }, style = p.style.ifEmpty { settings.style }, language = p.language.ifEmpty { settings.language }, localModel = p.localModel.ifEmpty { settings.localModel }, providers = if(p.cleanupModel.isEmpty()) settings.providers else settings.providers + (settings.provider to settings.active.copy(model = p.cleanupModel))), dictionary = p.vocabulary + dictionary)
     }
 }
 data class CleanupResult(val text: String, val warning: String? = null)

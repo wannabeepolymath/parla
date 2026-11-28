@@ -37,7 +37,7 @@ class StateOwnershipTest {
         assertNull(memory.bytes)
         memory.fail = false
         assertTrue(state.update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = true)) })
-        assertEquals(4, JSONObject(memory.bytes!!).getInt("version"))
+        assertEquals(5, JSONObject(memory.bytes!!).getInt("version"))
         val reloaded = LocalState(memory)
         assertTrue(reloaded.data.value.settings.accessibilityConsentGranted)
         assertTrue(reloaded.update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = false)) })

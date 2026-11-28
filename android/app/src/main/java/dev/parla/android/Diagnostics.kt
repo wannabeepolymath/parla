@@ -24,8 +24,10 @@ import kotlinx.coroutines.flow.update
 internal enum class TimingStage { record_start, record_stop, transcription_start, transcription_end, cleanup_start, cleanup_end, insertion }
 internal enum class TimingOutcome { ok, failed, canceled, mic_silenced, fallback, unconfirmed }
 internal enum class ProviderCategory {
-    local, anthropic, openai_compatible, other;
-    companion object { fun of(provider: String) = when (provider) { "anthropic" -> anthropic; "openai-compatible" -> openai_compatible; else -> other } }
+    local, anthropic, openai, groq, gemini, openrouter, custom, openai_compatible, other;
+    companion object { fun of(provider: String) = when (provider) {
+        "anthropic" -> anthropic; "openai" -> openai; "groq" -> groq; "gemini" -> gemini; "openrouter" -> openrouter
+        "custom" -> custom; "openai-compatible" -> openai_compatible; else -> other } }
 }
 
 internal data class TimingEvent(

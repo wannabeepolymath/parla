@@ -32,8 +32,8 @@ class DiagnosticsTest {
             server.start()
             server.enqueue(MockResponse().setResponseCode(500).setBody("echo: tell Sam the vault code"))
             val events = mutableListOf<TimingEvent>()
-            val data = LocalData(Settings(provider = "openai-compatible", baseUrl = server.url("/v1").toString()))
-            DictationFlow(Pipeline(ApiClient(OkHttpClient(), true))).run(PendingOperation(), data, AppCategory.chat, false, 0,
+            val data = LocalData(Settings(provider = "custom", providers = mapOf("custom" to ProviderConfig(server.url("/v1").toString(), "m"))))
+            DictationFlow(Pipeline(ApiClient(OkHttpClient()))).run(PendingOperation(), data, AppCategory.chat, false, 0,
                 transcribe = { "tell Sam the vault code" }, key = { "sk-test-secret" }, save = { _, _ -> true },
                 deliver = { _, authorize -> authorize(); DictationFlow.INSERTED }, stage = { _, _ -> },
                 timing = TimingSession(sink = { events += it }))
@@ -41,7 +41,7 @@ class DiagnosticsTest {
                 TimingStage.cleanup_end, TimingStage.insertion), events.map { it.stage })
             val cleanup = events.single { it.stage == TimingStage.cleanup_end }
             assertEquals(TimingOutcome.fallback, cleanup.outcome)
-            assertEquals(ProviderCategory.openai_compatible, cleanup.provider)
+            assertEquals(ProviderCategory.custom, cleanup.provider)
             assertEquals(TimingOutcome.ok, events.last().outcome)
             val log = Diagnostics.export(events)
             for (secret in listOf("Sam", "vault", "sk-test", "secret", "127.0.0.1", "localhost", "chat")) assertFalse(secret, log.contains(secret))

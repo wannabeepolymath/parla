@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext exists only for a user's own local AI server (Ollama, LM Studio) on a private network.
+  Network security config cannot express private IP ranges, so the real gate is in code:
+  canonicalBase() rejects http:// to public IP literals, and ApiClient sends http:// only after DNS
+  resolves every address to loopback, RFC 1918, link-local, IPv6 ULA or CGNAT space. Model downloads
+  separately require HTTPS to Hugging Face (ModelTransfer). User-added CAs are never trusted.
+-->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -15,6 +15,8 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
+internal fun compatible(base: String, model: String = "test-model") = Settings(provider = "custom", providers = mapOf("custom" to ProviderConfig(base, model)))
+
 class ProductCoreTest {
     @Test fun completePromptsMatchActualDesktopOutput() {
         val root = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
@@ -118,9 +120,9 @@ class ProductCoreTest {
     @Test fun providerProductionPipelineRejectsTruncationRefusalEmptyAndLengthDrift() = runBlocking {
         MockWebServer().use { server ->
             server.start()
-            val api = ApiClient(OkHttpClient(),true)
+            val api = ApiClient(OkHttpClient())
             val pipeline = Pipeline(api)
-            val data = LocalData(Settings(provider = "openai-compatible",baseUrl = server.url("/v1").toString(),style = "conversational"))
+            val data = LocalData(compatible(server.url("/v1").toString()).copy(style = "conversational"))
             suspend fun run(body: String,raw: String = "hello") : CleanupResult { server.enqueue(MockResponse().setBody(body)); return pipeline.clean(raw,data) { "test-secret" } }
             fun response(content: String, finish: String = "stop",refusal: String? = null): String = JSONObject().put("choices",org.json.JSONArray().put(JSONObject().put("finish_reason",finish).put("message",JSONObject().put("content",content).put("refusal",refusal ?: JSONObject.NULL)))).toString()
             assertNotNull(run(response("nonempty","length")).warning)
@@ -142,9 +144,9 @@ class ProductCoreTest {
         MockWebServer().use { server ->
             server.start()
             val expansion = "x".repeat(400)
-            val pipeline = Pipeline(ApiClient(OkHttpClient(),true))
+            val pipeline = Pipeline(ApiClient(OkHttpClient()))
             for ((trigger,raw) in listOf("cafe\u0301" to "say café", "café" to "say cafe\u0301")) {
-                val data = LocalData(Settings(provider = "openai-compatible",baseUrl = server.url("/v1").toString()),
+                val data = LocalData(compatible(server.url("/v1").toString()),
                     snippets = listOf(Snippet(trigger = trigger,expansion = expansion)))
                 server.enqueue(MockResponse().setBody(JSONObject().put("choices",org.json.JSONArray().put(JSONObject()
                     .put("finish_reason","stop").put("message",JSONObject().put("content","say $expansion")))).toString()))
@@ -156,9 +158,9 @@ class ProductCoreTest {
     @Test fun presetsAreTrimOnlySkipSnippetsAndRulesAndRespectExplicitLimits() = runBlocking {
         MockWebServer().use { server ->
             server.start(); val preset = TransformPreset(name = "Translate",kind = "translation",targetLanguage = "Hindi")
-            val data = LocalData(Settings(provider = "openai-compatible",baseUrl = server.url("/v1").toString(),outputMode = "selectedPreset",selectedPresetID = preset.id),snippets = listOf(Snippet(trigger = "source",expansion = "bad")),replacements = listOf(LiteralReplacement("quoted","bad")),presets = listOf(preset))
+            val data = LocalData(compatible(server.url("/v1").toString()).copy(outputMode = "selectedPreset",selectedPresetID = preset.id),snippets = listOf(Snippet(trigger = "source",expansion = "bad")),replacements = listOf(LiteralReplacement("quoted","bad")),presets = listOf(preset))
             server.enqueue(MockResponse().setBody("""{"choices":[{"finish_reason":"stop","message":{"content":"  \"quoted\"  "}}]}"""))
-            val result = Pipeline(ApiClient(OkHttpClient(),true)).clean("source",data) { "test" }
+            val result = Pipeline(ApiClient(OkHttpClient())).clean("source",data) { "test" }
             assertEquals("\"quoted\"",result.text)
             val request = JSONObject(server.takeRequest().body.readUtf8()).getJSONArray("messages")
             assertFalse(request.getJSONObject(0).getString("content").contains("Snippets"))
@@ -168,12 +170,14 @@ class ProductCoreTest {
         }
     }
     @Test fun credentialScopeIsCanonicalAndEndpointBound() {
-        val s = Settings(provider = "openai-compatible",baseUrl = "https://EXAMPLE.test/v1/")
-        assertEquals(credentialScope(s),credentialScope(s.copy(baseUrl = "https://example.test/v1")))
-        assertNotEquals(credentialScope(s),credentialScope(s.copy(baseUrl = "https://other.test/v1")))
-        for(base in listOf("http://example.test","https://user:pass@example.test","https://example.test/?key=x","https://example.test/#x")) assertTrue(base,runCatching { credentialScope(s.copy(baseUrl = base)) }.isFailure)
-        assertEquals("https://api.anthropic.com/v1",canonicalEndpoint(s.copy(provider = "anthropic",baseUrl = "https://evil.test")))
-        assertTrue(runCatching { credentialScope(s.copy(provider = "apple-intelligence")) }.isFailure)
+        fun scope(base: String) = compatible(base).endpoint().scope
+        assertEquals("openai-compatible|https://example.test/v1",scope("https://EXAMPLE.test/v1/"))
+        assertEquals(scope("https://EXAMPLE.test/v1/"),scope("https://example.test/v1"))
+        assertNotEquals(scope("https://example.test/v1"),scope("https://other.test/v1"))
+        for(base in listOf("http://8.8.8.8/v1","https://user:pass@example.test","https://example.test/?key=x","https://example.test/#x")) assertTrue(base,runCatching { scope(base) }.isFailure)
+        val anthropic = Settings(providers = mapOf("anthropic" to ProviderConfig("https://evil.test","claude-haiku-4-5"))).endpoint()
+        assertEquals("anthropic|https://api.anthropic.com/v1",anthropic.scope)
+        assertTrue(runCatching { Settings(provider = "apple-intelligence").endpoint() }.isFailure)
     }
     @Test fun anthropicUsesFixedEndpointActualPromptAndRejectsStoppedNonemptyText() = runBlocking {
         var observed: okhttp3.Request? = null
@@ -182,7 +186,7 @@ class ProductCoreTest {
             okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
                 .body("""{"stop_reason":"max_tokens","content":[{"type":"text","text":"partial but nonempty"}]}""".toResponseBody("application/json".toMediaType())).build()
         }.build()
-        val result = Pipeline(ApiClient(client)).clean("original",LocalData(Settings(provider = "anthropic",baseUrl = "https://untrusted.test"))) { "mock-key" }
+        val result = Pipeline(ApiClient(client)).clean("original",LocalData(Settings(provider = "anthropic",providers = mapOf("anthropic" to ProviderConfig("https://untrusted.test","claude-haiku-4-5"))))) { "mock-key" }
         assertNotNull(result.warning); assertEquals("original",result.text)
         val request = requireNotNull(observed)
         assertEquals("https://api.anthropic.com/v1/messages",request.url.toString())
@@ -193,9 +197,9 @@ class ProductCoreTest {
     @Test fun providerCancellationRevokesPublicationAndRedirectsAreNeverFollowed() = runBlocking {
         MockWebServer().use { server ->
             server.start()
-            val data = LocalData(Settings(provider = "openai-compatible",baseUrl = server.url("/v1").toString()))
+            val data = LocalData(compatible(server.url("/v1").toString()))
             server.enqueue(MockResponse().setResponseCode(302).addHeader("Location",server.url("/other")))
-            val pipeline = Pipeline(ApiClient(OkHttpClient(),true))
+            val pipeline = Pipeline(ApiClient(OkHttpClient()))
             assertNotNull(pipeline.clean("raw",data) { "test-key" }.warning)
             assertEquals(1,server.requestCount); server.takeRequest()
             server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
