@@ -19,6 +19,10 @@ class LocalSpeechModelTest {
         assertEquals(-1f,WavInput.parse(wav(sample = Short.MIN_VALUE))[0],0f)
         assertEquals(32767/32768f,WavInput.parse(wav(sample = Short.MAX_VALUE))[0],0f)
         for(bytes in listOf(wav(6399),wav(sample = 0),wav().copyOf(50),wav().also { it[22] = 2 },wav().also { it[40] = 1 },wav().also { it[24] = 1 })) assertTrue(runCatching { WavInput.parse(bytes) }.isFailure)
+        // Short and silent are reported separately, and the short copy matches the 6400-sample (0.4 s) threshold.
+        assertEquals(6400,WavInput.parse(wav(6400)).size)
+        assertEquals("Recording is too short. Speak for at least 0.4 seconds.",runCatching { WavInput.parse(wav(6399)) }.exceptionOrNull()?.message)
+        assertEquals("No sound was picked up. Speak closer to the microphone and try again.",runCatching { WavInput.parse(wav(sample = 0)) }.exceptionOrNull()?.message)
         assertEquals("",TextRules.stripNonSpeech("[BLANK_AUDIO] (upbeat music) *sigh*"))
         assertEquals("Hello.",TextRules.stripNonSpeech("Hello.\n[BLANK_AUDIO]"))
         assertEquals("Hello (a) [0] (upbeat music)",TextRules.stripNonSpeech("Hello (a) [0] (upbeat music)"))

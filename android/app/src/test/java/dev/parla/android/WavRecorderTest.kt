@@ -38,4 +38,18 @@ class WavRecorderTest {
 
     @Test(expected = IllegalArgumentException::class)
     fun rejectsRiffOverflow() { WavHeader.create(0x1_0000_0000L) }
+
+    @Test fun ownSessionSilencingFailsTheSessionAndLatches() {
+        val watch = SilenceWatch(sessionId = 7)
+        watch.observe(7, clientSilenced = false)
+        watch.observe(9, clientSilenced = true) // Another app's session never affects this one.
+        watch.check()
+        watch.observe(7, clientSilenced = true)
+        val failure = runCatching { watch.check() }.exceptionOrNull()
+        assertTrue(failure is MicrophoneSilencedException)
+        assertEquals("Another app is using the microphone. Stop it (for example the screen recorder) and try again.", failure?.message)
+        watch.observe(7, clientSilenced = false) // Audio already has a gap; un-silencing cannot rescue it.
+        assertTrue(runCatching { watch.check() }.exceptionOrNull() is MicrophoneSilencedException)
+        SilenceWatch(sessionId = 7).check() // A new session starts clean.
+    }
 }

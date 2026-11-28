@@ -11,7 +11,7 @@
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
         </activity>
         <service android:name=".ParlaService" android:exported="false" android:foregroundServiceType="microphone|specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-enabled floating dictation control; microphone capture only on explicit tap or hold" />
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Floating dictation control shown above the on-screen keyboard after user setup; microphone capture only on explicit tap or hold" />
         </service>
         <service android:name=".ParlaAccessibilityService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:label="parla text insertion">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>

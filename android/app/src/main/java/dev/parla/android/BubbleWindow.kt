@@ -78,7 +78,18 @@ class BubbleWindow(
             true
         }
     }
-    fun show() { updateSize(); applyPlacement(); wm.addView(view, params); shown = true }
+    /** Idempotent attach/detach. Position and settings survive; a detach drops any pending hold or drag. */
+    fun setVisible(visible: Boolean) {
+        if (visible == shown) return
+        if (visible) {
+            updateSize(); applyPlacement()
+            // Overlay permission can be revoked at any time; stay detached rather than crash the service.
+            shown = runCatching { wm.addView(view, params) }.isSuccess
+        } else {
+            handler.removeCallbacks(hold); dragging = false; holding = false
+            runCatching { wm.removeView(view) }; shown = false
+        }
+    }
     fun configure(settings: Settings) {
         requestedScale = settings.bubbleSize.coerceIn(.7f, 1.5f)
         docked = settings.bubbleDocked
@@ -91,7 +102,7 @@ class BubbleWindow(
     fun render(status: DictationStatus) { state = status; if (state.phase == Phase.IDLE || state.phase == Phase.ERROR) holdMode = false; updateSize(); applyPlacement(); view.contentDescription = "parla: ${status.message}. Tap to start or finish. Hold to talk. Drag to move."; view.invalidate() }
     internal fun placeNearKeyboard(bounds: ScreenRect?) { keyboard = bounds; refreshPlacement() }
     fun refreshPlacement() { updateSize(); applyPlacement(); view.invalidate() }
-    fun close() { handler.removeCallbacksAndMessages(null); if (shown) { wm.removeView(view); shown = false } }
+    fun close() { setVisible(false); handler.removeCallbacksAndMessages(null) }
     private fun updateSize() {
         val active = state.phase == Phase.RECORDING || state.phase == Phase.PROCESSING
         val width = if (active) { if (holdMode) 160f else 230f } else 56f
