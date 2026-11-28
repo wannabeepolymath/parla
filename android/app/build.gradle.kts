@@ -9,8 +9,8 @@ android {
         applicationId = "dev.parla.android"
         minSdk = 33
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.3.1"
+        versionCode = 6
+        versionName = "1.3.2"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild { cmake { arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON" } }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
