@@ -172,7 +172,15 @@ class BubbleWindow(
             } else if (ptt) {
                 icon(canvas, R.drawable.ic_bar_recording, 120f * unit, 16f * unit, 24f * unit)
             }
-            run {
+            if (state.phase == Phase.RECORDING && state.draft.isNotEmpty()) {
+                // Preview draft replaces the level bars; its latest words, ending at the right edge.
+                val left = (if (ptt) 12f else 68f) * unit; val right = (if (ptt) 112f else 162f) * unit
+                paint.color = if (ptt) Color.rgb(247, 235, 255) else Color.rgb(26, 26, 26)
+                paint.textSize = 12f * unit
+                var text = state.draft
+                while (text.length > 1 && paint.measureText(text) > right - left) text = text.substring(1)
+                canvas.drawText(text, right - paint.measureText(text), h / 2f + 4f * unit, paint)
+            } else run {
                 paint.color = if (state.phase == Phase.PROCESSING) Color.rgb(202, 190, 208) else if (ptt) Color.rgb(247, 235, 255) else Color.rgb(26, 26, 26)
                 paint.strokeWidth = 3f * unit
                 paint.strokeCap = Paint.Cap.ROUND

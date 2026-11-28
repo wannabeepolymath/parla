@@ -31,6 +31,7 @@ class ParlaService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        SafeStart.get(this) // Counts a native attempt an earlier process never finished, before any new one.
         // Orphaned private audio can remain only after OS/process termination.
         CaptureAudio.sweep(File(cacheDir, "audio"))
         CaptureAudio.sweep(File(cacheDir, "keyboard-audio")) // Previous keyboard cache; never active owners.
@@ -122,6 +123,13 @@ class ParlaService : Service() {
             owner.release(anchor); capturedAnchor = null; anchorOwner = null
             fail("Your speech model is missing. Download it in Models."); openApp(); return
         }
+        if (SafeStart.get(this).paused(model)) {
+            // Refuse before listening, so no speech is recorded only to be refused.
+            owner.release(anchor); capturedAnchor = null; anchorOwner = null
+            fail(SafeStart.PAUSED); openApp(); return
+        }
+        val previewModel = PreviewPolicy.model
+        val preview = PreviewPolicy.active(settings, PreviewPolicy.device(this), manager.file(previewModel).isFile)
         val op = PendingOperation(); operation = op
         op.advance(PendingOperation.Stage.recording)
         val file = CaptureAudio.reserve(File(cacheDir, "audio"))
@@ -139,6 +147,12 @@ class ParlaService : Service() {
             entered.set(true)
             try {
                 check(MicrophoneOwner.acquire(coroutineContext.job)) { "Finish the microphone test in parla, then try again." }
+                // Child of this session: canceled with it, and before the final recognition is queued behind it.
+                val drafting = if (preview) launch {
+                    RecognitionPreview().run(file, manager.file(previewModel), previewModel, frozen.dictionary) { draft ->
+                        if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) mutableStatus.value = mutableStatus.value.copy(draft = draft.takeLast(200))
+                    }
+                } else null
                 timing.span(TimingStage.record_start, TimingStage.record_stop) {
                     capture.record(file) { level ->
                         scope.launch {
@@ -148,6 +162,7 @@ class ParlaService : Service() {
                         }
                     }
                 }
+                drafting?.cancel()
                 ensureActive()
                 recovery.prepare(file,anchor.privateEditor) { op.revoked }
                 ensureActive()
@@ -197,7 +212,7 @@ class ParlaService : Service() {
     private fun stopRecording() {
         if (status.value.phase != Phase.RECORDING || stopping) return
         stopping = true
-        mutableStatus.value = status.value.copy(phase = Phase.PROCESSING, message = "Finishing recording…", level = 0f)
+        mutableStatus.value = status.value.copy(phase = Phase.PROCESSING, message = "Finishing recording…", level = 0f, draft = "")
         recorder?.stop()
     }
 

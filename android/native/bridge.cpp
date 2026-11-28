@@ -124,3 +124,14 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
     } catch (const std::exception &e) { failure(env, e.what()); return nullptr; }
     catch (...) { failure(env, "Native recognition failed"); return nullptr; }
 }
+// Safe Start's explicit "Try loading once": init and free only, no audio. Same serial lifecycle lock as recognize.
+extern "C" JNIEXPORT jboolean JNICALL Java_dev_parla_android_WhisperJni_prepare(JNIEnv *env, jobject, jbyteArray modelBytes) {
+    try {
+        std::lock_guard<std::mutex> lock(inferenceMutex);
+        const auto model = bytes(env, modelBytes, 8192);
+        auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = false;
+        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(whisper_init_from_file_with_params(model.c_str(), cp), whisper_free);
+        return ctx ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception &e) { failure(env, e.what()); return JNI_FALSE; }
+    catch (...) { failure(env, "Native model load failed"); return JNI_FALSE; }
+}

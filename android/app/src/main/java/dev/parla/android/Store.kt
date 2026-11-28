@@ -70,6 +70,7 @@ internal object LocalDataCodec {
             .put("backups", JSONArray(s.backups.map { JSONObject().put("provider", it.provider).put("baseUrl", it.baseUrl).put("model", it.model).put("keyless", it.keyless) }))
             .put("backupReview", s.backupReview)
             .put("localModel", s.localModel)
+            .put("previewEnabled", s.previewEnabled)
             .put("language", s.language)
             .put("style", s.style)
             .put("cleanupEnabled", s.cleanupEnabled)
@@ -107,6 +108,7 @@ internal object LocalDataCodec {
         require(!s.has("baseUrl") || s.get("baseUrl") is String)
         require(!s.has("cleanupModel") || s.get("cleanupModel") is String)
         require(!s.has("localModel") || s.get("localModel") is String)
+        require(!s.has("previewEnabled") || s.get("previewEnabled") is Boolean)
         require(!s.has("language") || s.get("language") is String)
         require(!s.has("style") || s.get("style") is String)
         require(!s.has("cleanupEnabled") || s.get("cleanupEnabled") is Boolean)
@@ -141,6 +143,7 @@ internal object LocalDataCodec {
             provider = provider, providers = providers, backups = backups,
             backupReview = if(s.has("backupReview")) s.getString("backupReview") else d.backupReview,
             localModel = if(s.has("localModel")) s.getString("localModel") else d.localModel,
+            previewEnabled = s.has("previewEnabled") && s.getBoolean("previewEnabled"),
             language = if(s.has("language")) s.getString("language") else d.language,
             style = if(version == 1) "standard" else if(s.has("style")) s.getString("style") else d.style,
             cleanupEnabled = if(s.has("cleanupEnabled")) s.getBoolean("cleanupEnabled") else d.cleanupEnabled,

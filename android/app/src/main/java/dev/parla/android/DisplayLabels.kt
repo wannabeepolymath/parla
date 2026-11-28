@@ -26,6 +26,7 @@ internal fun speechModelLabel(value: String) = when(value) {
     "base.en" -> "Base · English"
     "small.en-q5_1" -> "Small · English"
     "large-v3-turbo-q5_0" -> "Large v3 Turbo · Multilingual"
+    SpeechModel.IMPORTED_ID -> "Your imported model · Not verified"
     else -> "Choose a speech model"
 }
 internal fun screenLabel(route: String) = when(route) {

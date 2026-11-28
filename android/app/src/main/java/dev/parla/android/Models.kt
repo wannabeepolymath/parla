@@ -11,7 +11,10 @@ data class Settings(
     val backups: List<CleanupBackup> = emptyList(),
     /** Digest of the reviewed chain; empty or stale means backups are off. */
     val backupReview: String = "",
+    /** A catalog id, or [SpeechModel.IMPORTED_ID] for the user's own unverified model file. */
     val localModel: String = "base.en",
+    /** Draft text while recording; off by default (see PreviewPolicy). */
+    val previewEnabled: Boolean = false,
     val language: String = "auto",
     val style: String = "standard",
     val cleanupEnabled: Boolean = true,
@@ -56,4 +59,5 @@ data class LocalData(val settings: Settings = Settings(), val dictionary: List<S
 }
 data class CleanupResult(val text: String, val warning: String? = null)
 enum class Phase { IDLE, RECORDING, PROCESSING, ERROR }
-data class DictationStatus(val phase: Phase = Phase.IDLE, val message: String = "Ready when you are", val level: Float = 0f)
+/** [draft]: preview text while recording only. It is displayed, never delivered. */
+data class DictationStatus(val phase: Phase = Phase.IDLE, val message: String = "Ready when you are", val level: Float = 0f, val draft: String = "")
