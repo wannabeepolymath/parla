@@ -84,20 +84,22 @@ object InsertionPolicy {
         UnicodeScript.LAO, UnicodeScript.KHMER, UnicodeScript.MYANMAR)
 
     /**
-     * The script of the nearest code point from [from] within the same word that has one. Combining marks,
-     * variation selectors and ZWJ (INHERITED), and ー, 。 and digits (COMMON) take the script of their neighbour.
+     * The script at the edge of the adjoining token. Combining marks, variation selectors and ZWJ (INHERITED) and
+     * the CJK-attached marks below take their neighbour's script; any other character (digits, punctuation,
+     * whitespace) decides, so "Hello" before "123,你好" keeps its space.
      */
     private fun wordScript(s: String, from: Int, forward: Boolean): UnicodeScript {
         var i = from
         while (if (forward) i < s.length else i > 0) {
             val cp = if (forward) s.codePointAt(i) else s.codePointBefore(i)
-            if (Character.isWhitespace(cp) || Character.isSpaceChar(cp)) break
             val script = UnicodeScript.of(cp)
-            if (script != UnicodeScript.COMMON && script != UnicodeScript.INHERITED) return script
+            if (script != UnicodeScript.INHERITED && cp !in cjkMarks) return script
             i += if (forward) Character.charCount(cp) else -Character.charCount(cp)
         }
         return UnicodeScript.COMMON
     }
+    // ー 々 〆 〻 ゛ ゜ 、 。 「 」 『 』
+    private val cjkMarks = setOf(0x30FC, 0x3005, 0x3006, 0x303B, 0x309B, 0x309C, 0x3001, 0x3002, 0x300C, 0x300D, 0x300E, 0x300F)
 
     fun replacement(editor: EditorSnapshot, dictated: String): String? {
         if (!safe(editor) || dictated.isBlank() || dictated.length > MAX_EDITOR_CHARS) return null

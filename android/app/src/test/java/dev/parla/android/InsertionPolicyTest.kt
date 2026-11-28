@@ -150,6 +150,9 @@ class InsertionPolicyTest {
         assertEquals("你好。world", at("world", 0, dictated = "你好。"))
         assertEquals("Helloー世界", at("ー世界", 0, dictated = "Hello"))                          // next word starts with ー
         assertEquals("Hello 123", at("123", 0, dictated = "Hello"))                              // digits alone stay spaced
+        assertEquals("Hello 123,你好", at("123,你好", 0, dictated = "Hello"))                     // digits and punctuation end the walk
+        assertEquals("Total 123.45,数量", at("123.45,数量", 0, dictated = "Total"))
+        assertEquals("「東京」world", at("world", 0, dictated = "「東京」"))                       // CJK brackets attach
     }
 
     @Test fun addressesNeverGetAnAutomaticSpace() {
