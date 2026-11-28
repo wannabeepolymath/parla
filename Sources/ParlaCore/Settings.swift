@@ -325,6 +325,55 @@ public final class SettingsStore {
         }
     }
 
+    public struct ResetRefused: Error, CustomStringConvertible {
+        public let description: String
+    }
+    /// Recovery for an unreadable settings.json, after the user confirms: the broken
+    /// file is renamed to `settings.json.broken-<timestamp>` beside it (never deleted),
+    /// then defaults are written with `onboardingCompleted` kept so an existing user
+    /// isn't sent back to setup. Keychain credentials are not touched. Refuses when the
+    /// file reads fine, and backs out if the file changes underneath it or the write fails.
+    @discardableResult
+    public func resetUnreadableSettings(now: Date = Date()) throws -> URL {
+        let moved = try lock.withLock { () -> URL in
+            let fm = FileManager.default
+            guard documentIO == nil else { throw ResetRefused(description: "These settings can’t be reset here.") }
+            guard fm.fileExists(atPath: url.path), readFromDisk().1 != nil, let seen = try? Data(contentsOf: url) else {
+                throw ResetRefused(description: "Settings are readable, so there’s nothing to reset.")
+            }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyyMMdd-HHmmss"
+            let base = url.lastPathComponent + ".broken-" + formatter.string(from: now)
+            var target = url.deletingLastPathComponent().appendingPathComponent(base)
+            var suffix = 2
+            while fm.fileExists(atPath: target.path) {
+                target = url.deletingLastPathComponent().appendingPathComponent("\(base)-\(suffix)"); suffix += 1
+            }
+            try fm.moveItem(at: url, to: target)
+            // ponytail: other processes aren't locked out, so an editor saving in the
+            // microseconds between these checks and the write could still lose its save;
+            // a no-clobber create (O_EXCL) would close it if that ever matters.
+            guard (try? Data(contentsOf: target)) == seen else {
+                if !fm.fileExists(atPath: url.path) { try? fm.moveItem(at: target, to: url) }
+                throw ResetRefused(description: "settings.json changed while resetting, so nothing was replaced.")
+            }
+            var defaults = Settings()
+            defaults.onboardingCompleted = true
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard !fm.fileExists(atPath: url.path) else {
+                throw ResetRefused(description: "A new settings.json appeared while resetting, so it was kept.")
+            }
+            do { try atomicWrite(encoder.encode(defaults), url) } catch {
+                if !fm.fileExists(atPath: url.path) { try? fm.moveItem(at: target, to: url) } // back to the unreadable original
+                throw error
+            }
+            cached = nil; _lastError = nil
+            return target
+        }
+        NotificationCenter.default.post(name: Self.configurationDidChange, object: self)
+        return moved
+    }
+
     /// Explicit saved-Original experiments require a real, fully decodable file.
     /// This read neither migrates credentials nor updates/repairs the cached defaults.
     public enum SavedSnapshotFailure: Error { case missing, unreadable, corrupt }

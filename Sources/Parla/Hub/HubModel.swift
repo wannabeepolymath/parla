@@ -33,6 +33,8 @@ final class HubModel: ObservableObject {
     @Published var templateDocument = GuidedTemplateDocument()
     @Published var selectedTemplateID: UUID?
     @Published var templateEditor: GuidedTemplateDefinition?
+    /// View-facing: set when leaving Meetings would end a recording, so the Hub can ask first.
+    @Published var meetingExitRequest: MeetingExitRequest?
     var templateEditorBase: UUID?
     @Published var templateMessage: String?
     private var templateObserver: AnyCancellable?
@@ -359,7 +361,7 @@ final class HubModel: ObservableObject {
     }
     private var failoverPrerequisiteMessage: String? {
         guard settings.outputMode == .cleanup, settings.cleanupEnabled else {
-            return "Backups need cleanup turned on and Dictation output set to Cleaned up (Output & Presets)."
+            return "Backups need cleanup turned on and Dictation output set to Cleaned up (AI Cleanup)."
         }
         return nil
     }

@@ -27,6 +27,45 @@ final class SettingsTests: XCTestCase {
         XCTAssertNil(store.lastError)
     }
 
+    func testResetUnreadableSettingsKeepsBrokenFileAndLoadsDefaults() throws {
+        let store = tempStore()
+        try FileManager.default.createDirectory(at: store.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let broken = Data("{ \"dictionary\": [\"Parla\", ".utf8)
+        try broken.write(to: store.url)
+        _ = store.load()
+        XCTAssertNotNil(store.lastError)
+
+        let moved = try store.resetUnreadableSettings(now: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(moved.deletingLastPathComponent(), store.url.deletingLastPathComponent())
+        XCTAssertTrue(moved.lastPathComponent.hasPrefix("settings.json.broken-"))
+        XCTAssertEqual(try Data(contentsOf: moved), broken, "the unreadable file is preserved byte for byte")
+
+        let loaded = store.load()
+        XCTAssertNil(store.lastError)
+        XCTAssertTrue(loaded.onboardingCompleted, "an existing user isn't sent back to setup")
+        XCTAssertTrue(loaded.dictionary.isEmpty)
+        XCTAssertThrowsError(try store.resetUnreadableSettings(), "readable settings are never reset")
+    }
+
+    func testResetRestoresOriginalWhenWritingDefaultsFails() throws {
+        struct DiskFull: Error {}
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("settings.json")
+        let store = SettingsStore(url: url, credentials: testCredentialStore(), atomicWrite: { _, _ in throw DiskFull() })
+        let broken = Data("{ \"dictionary\": [".utf8)
+        try broken.write(to: url)
+        _ = store.load()
+        XCTAssertNotNil(store.lastError)
+
+        XCTAssertThrowsError(try store.resetUnreadableSettings())
+        XCTAssertEqual(try Data(contentsOf: url), broken, "the original is put back, not left missing")
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.contains("broken-") }
+        XCTAssertTrue(leftovers.isEmpty)
+        _ = store.load()
+        XCTAssertNotNil(store.lastError, "still blocked as unreadable, never treated as a fresh install")
+    }
+
     func testCorruptFileFallsBackToDefaultsAndReportsError() throws {
         let store = tempStore()
         try FileManager.default.createDirectory(

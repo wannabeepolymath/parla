@@ -6,41 +6,52 @@ struct HubMicrophoneTestView: View {
     @ObservedObject var test: MicrophoneTestController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HubSection("Test your microphone", footer: "Records up to 10 seconds. The audio isn’t saved or transcribed. Use headphones when you listen back.") {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(message(test.state)).foregroundStyle(Theme.text)
-                    if test.state == .stopped || test.state == .listening {
-                        Text(message(test.captureStatus)).foregroundStyle(Theme.muted)
-                    }
-                    if let name = test.route.name { Text("Microphone: \(name)").font(.system(size: 13)) }
-                    if test.route.fallback == true {
-                        Text("Your chosen microphone isn’t available, so the system default is used.").foregroundStyle(Theme.muted)
-                    }
-                    if test.routeChanged { Text("The microphone changed during the test.").foregroundStyle(Theme.muted) }
-                    ProgressView(value: Double(test.level), total: 1)
-                    HStack {
-                        Button("Start test") { model.startMicrophoneTest() }
-                            .buttonStyle(HubButtonStyle(kind: .primary))
-                        Button("Stop") { model.stopMicrophoneTest() }.disabled(!test.capturing)
-                            .buttonStyle(HubButtonStyle())
-                        Button(test.playerActive ? "Stop listening" : "Listen") {
+        HubSection("Microphone test",
+                   footer: "Records up to 10 seconds. Nothing is saved or transcribed. Dictation is paused until you clear the test or leave this page.") {
+            HubRow(message(test.state), detail: detail) {
+                if test.capturing {
+                    Button("Stop") { model.stopMicrophoneTest() }.buttonStyle(HubButtonStyle(kind: .primary))
+                } else {
+                    Button(test.hasReview ? "Test Again" : "Start Test") { model.startMicrophoneTest() }
+                        .buttonStyle(HubButtonStyle(kind: .primary))
+                }
+            }
+            LevelMeter(level: test.level)
+                .padding(.horizontal, HubLayout.rowInset)
+                .padding(.bottom, 14)
+            HubDivider()
+            HubRow("Microphone", detail: test.route.name.map { "Recording from \($0)" } ?? MicrophonePicker.detail(for: model.settings.inputDeviceUID)) {
+                MicrophonePicker(selection: $model.settings.inputDeviceUID).disabled(test.capturing || model.loadError != nil)
+            }
+            if test.hasReview || test.ownsSession {
+                HubDivider()
+                HubRow("Recording", detail: "Use headphones when you listen back") {
+                    HStack(spacing: 8) {
+                        Button("Clear") { model.clearMicrophoneTest() }.buttonStyle(HubButtonStyle())
+                        Button(test.playerActive ? "Stop Listening" : "Listen") {
                             if test.playerActive { model.stopListeningMicrophoneTest() } else { model.listenMicrophoneTest() }
                         }
-                        .disabled(test.capturing || !test.hasReview).buttonStyle(HubButtonStyle())
-                        Button("Clear") { model.clearMicrophoneTest() }.buttonStyle(HubButtonStyle())
+                        .buttonStyle(HubButtonStyle())
+                        .disabled(test.capturing || !test.hasReview)
                     }
-                }.padding(14)
+                }
             }
-            Text("Click Clear when you’re done to use dictation again.")
-                .font(.system(size: 13)).foregroundStyle(Theme.muted)
         }
     }
+
+    private var detail: String? {
+        var notes: [String] = []
+        if test.state == .stopped || test.state == .listening { notes.append(message(test.captureStatus)) }
+        if test.route.fallback == true { notes.append("Your chosen microphone isn’t available, so the system default is used.") }
+        if test.routeChanged { notes.append("The microphone changed during the test.") }
+        return notes.isEmpty ? nil : notes.joined(separator: " ")
+    }
+
     private func message(_ state: MicrophoneTestController.State) -> String {
         switch state {
-        case .idle: return "Click Start test and say something."
+        case .idle: return "Click Start Test and say something"
         case .starting: return "Starting…"
-        case .signal: return "Your microphone is working."
+        case .signal: return "Your microphone is working"
         case .silentPCM: return "No sound detected. Speak up or check your microphone."
         case .conversionFailure: return "Some audio couldn’t be read. Try again."
         case .noPCM: return "No audio received. Check your microphone and access."

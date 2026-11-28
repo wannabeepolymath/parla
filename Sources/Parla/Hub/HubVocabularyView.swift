@@ -12,55 +12,58 @@ struct HubVocabularyView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HubSection("Replacements", footer: "Swap exact words or phrases after dictation. Matching is case-sensitive.") {
-                ForEach($model.replacements) { $row in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            TextField("Replace", text: $row.source).hubField()
-                            Button { model.replacements.removeAll { $0.id == row.id } } label: {
-                                Image(systemName: "trash")
-                            }.buttonStyle(.plain)
-                        }
-                        Text("With").font(.caption).foregroundStyle(Theme.muted)
-                        TextEditor(text: $row.replacement).font(.system(size: 12)).frame(height: 48)
-                    }.padding(12)
+        VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+            HubSection("Replacements", footer: "Swaps exact words or phrases after dictation. Matching is case-sensitive.",
+                       accessory: { HubAddButton("Add Replacement") { model.replacements.append(.init()) } }) {
+                if model.replacements.isEmpty {
+                    EmptyHint(text: model.loadError == nil ? "No replacements yet" : "Replacements can’t be shown",
+                              detail: model.loadError == nil ? "Replace a word you say with the text you want, like “k8s” → “Kubernetes”."
+                                                             : "They’ll appear once settings.json is fixed.")
                     HubDivider()
+                } else {
+                    MappingHeader(from: "Replace", to: "With")
+                    ForEach($model.replacements) { $row in
+                        MappingRow(from: $row.source, to: $row.replacement, fromPrompt: "Word or phrase", toPrompt: "Replacement",
+                                   deleteLabel: "Delete replacement") { model.replacements.removeAll { $0.id == row.id } }
+                        HubDivider()
+                    }
                 }
-                if model.replacements.isEmpty { EmptyHint(text: "No replacements yet") }
+                HubRow("Try it", detail: sample.isEmpty ? "Type a sentence to preview replacements" : LiteralReplacement.apply(rules, to: sample)) {
+                    TextField("Try a sentence", text: $sample, prompt: Text("Type a sentence")).hubField().hubControl()
+                }
             }
-            Button("Add replacement") { model.replacements.append(.init()) }
-                .buttonStyle(HubButtonStyle())
-            TextField("Try a sentence", text: $sample).hubField()
-            Text(LiteralReplacement.apply(rules, to: sample))
-                .font(.system(size: 12)).textSelection(.enabled)
 
-            HubSection("Import and export", footer: "Share your words, snippets and replacements as a file.") {
-                HStack {
-                    Button("Import…") { model.chooseVocabularyImport() }
-                    Button("Export…") { model.exportVocabulary() }
-                }.buttonStyle(HubButtonStyle()).padding(12)
+            HubSection("Import and export", footer: model.transferMessage) {
+                HubRow("Words, snippets and replacements", detail: "Share them as a file or bring in someone else’s") {
+                    HStack(spacing: 8) {
+                        Button("Import…") { model.chooseVocabularyImport() }
+                        Button("Export…") { model.exportVocabulary() }
+                    }.buttonStyle(HubButtonStyle())
+                }
                 if let preview = model.importPreview {
-                    VStack(alignment: .leading, spacing: 10) {
+                    HubDivider()
+                    VStack(alignment: .leading, spacing: 8) {
                         Text("\(preview.incoming.words.count) words · \(preview.incoming.snippets.count) snippets · \(preview.incoming.replacements.count) replacements")
+                            .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
                         Text("\(preview.conflicts) already exist · \(preview.duplicateWords) duplicates skipped")
-                            .foregroundStyle(Theme.muted)
+                            .font(.system(size: 12)).foregroundStyle(Theme.muted)
                         if !preview.conflictKeys.isEmpty {
                             ScrollView {
                                 Text(preview.conflictKeys.joined(separator: "\n"))
+                                    .font(.system(size: 12))
                                     .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                             }.frame(maxHeight: 100)
                         }
-                        HStack {
-                            Button("Add to mine") { model.applyVocabulary(.merge) }
-                            Button("Replace mine…") { confirmReplace = true }
+                        HStack(spacing: 8) {
+                            Button("Replace Mine…") { confirmReplace = true }
+                                .buttonStyle(HubButtonStyle(kind: .danger))
                                 .disabled(preview.incoming.isEmpty)
-                            Button("Cancel") { model.importPreview = nil }
-                        }.buttonStyle(HubButtonStyle())
-                    }.font(.system(size: 12)).padding(12)
-                }
-                if let message = model.transferMessage {
-                    Text(message).font(.system(size: 12)).textSelection(.enabled).padding(12)
+                            Spacer()
+                            Button("Cancel") { model.importPreview = nil }.buttonStyle(HubButtonStyle())
+                            Button("Add to Mine") { model.applyVocabulary(.merge) }.buttonStyle(HubButtonStyle(kind: .primary))
+                        }
+                    }
+                    .hubInset()
                 }
             }
         }

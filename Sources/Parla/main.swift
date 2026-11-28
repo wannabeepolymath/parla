@@ -972,7 +972,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if command, selection == nil { hud.show(.error("Select text first")); return nil }
         if !command, settings.outputMode == .selectedPreset {
             do { _ = try settings.selectedTransformPreset() }
-            catch { hud.show(.error("Choose a preset in Output & Presets first")); return nil }
+            catch { hud.show(.error("Choose a preset in Rewrite Presets first")); return nil }
         }
         let refusal = MainActor.assumeIsolated {
             ParakeetAudioEntry.physical(settings, destination: destination, owner: parakeetPreparation)

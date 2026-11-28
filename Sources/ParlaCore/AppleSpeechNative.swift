@@ -10,6 +10,13 @@ public enum AppleSpeechNative {
             throw AppleSpeechRefusal.unsupported
         })
     }
+    /// Locale identifiers Apple Speech can transcribe, for pickers. Empty when unknown (older macOS).
+    public static func supportedLocaleIdentifiers() async -> [String] {
+        #if canImport(Speech) && canImport(AVFAudio) && compiler(>=6.2)
+        if #available(macOS 26.0, *) { return await SpeechTranscriber.supportedLocales.map(\.identifier).sorted() }
+        #endif
+        return []
+    }
     public static func checkAvailability() throws {
         #if canImport(Speech) && canImport(AVFAudio) && compiler(>=6.2)
         if #available(macOS 26.0, *) {

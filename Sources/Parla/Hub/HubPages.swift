@@ -15,178 +15,183 @@ struct GeneralPage: View {
             : "Used only while you dictate"
     }
 
+    @State private var moreShortcuts = false
+    @State private var showPermissions = false
+    @State private var showAdvanced = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HubSection("Permissions") {
-                permissionRow("Microphone", granted: model.micGranted,
-                              pane: "Privacy_Microphone", detail: micDetail)
-                HubDivider()
-                permissionRow("Accessibility", granted: model.axGranted,
-                              pane: "Privacy_Accessibility",
-                              detail: "Needed for shortcuts and typing into apps")
-            }
-
-            if let problem = model.downloadError {
-                HubBanner(text: problem)
-            }
-            HubSection("Speech recognition", footer: model.settings.recognitionEngine == .whisper || model.recognitionCapabilityDetail.isEmpty ? nil : model.recognitionCapabilityDetail) {
-                HubRow("Engine") {
-                    Picker("", selection: $model.settings.recognitionEngine) {
-                        Text("Whisper").tag(RecognitionEngine.whisper)
-                        Text("Apple Speech").tag(RecognitionEngine.appleSpeech)
-                        if model.settings.recognitionEngine == .parakeet || (!model.parakeetUnavailable && model.parakeetChoiceRefusal == nil) {
-                    Text("Parakeet").tag(RecognitionEngine.parakeet)
+        VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+            // Once both are granted there's nothing to do here, so it folds to one row.
+            let allGranted = model.micGranted && model.axGranted
+            HubSection(allGranted ? nil : "Permissions") {
+                if allGranted {
+                    HubDisclosureRow(title: "Permissions granted", summary: "Microphone and Accessibility", isExpanded: $showPermissions)
                 }
-                if model.settings.recognitionEngine == .invalid { Text("Choose an engine").tag(RecognitionEngine.invalid) }
-                    }.labelsHidden()
-                }
-                if model.settings.recognitionEngine == .parakeet { ParakeetGlobalControls(model: model) }
-                else if !model.parakeetUnavailable {
-                    DisclosureGroup("Parakeet model") { ParakeetControls(model: model) }
-                }
-                if model.settings.recognitionEngine == .parakeet, let reason = model.parakeetChoiceRefusal { Text(reason.message).font(.caption) }
-                if model.settings.recognitionEngine == .appleSpeech {
-                    TextField("Language, e.g. en-US", text: optBinding($model.settings.appleSpeechLocale)).hubField()
-                    AppleSpeechControls(model: model)
-                }
-            }
-            if model.settings.recognitionEngine == .whisper {
-            HubSection("Whisper model") {
-                ForEach(ModelCatalog.all) { m in
-                    if m.id != ModelCatalog.all.first?.id { HubDivider() }
-                    HubRow(m.displayName, detail: m.sizeLabel) {
-                        modelControl(m)
-                    }
-                }
-                HubDivider()
-                HubRow("Language", detail: englishOnlyModel ? "This model understands English only" : nil) {
-                    Picker("", selection: optBinding($model.settings.language)) {
-                        Text("Auto-detect").tag("")
-                        Divider()
-                        ForEach(WhisperTranscriber.languages, id: \.code) { Text($0.name).tag($0.code) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 210)
-                    .disabled(englishOnlyModel)
-                }
-            }
-
-            }
-            HubSection("Live preview") {
-                HubRow("Show text while recording", detail: "Draft text appears in the pill; the final text may differ") {
-                    Toggle("", isOn: $model.settings.streamPreviewEnabled).labelsHidden()
-                }
-                HubDivider()
-                HubRow("Preview model", detail: "Choose a smaller downloaded model for faster drafts") {
-                    Picker("", selection: optBinding($model.settings.recognitionPreviewModelID)) {
-                        Text("Same as dictation").tag("")
-                        ForEach(model.recognitionPreviewChoices) { entry in Text(entry.displayName).tag(entry.id) }
-                        if let id = model.recognitionPreviewUnavailableID { Text("Not downloaded · \(id)").tag(id) }
-                    }.labelsHidden().frame(width: 240)
-                }
-            }
-            HubSection("App") {
-                HubRow("Launch at login") {
-                    Toggle("", isOn: Binding(
-                        get: { model.launchAtLogin },
-                        set: { _ in model.toggleLaunchAtLogin() }))
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
-                HubDivider()
-                HubRow("Always show the pill",
-                       detail: "Keep the dictation pill on screen when idle") {
-                    Toggle("", isOn: $model.settings.showHudAlways)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
-                HubDivider()
-                HubRow("Idle pill size") {
-                    Picker("", selection: $model.settings.hudIdleSize) {
-                        Text("Small").tag("small")
-                        Text("Medium").tag("medium")
-                        Text("Large").tag("large")
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 210)
-                }
-                HubDivider()
-                // Labelled by consequence, not mechanism: the orange dot is the
-                // thing users will actually notice.
-                HubRow("Start dictation instantly",
-                       detail: "Keeps the mic on so no words are cut off. The orange mic dot stays lit.") {
-                    Toggle("", isOn: $model.settings.warmMic)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
-                HubDivider()
-                HubRow("Microphone") {
-                    Picker("", selection: optBinding($model.settings.inputDeviceUID)) {
-                        Text("System default").tag("")
-                        ForEach(micOptions, id: \.uid) { Text($0.name).tag($0.uid) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 210)
-                }
-                HubDivider()
-                HubRow("Activity analysis", detail: "Adds speech timing to Diagnostics. Doesn't change results.") {
-                    Toggle("", isOn: $model.settings.energyActivityShadowEnabled).toggleStyle(.switch).labelsHidden()
-                }
-                HubDivider()
-                HubRow("Settings file", detail: "Edit settings.json directly") {
-                    Button("Open file") { model.onOpenSettingsFile() }
-                        .buttonStyle(HubButtonStyle())
+                if !allGranted || showPermissions {
+                    if allGranted { HubDivider() }
+                    permissionRow("Microphone", granted: model.micGranted,
+                                  pane: "Privacy_Microphone", detail: micDetail)
+                    HubDivider()
+                    permissionRow("Accessibility", granted: model.axGranted,
+                                  pane: "Privacy_Accessibility",
+                                  detail: "Lets Parla hear shortcuts and type into apps")
                 }
             }
 
             if let problem = model.hotkeyError {
-                HubBanner(text: problem)
+                HubBanner(text: problem, kind: .warning)
             }
-            HubSection("Shortcuts", footer: "Click Change, then press the new keys. Esc cancels.") {
-                shortcutRow("Push to talk", "Hold to dictate",
+            HubSection("Shortcuts", footer: "Click a shortcut, then press the new keys. Esc cancels.") {
+                shortcutRow("Push to talk", "Hold to dictate, release to insert",
                             \.pushToTalk, modifierOnly: true)
                 HubDivider()
                 shortcutRow("Hands-free mode",
                             "Press while holding push to talk. Press again, Space or Return to stop.",
                             \.handsFree)
                 HubDivider()
-                HubRow("Command mode", detail: "Edit selected text by voice") {
-                    ShortcutPill(text: model.commandShortcutDisplay)
-                }
-                HubDivider()
-                shortcutRow("Paste last dictation", nil, \.pasteLast)
-                HubDivider()
-                shortcutRow("Open Scratchpad", "A private place to dictate and edit", \.openScratchpad)
-                HubDivider()
-                HubRow("Run selected preset", detail: "Apply your selected preset to highlighted text") {
-                    ShortcutRecorder(model: model, optionalPath: \.runSelectedPreset)
-                }
-                HubDivider()
-                HubRow("Mouse push to talk", detail: model.settings.mouseBinding.map {
-                    $0.buttonNumber == 2 ? "Hold the middle button to dictate. Its normal click won't work."
-                        : "Hold \($0.display) to dictate. Its normal action, like Back, won't work."
-                }) {
-                    Picker("Mouse push to talk", selection: Binding(
-                        get: { model.settings.mouseBinding?.buttonNumber ?? 0 },
-                        set: { model.settings.mouseBinding = MouseButtonBinding(buttonNumber: $0) })) {
-                        Text("Off").tag(0)
-                        Text("Middle").tag(2)
-                        ForEach(3...15, id: \.self) { number in Text("Button \(number + 1)").tag(number) }
+                HubDisclosureRow(title: "More shortcuts", summary: "Command mode, paste last, Scratchpad, presets, mouse", isExpanded: $moreShortcuts)
+                if moreShortcuts {
+                    HubDivider()
+                    HubRow("Command mode", detail: "Edit selected text by voice") {
+                        ShortcutPill(text: model.commandShortcutDisplay)
                     }
-                    .labelsHidden().frame(width: 170)
+                    HubDivider()
+                    shortcutRow("Paste last dictation", nil, \.pasteLast)
+                    HubDivider()
+                    shortcutRow("Open Scratchpad", "A private place to dictate and edit", \.openScratchpad)
+                    HubDivider()
+                    HubRow("Run selected preset", detail: "Apply your selected preset to highlighted text") {
+                        ShortcutRecorder(model: model, optionalPath: \.runSelectedPreset)
+                    }
+                    HubDivider()
+                    HubRow("Cancel", detail: "Stop dictation or close a notification") {
+                        ShortcutPill(text: "Esc")
+                    }
+                    HubDivider()
+                    HubRow("Mouse push to talk", detail: model.settings.mouseBinding.map {
+                        $0.buttonNumber == 2 ? "Hold the middle button to dictate. Its normal click won’t work."
+                            : "Hold \($0.display) to dictate. Its normal action, like Back, won’t work."
+                    }) {
+                        Picker("Mouse push to talk", selection: Binding(
+                            get: { model.settings.mouseBinding?.buttonNumber ?? 0 },
+                            set: { model.settings.mouseBinding = MouseButtonBinding(buttonNumber: $0) })) {
+                            Text("Off").tag(0)
+                            Text("Middle button").tag(2)
+                            ForEach(3...15, id: \.self) { number in Text("Button \(number + 1)").tag(number) }
+                        }
+                        .hubControl()
+                    }
                 }
-                if let problem = model.settings.mouseBindingProblem { Text(problem).font(.caption).foregroundStyle(.secondary) }
+                if let problem = model.settings.mouseBindingProblem {
+                    HubNote(problem, warning: true).hubInset()
+                }
                 if model.settings.mouseBinding != nil, model.inputTapStatus != .ready {
-                    HStack {
-                        Text(model.inputTapStatus.message)
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("Retry") { model.onRetryInput() }
+                    HubDivider()
+                    HubRow(model.inputTapStatus.message) {
+                        Button("Try Again") { model.onRetryInput() }.buttonStyle(HubButtonStyle())
                     }
                 }
+            }
+
+            if let problem = model.downloadError {
+                HubBanner(text: problem)
+            }
+            HubSection("Speech recognition", footer: model.settings.recognitionEngine == .whisper || model.recognitionCapabilityDetail.isEmpty ? nil : model.recognitionCapabilityDetail) {
+                HubRow("Engine") { EnginePicker(model: model) }
                 HubDivider()
-                HubRow("Cancel", detail: "Stop dictation or close a notification") {
-                    ShortcutPill(text: "Esc")
+                HubRow("Microphone", detail: MicrophonePicker.detail(for: model.settings.inputDeviceUID)) {
+                    MicrophonePicker(selection: $model.settings.inputDeviceUID)
+                }
+                if model.settings.recognitionEngine == .whisper {
+                    HubDivider()
+                    HubRow("Language", detail: englishOnlyModel ? "This model understands English only" : nil) {
+                        Picker("Language", selection: optBinding($model.settings.language)) {
+                            Text("Auto-detect").tag("")
+                            Divider()
+                            ForEach(WhisperTranscriber.languages, id: \.code) { Text($0.name).tag($0.code) }
+                        }
+                        .hubControl()
+                        .disabled(englishOnlyModel)
+                    }
+                } else if model.settings.recognitionEngine == .appleSpeech {
+                    HubDivider()
+                    AppleSpeechLocaleRow(locale: $model.settings.appleSpeechLocale)
+                    HubDivider()
+                    AppleSpeechControls(model: model)
+                } else if model.settings.recognitionEngine == .parakeet {
+                    HubDivider()
+                    ParakeetGlobalControls(model: model)
+                    if let reason = model.parakeetChoiceRefusal { HubNote(reason.message, warning: true).hubInset() }
+                }
+                if model.settings.recognitionEngine != .parakeet, !model.parakeetUnavailable {
+                    HubDivider()
+                    DisclosureGroup("Parakeet model") { ParakeetControls(model: model) }.hubInset()
+                }
+                HubDivider()
+                HubToggleRow("Live preview", detail: "Shows draft text in the pill while you speak; the final text may differ",
+                             isOn: $model.settings.streamPreviewEnabled)
+                HubDivider()
+                    HubRow("Preview model", detail: "A smaller downloaded model gives faster drafts") {
+                        Picker("Preview model", selection: optBinding($model.settings.recognitionPreviewModelID)) {
+                            Text("Same as dictation").tag("")
+                            ForEach(model.recognitionPreviewChoices) { entry in Text(entry.hubName).tag(entry.id) }
+                            if let id = model.recognitionPreviewUnavailableID { Text("Not downloaded · \(id)").tag(id) }
+                        }
+                        .hubControl()
+                    }
+            }
+
+            if model.settings.recognitionEngine == .whisper {
+                HubSection("Whisper model", footer: "Larger models are more accurate but slower. Only one download runs at a time.") {
+                    ForEach(ModelCatalog.all) { m in
+                        if m.id != ModelCatalog.all.first?.id { HubDivider() }
+                        HubRow(m.hubName, detail: m.hubDetail) { modelControl(m) }
+                    }
+                }
+            }
+
+            HubSection("App") {
+                HubToggleRow("Launch at login", isOn: Binding(
+                    get: { model.launchAtLogin },
+                    set: { _ in model.toggleLaunchAtLogin() }))
+                HubDivider()
+                // Labelled by consequence, not mechanism: the orange dot is the
+                // thing users will actually notice.
+                HubToggleRow("Start dictation instantly",
+                             detail: "Keeps the mic on so no words are cut off. The orange mic dot stays lit.",
+                             isOn: $model.settings.warmMic)
+                HubDivider()
+                HubToggleRow("Always show the pill", detail: "Keeps the dictation pill on screen when idle",
+                             isOn: $model.settings.showHudAlways)
+                HubDivider()
+                HubRow("Idle pill size") {
+                    Picker("Idle pill size", selection: $model.settings.hudIdleSize) {
+                        Text("Small").tag("small")
+                        Text("Medium").tag("medium")
+                        Text("Large").tag("large")
+                    }
+                    .pickerStyle(.menu)
+                    .hubControl()
+                }
+            }
+
+            HubSection(nil) {
+                HubDisclosureRow(title: "Advanced", summary: "Clipboard, undo, activity analysis, settings file", isExpanded: $showAdvanced)
+                if showAdvanced {
+                    HubDivider()
+                HubToggleRow("Restore clipboard sooner", detail: "Puts your clipboard back as soon as the app has read the pasted text",
+                             isOn: $model.settings.clipboardReceiptRestoreEnabled)
+                HubDivider()
+                HubToggleRow("Undo a canceled dictation", detail: "For 3 seconds after you cancel. The audio stays in memory and is never saved.",
+                             isOn: $model.settings.canceledCaptureUndoEnabled)
+                HubDivider()
+                HubToggleRow("Activity analysis", detail: "Adds speech timing to Diagnostics. Doesn’t change results.",
+                             isOn: $model.settings.energyActivityShadowEnabled)
+                HubDivider()
+                HubRow("Settings file", detail: "Edit settings.json directly") {
+                    Button("Open File") { model.onOpenSettingsFile() }
+                        .buttonStyle(HubButtonStyle())
+                }
                 }
             }
         }
@@ -207,52 +212,23 @@ struct GeneralPage: View {
         model.recognitionCapabilities.modelLanguages == .englishOnly
     }
 
-    /// Live input devices, plus the saved device if it's currently unplugged —
-    /// so the picker still shows the user's choice instead of blanking.
-    private var micOptions: [AudioRecorder.InputDevice] {
-        var devices = AudioRecorder.availableInputs()
-        if let uid = model.settings.inputDeviceUID, !uid.isEmpty,
-           !devices.contains(where: { $0.uid == uid }) {
-            devices.append(.init(uid: uid, name: "Disconnected device"))
-        }
-        return devices
-    }
-
     /// Downloading / not here / selected / on disk. Only one download runs at
-    /// a time, so the other Download buttons go while it does — but the
-    /// installed rows keep their state, or a download hides which model is in
-    /// use. "Installed" is file existence only: hashing three models on every
-    /// render is exactly ghost-pepper #163.
+    /// a time, so the other Download buttons are disabled while it does — but
+    /// the installed rows keep their state, or a download hides which model is
+    /// in use. "Installed" is file existence only: hashing three models on
+    /// every render is exactly ghost-pepper #163.
     @ViewBuilder
     private func modelControl(_ m: ModelCatalog.Model) -> some View {
-        if let row = model.catalogDownloads[m.id], row.phase != .installed || ModelCatalog.isInstalled(m) {
-            VStack(alignment: .trailing, spacing: 6) {
-                Text(row.phase.rawValue).font(.caption).foregroundStyle(.secondary)
-                if row.active { ProgressView(value: Double(row.percent) / 100).frame(width: 120) }
-                HStack {
-                    ForEach(row.actions, id: \.rawValue) { action in
-                        Button(action.rawValue) { model.onCatalogDownloadAction(action, m) }
-                            .buttonStyle(HubButtonStyle())
-                            .disabled(!row.active && model.downloadingModel != nil)
-                    }
-                }
-                if row.phase == .installed {
-                    if model.isSelected(m) {
-                        StatusChip(text: model.modelLoaded ? "In use" : "Selected",
-                                   color: model.modelLoaded ? Theme.success : Theme.danger)
-                    } else {
-                        Button("Use") { model.selectModel(m) }.buttonStyle(HubButtonStyle())
-                    }
-                }
-            }
+        if let row = model.catalogDownloads[m.id], row.phase != .installed {
+            ModelDownloadProgress(model: model, catalogModel: m, row: row)
         } else if !ModelCatalog.isInstalled(m) {
-            if model.downloadingModel == nil {
-                Button("Download") { model.onDownloadModel(m) }
-                    .buttonStyle(HubButtonStyle(kind: model.isSelected(m) ? .primary : .normal))
-            }
+            Button("Download") { model.onDownloadModel(m) }
+                .buttonStyle(HubButtonStyle())
+                .disabled(model.downloadingModel != nil)
+                .help(model.downloadingModel != nil ? "One download at a time" : "Download \(m.sizeLabel)")
         } else if model.isSelected(m) {
             StatusChip(text: model.modelLoaded ? "In use" : "Selected",
-                       color: model.modelLoaded ? Theme.success : Theme.danger)
+                       color: model.modelLoaded ? Theme.success : Theme.muted)
         } else {
             Button("Use") { model.selectModel(m) }
                 .buttonStyle(HubButtonStyle())
@@ -261,7 +237,9 @@ struct GeneralPage: View {
 
     private func permissionRow(_ name: String, granted: Bool, pane: String,
                                detail: String) -> some View {
-        HubRow(name, detail: detail) {
+        let purpose = pane == "Privacy_Microphone" ? "to record your voice." : "to hear shortcuts and type into apps."
+        return HubRow(name, detail: granted ? detail : "Not allowed yet. Parla needs this " + purpose,
+               detailColor: granted ? Theme.muted : Theme.danger) {
             if granted {
                 StatusChip(text: "Granted")
             } else {
@@ -269,6 +247,59 @@ struct GeneralPage: View {
                     .buttonStyle(HubButtonStyle())
             }
         }
+    }
+}
+
+/// One-line download state: bar + percent (or phase) + Pause/Resume/Retry.
+/// Shared by General and onboarding.
+struct ModelDownloadProgress: View {
+    @ObservedObject var model: HubModel
+    let catalogModel: ModelCatalog.Model
+    let row: CatalogDownloadRow
+    var body: some View {
+        HStack(spacing: 8) {
+            if row.active {
+                ProgressView(value: Double(row.percent) / 100).frame(width: 96)
+                Text(row.phase == .downloading ? "\(row.percent)%" : row.phase.rawValue)
+                    .font(.system(size: 12).monospacedDigit()).foregroundStyle(Theme.muted)
+            } else {
+                Text(row.phase.rawValue).font(.system(size: 12))
+                    .foregroundStyle(row.phase == .failed ? Theme.danger : Theme.muted)
+            }
+            ForEach(row.actions, id: \.rawValue) { action in
+                Button(action.rawValue) { model.onCatalogDownloadAction(action, catalogModel) }
+                    .buttonStyle(HubButtonStyle())
+                    .disabled(!row.active && model.downloadingModel != nil)
+            }
+        }
+    }
+}
+
+extension ModelCatalog.Model {
+    /// "Large v3 Turbo": language coverage first; compression is secondary detail.
+    var hubName: String {
+        displayName.replacingOccurrences(of: ", quantized", with: "").replacingOccurrences(of: " (quantized)", with: "")
+    }
+    var englishOnly: Bool { displayName.contains("English") }
+    var hubDetail: String {
+        (englishOnly ? "English only" : "Multilingual, about 100 languages") + " · " + sizeLabel
+            + (displayName.contains("quantized") ? " · compressed" : "")
+    }
+}
+
+/// One engine popup shared by General and Safe Start.
+struct EnginePicker: View {
+    @ObservedObject var model: HubModel
+    var body: some View {
+        Picker("Speech engine", selection: $model.settings.recognitionEngine) {
+            Text("Whisper").tag(RecognitionEngine.whisper)
+            Text("Apple Speech").tag(RecognitionEngine.appleSpeech)
+            if model.settings.recognitionEngine == .parakeet || (!model.parakeetUnavailable && model.parakeetChoiceRefusal == nil) {
+                Text("Parakeet").tag(RecognitionEngine.parakeet)
+            }
+            if model.settings.recognitionEngine == .invalid { Text("Choose an engine").tag(RecognitionEngine.invalid) }
+        }
+        .hubControl()
     }
 }
 
@@ -306,20 +337,36 @@ struct ShortcutRecorder: View {
     var label: String { monitor == nil ? model.shortcutDisplay(chord) : "Press keys…" }
 
     var body: some View {
-        HStack(spacing: 8) {
-            ShortcutPill(text: label)
-            Button(monitor == nil ? "Change" : "Cancel") {
+        let recording = monitor != nil
+        HStack(spacing: 4) {
+            // Leading, so the keycap always ends on the row's trailing edge.
+            HubIconButton(optionalPath == nil ? "arrow.uturn.backward" : "xmark",
+                          label: optionalPath == nil ? "Reset to default" : "Clear shortcut") {
+                stop()
+                if let path, let original { model.setHotkey(path, to: original) }
+                if let optionalPath { model.setOptionalHotkey(optionalPath, to: nil) }
+            }
+            .opacity(chord != original ? 1 : 0)
+            .disabled(chord == original)
+            .accessibilityHidden(chord == original)
+            Button {
                 if monitor == nil { start() } else { stop() }
+            } label: {
+                Text(recording ? label : keycapText(label))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(recording ? Theme.accent : Theme.text)
+                    .lineLimit(1)
+                    .padding(.horizontal, 8)
+                    .frame(minWidth: 44, minHeight: 24)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(recording ? Theme.accentFill : Theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(recording ? Theme.accent : Theme.control))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                    .fixedSize()
             }
-            .buttonStyle(HubButtonStyle())
-            if chord != original {
-                Button(optionalPath == nil ? "Reset" : "Clear") {
-                    stop()
-                    if let path, let original { model.setHotkey(path, to: original) }
-                    if let optionalPath { model.setOptionalHotkey(optionalPath, to: nil) }
-                }
-                .buttonStyle(HubButtonStyle())
-            }
+            .buttonStyle(.plain)
+            .modifier(DimWhenDisabled())
+            .help(recording ? "Press the new keys. Esc cancels." : "Click to change")
+            .accessibilityLabel(recording ? "Recording shortcut. Press the new keys." : "Shortcut \(label). Click to change.")
         }
         .onDisappear(perform: stop)
         // The local monitor only hears keys while the Hub is key, so "Change"
@@ -380,119 +427,184 @@ struct ShortcutRecorder: View {
 
 struct CleanupPage: View {
     @ObservedObject var model: HubModel
+    @State private var editingBackups = false
+    @State private var customModel = false
+    @State private var replacingKey = false
+
+    private var outputDetail: String {
+        switch model.settings.outputMode {
+        case .raw: return "Types exactly what you said"
+        case .cleanup: return "Fixes punctuation, filler words and wording"
+        case .selectedPreset:
+            let name = model.settings.transformPresets.first { $0.id == model.settings.selectedPresetID }?.name
+            return name.map { "Rewrites every dictation with “\($0)”" } ?? "Choose a preset"
+        }
+    }
+
+    /// Plain-language names for the models Parla knows; anything else is "Custom".
+    private static let anthropicModels: [(id: String, name: String, note: String)] = [
+        ("claude-haiku-4-5", "Claude Haiku 4.5", "Fastest and lowest cost. Recommended."),
+        ("claude-sonnet-5", "Claude Sonnet 5", "More careful with tricky wording"),
+        ("claude-opus-4-5", "Claude Opus 4.5", "Most capable, highest cost"),
+    ]
+    private var keyStatus: String {
+        // The "local servers" hint only applies to OpenAI-compatible servers.
+        isAnthropic ? model.credentialStatus.replacingOccurrences(of: " Local servers may not need one.", with: "")
+                    : model.credentialStatus
+    }
 
     private var isAnthropic: Bool { ["", "anthropic"].contains(model.settings.cleanup.provider) }
     private var isLocal: Bool { model.settings.usesAppleIntelligence }
 
-    private var configIssue: String? { model.credentialIssue }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            if let issue = configIssue {
-                HubBanner(text: "Cleanup can’t run. \(issue)")
+        VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+            if let issue = model.credentialIssue {
+                HubBanner(text: "Cleanup can’t run. \(issue)", kind: .warning,
+                          actionTitle: !isLocal && isAnthropic ? "Get a Key" : nil) {
+                    if let url = URL(string: "https://console.anthropic.com/settings/keys") { NSWorkspace.shared.open(url) }
+                }
             }
-            HubSection("Provider",
-                       footer: "If cleanup fails, Parla inserts your original text.") {
-                HubRow("Service") {
-                    Picker("", selection: $model.settings.cleanup.provider) {
+            HubSection(nil, footer: model.settings.outputMode == .raw ? "Cleanup is off. Parla types your original text, without snippets or replacements." : nil) {
+                HubRow("Dictation output", detail: outputDetail) {
+                    DictationOutputPicker(model: model)
+                }
+            }
+            HubSection("Service", footer: model.failoverMessage
+                       ?? "If cleanup fails, Parla tries your backup services, then inserts your original text.") {
+                HubRow("Provider") {
+                    Picker("Provider", selection: $model.settings.cleanup.provider) {
                         Text("Anthropic").tag("anthropic")
                         Text("OpenAI-compatible").tag("openai-compatible")
-                        Text("Apple Intelligence (on this Mac)").tag("apple-intelligence")
+                        Text("Apple Intelligence").tag("apple-intelligence")
                     }
                     .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 300)
+                    .hubControl()
+                }
+                HubDivider()
+                if isLocal {
+                    HubRow("Status", detail: model.localCleanupStatus?.message ?? "Apple Intelligence is ready.") {
+                        Button("Check Again", action: model.recheckLocalCleanup).buttonStyle(HubButtonStyle())
+                    }
+                    HubDivider()
+                    HubRow("Language", detail: "The language you dictate in, like en or hi") {
+                        TextField("Language", text: optBinding($model.settings.cleanup.localSourceLocale), prompt: Text("en"))
+                            .hubField().hubControl()
+                    }
+                } else if isAnthropic {
+                    let known = Self.anthropicModels.contains { $0.id == model.settings.cleanupModel }
+                    HubRow("Model", detail: Self.anthropicModels.first { $0.id == model.settings.cleanupModel && !customModel }?.note) {
+                        Picker("Model", selection: Binding(
+                            get: { known && !customModel ? model.settings.cleanupModel : "custom" },
+                            set: { value in
+                                if value == "custom" { customModel = true }
+                                else { customModel = false; model.settings.cleanupModel = value }
+                            })) {
+                            ForEach(Self.anthropicModels, id: \.id) { Text($0.name).tag($0.id) }
+                            Divider()
+                            Text("Custom…").tag("custom")
+                        }
+                        .hubControl()
+                    }
+                    if customModel || !known {
+                        HubDivider()
+                        HubRow("Model ID", detail: "The exact model name from Anthropic") {
+                            TextField("Model ID", text: $model.settings.cleanupModel, prompt: Text("claude-sonnet-5"))
+                                .hubField().hubControl()
+                        }
+                    }
+                } else {
+                    HubRow("Base URL", detail: "Any OpenAI-compatible server, online or local") {
+                        TextField("Base URL", text: optBinding($model.settings.cleanup.baseURL), prompt: Text("https://api.example.com/v1"))
+                            .hubField().hubControl()
+                    }
+                    HubDivider()
+                    HubRow("Model", detail: "Optional. Empty uses the server’s default.") {
+                        TextField("Model", text: optBinding($model.settings.cleanup.model), prompt: Text("openai/gpt-oss-120b"))
+                            .hubField().hubControl()
+                    }
+                }
+                if !isLocal {
+                    HubDivider()
+                    let saved = model.credentialStatus == CredentialStatus.present.message
+                    HubRow("API key", detail: saved && !replacingKey ? "Saved in Keychain" : keyStatus) {
+                        HStack(spacing: 8) {
+                            if saved && !replacingKey {
+                                // A saved key reads as saved: masked, never an empty field.
+                                Text("•••••••••••")
+                                    .font(.system(size: 9)).tracking(1).foregroundStyle(Theme.muted)
+                                    .accessibilityLabel("Key saved")
+                                Button("Replace…") { replacingKey = true }.buttonStyle(HubButtonStyle())
+                            } else {
+                                SecureField("API key", text: $model.credentialDraft,
+                                            prompt: Text(saved ? "Paste a replacement key" : "Paste your key"))
+                                    .hubField().hubControl(160)
+                                    .onSubmit { model.saveCredential(); replacingKey = false }
+                                if replacingKey {
+                                    Button("Cancel") { replacingKey = false; model.credentialDraft = "" }.buttonStyle(HubButtonStyle())
+                                }
+                                Button("Save") { model.saveCredential(); replacingKey = false }
+                                    .buttonStyle(HubButtonStyle())
+                                    .disabled(model.credentialDraft.isEmpty)
+                            }
+                            HubMoreMenu(label: "Key actions") {
+                                Button("Remove Saved Key", role: .destructive, action: model.removeCredential)
+                                    .disabled(!saved)
+                                Button("Move Keys from settings.json to Keychain", action: model.retryCredentialMigration)
+                            }
+                        }
+                    }
+                }
+                HubDivider()
+                HubRow("Backup services", detail: model.failoverState == "Off"
+                       ? "Up to two other services, tried in order. Each gets your text and may charge you."
+                       : model.failoverState) {
+                    HStack(spacing: 8) {
+                        if model.failoverState != "Off" {
+                            Button("Turn Off", action: model.disableFailover).buttonStyle(HubButtonStyle())
+                        }
+                        Button(model.failoverBackups.isEmpty ? "Set Up…" : "Edit…") { editingBackups = true }
+                            .buttonStyle(HubButtonStyle())
+                    }
                 }
             }
-
+            if let message = model.credentialMessage { HubNote(message, warning: true) }
             if isLocal {
-                HubSection("Apple Intelligence", footer: "Runs on this Mac. Works with one language at a time; translation isn't supported.") {
-                    Text(model.localCleanupStatus?.message ?? "Apple Intelligence is ready.")
-                        .font(.caption).padding(12)
-                    HubRow("Language", detail: "The language you dictate in") {
-                        TextField("e.g. en or hi", text: optBinding($model.settings.cleanup.localSourceLocale)).hubField().frame(width: 240)
+                HubSection("Saved API keys") {
+                    HubRow("Keys in settings.json", detail: "Moves API keys saved in settings.json into Keychain") {
+                        Button("Move to Keychain", action: model.retryCredentialMigration).buttonStyle(HubButtonStyle())
                     }
-                    Button("Check again", action: model.recheckLocalCleanup).padding(12)
-                }
-                HubSection("Saved API keys", footer: "Moves API keys saved in settings.json into Keychain.") {
-                    Button("Move keys to Keychain", action: model.retryCredentialMigration).padding(12)
-                    if let message = model.credentialMessage { Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange) }
-                }
-            } else if isAnthropic {
-                HubSection("Anthropic") {
-                    HubRow("Model") {
-                        TextField("claude-sonnet-5", text: $model.settings.cleanupModel)
-                            .hubField().frame(width: 260)
-                    }
-                    HubDivider()
-
-                }
-            } else {
-                HubSection("Server",
-                           footer: "Any OpenAI-compatible server, online or local. Leave the key empty if it doesn't need one.") {
-                    HubRow("Base URL") {
-                        TextField("https://api.example.com/v1",
-                                  text: optBinding($model.settings.cleanup.baseURL))
-                            .hubField().frame(width: 260)
-                    }
-                    HubDivider()
-                    HubRow("Model", detail: "Optional. Leave empty to use the server's default.") {
-                        TextField("openai/gpt-oss-120b",
-                                  text: optBinding($model.settings.cleanup.model))
-                            .hubField().frame(width: 260)
-                    }
-                    HubDivider()
-
                 }
             }
-
-            if !isLocal {
-            HubSection("API key", footer: model.credentialStatus) {
-                HubRow("API key", detail: "Stored in Keychain. Leave blank to keep the current key.") {
-                    SecureField("New key…", text: $model.credentialDraft).hubField().frame(width: 260)
-                }
-                HStack {
-                    Button("Save", action: model.saveCredential).disabled(model.credentialDraft.isEmpty)
-                    Button("Remove", action: model.removeCredential)
-                    Button("Refresh", action: model.retryCredentialMigration)
-                }
-                if let message = model.credentialMessage { Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange) }
-            }
-
-            }
-
-            CleanupFailoverSection(model: model)
 
             // Absent until the first cleanup with usage reported — an empty card
             // saying nothing is worse than no card.
             if let est = CleanupCostEstimate.over(model.historyEntries) { costSection(est) }
         }
+        .sheet(isPresented: $editingBackups) { CleanupFailoverSheet(model: model) }
     }
 
     @ViewBuilder
     private func costSection(_ est: CleanupCostEstimate) -> some View {
         HubSection("Estimated cost",
                    footer: "Based on list prices for dictations in History. Not a bill.") {
-            HubRow("Cleanup spend",
+            HubRow("So far",
                    detail: "\(est.dictations) dictation\(est.dictations == 1 ? "" : "s") since "
-                       + est.since.formatted(date: .abbreviated, time: .shortened)
-                       + (est.unpriced > 0
-                          ? " · \(est.unpriced) not priced" : "")) {
-                Text(Self.money(est.usd)).font(.system(size: 13, design: .monospaced))
+                       + est.since.formatted(date: .abbreviated, time: .omitted)
+                       + (est.unpriced > 0 ? " · \(est.unpriced) not priced" : "")) {
+                HubValue(Self.money(est.usd))
             }
             if let monthly = est.monthlyUSD {
                 HubDivider()
                 HubRow("At this rate", detail: "Projected over 30 days") {
-                    Text(Self.money(monthly) + "/mo").font(.system(size: 13, design: .monospaced))
+                    HubValue(Self.money(monthly) + " a month")
                 }
             }
         }
     }
 
-    /// Per-dictation cleanup is fractions of a cent, so two decimals would read
-    /// "$0.00" for real spend; monthly figures are ordinary money.
+    /// Per-dictation cleanup is fractions of a cent; say so instead of "$0.0065".
     private static func money(_ usd: Double) -> String {
-        String(format: usd < 1 ? "$%.4f" : "$%.2f", usd)
+        usd < 0.01 ? "Under $0.01" : String(format: "$%.2f", usd)
     }
 }
 
@@ -504,72 +616,118 @@ struct DictionaryPage: View {
     /// dictation path (possibly in an earlier launch), and this page is the only
     /// thing that ever shows them.
     @State private var proposals: [DictionaryLearner.Proposal] = []
+    @State private var hovered: UUID?
+
+    private var wordsFooter: String? {
+        let retained = model.retainedVocabularyCount()
+        let total = model.words.filter({ !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }).count
+        guard retained.count < total else { return nil }
+        return retained.exact
+            ? "\(retained.count) of \(total) words fit the speech model’s prompt. Words near the top win."
+            : "About \(retained.count) of \(total) words help recognition. The exact number appears once the speech model is loaded."
+    }
+
+    /// Suggestions already in the list aren't offered again.
+    private var openProposals: [DictionaryLearner.Proposal] {
+        let existing = Set(model.words.map { $0.text.trimmingCharacters(in: .whitespaces).lowercased() })
+        return proposals.filter { !existing.contains($0.to.lowercased()) }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if !proposals.isEmpty {
+        if model.loadError != nil {
+            HubSection(nil) {
+                EmptyHint(text: "Your dictionary is unavailable",
+                          detail: "Words, replacements and import come back once Parla can read its settings.")
+            }
+        } else {
+            content.onAppear { proposals = DictionaryLearner.Store.shared.pending }
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+            if !openProposals.isEmpty {
                 HubSection("Suggested",
                            footer: "You corrected these after Parla typed them. Add the ones you want Parla to learn.") {
-                    ForEach(proposals, id: \.key) { proposal in
+                    ForEach(openProposals, id: \.key) { proposal in
                         HubRow(proposal.to, detail: "Parla typed “\(proposal.from)”") {
                             HStack(spacing: 8) {
+                                Button("Dismiss") { resolve(proposal, dismissed: true) }
+                                    .buttonStyle(HubButtonStyle())
                                 Button("Add") {
                                     model.words.append(.init(text: proposal.to))
                                     resolve(proposal, dismissed: false)
                                 }
-                                .buttonStyle(HubButtonStyle(kind: .primary))
-                                Button("Dismiss") { resolve(proposal, dismissed: true) }
-                                    .buttonStyle(HubButtonStyle())
+                                .buttonStyle(HubButtonStyle())
                             }
                         }
-                        if proposal.key != proposals.last?.key { HubDivider() }
+                        if proposal.key != openProposals.last?.key { HubDivider() }
                     }
                 }
             }
-            HubSection("Words",
-                       footer: "Words near the top take priority.") {
+            HubSection("Words", footer: wordsFooter.map { "Click a word to edit. Drag to reorder. " + $0 } ?? "Click a word to edit. Drag to reorder; words near the top take priority.", accessory: {
+                HubAddButton("Add Word") { model.words.append(.init()) }
+            }) {
                 if model.words.isEmpty {
-                    EmptyHint(text: "No dictionary entries yet")
+                    EmptyHint(text: "No words yet", detail: "Add names and terms Parla should spell your way.")
                 } else {
                     ForEach($model.words) { $row in
-                        HStack(spacing: 8) {
-                            TextField("Word or phrase", text: $row.text)
-                                .hubField()
-                            Button { model.moveWord(row.id, by: -1) } label: { Image(systemName: "arrow.up") }
-                                .buttonStyle(.plain).help("Higher priority")
-                            Button { model.moveWord(row.id, by: 1) } label: { Image(systemName: "arrow.down") }
-                                .buttonStyle(.plain).help("Lower priority")
-                            Button {
-                                model.words.removeAll { $0.id == row.id }
-                            } label: {
-                                Image(systemName: "trash")
-                                    .foregroundStyle(Theme.muted)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
+                        wordRow($row)
                         if row.id != model.words.last?.id { HubDivider() }
                     }
                 }
             }
-            let retained = model.retainedVocabularyCount()
-            let total = model.words.filter({ !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }).count
-            if retained.count < total {
-                Text(retained.exact
-                     ? "\(retained.count) of \(total) words fit the speech model's prompt. Words higher in the list win."
-                     : "About \(retained.count) of \(total) words help recognition. The exact number appears once the speech model is loaded.")
-                    .font(.system(size: 12)).foregroundStyle(Theme.muted)
-            }
-            Button {
-                model.words.append(.init())
-            } label: {
-                Label("Add word", systemImage: "plus")
-            }
-            .buttonStyle(HubButtonStyle(kind: .primary))
             HubVocabularyView(model: model)
         }
-        .onAppear { proposals = DictionaryLearner.Store.shared.pending }
+    }
+
+    private func wordRow(_ row: Binding<HubModel.WordRow>) -> some View {
+        let id = row.wrappedValue.id
+        let delete = { model.words.removeAll { $0.id == id } }
+        return HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.muted)
+                .frame(width: 16, height: 24)
+                .contentShape(Rectangle())
+                .draggable(id.uuidString)
+                .help("Drag to reorder")
+                .accessibilityHidden(true)
+            TextField("Word or phrase", text: row.text, prompt: Text("Word or phrase"))
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .labelsHidden()
+                .modifier(DimWhenDisabled())
+            HubIconButton("trash", label: "Delete word", action: delete)
+                .modifier(HoverReveal(hovering: hovered == id))
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 10)
+        .frame(minHeight: 36)
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 ? id : (hovered == id ? nil : hovered) }
+        .dropDestination(for: String.self) { items, _ in
+            guard let source = items.first.flatMap(UUID.init(uuidString:)) else { return false }
+            moveWord(source, onto: id); return true
+        }
+        .contextMenu {
+            Button("Move Up") { model.moveWord(id, by: -1) }.disabled(id == model.words.first?.id)
+            Button("Move Down") { model.moveWord(id, by: 1) }.disabled(id == model.words.last?.id)
+            Divider()
+            Button("Delete", role: .destructive, action: delete)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: "Move up") { model.moveWord(id, by: -1) }
+        .accessibilityAction(named: "Move down") { model.moveWord(id, by: 1) }
+    }
+
+    /// Drag-and-drop move in one assignment, so the list saves once.
+    private func moveWord(_ source: UUID, onto target: UUID) {
+        guard let from = model.words.firstIndex(where: { $0.id == source }),
+              let to = model.words.firstIndex(where: { $0.id == target }), from != to else { return }
+        var words = model.words
+        words.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        model.words = words
     }
 
     private func resolve(_ proposal: DictionaryLearner.Proposal, dismissed: Bool) {
@@ -579,6 +737,62 @@ struct DictionaryPage: View {
 }
 
 // MARK: - Snippets
+
+/// "trigger → expansion" with a hover-revealed delete — shared by Snippets and Replacements.
+struct MappingRow: View {
+    let from: Binding<String>
+    let to: Binding<String>
+    let fromPrompt: String
+    let toPrompt: String
+    var invalid = false
+    let deleteLabel: String
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            TextField(fromPrompt, text: from, prompt: Text(fromPrompt))
+                .hubField().labelsHidden().frame(width: 170)
+                .overlay { if invalid { RoundedRectangle(cornerRadius: 6).stroke(Theme.danger) } }
+            Image(systemName: "arrow.right")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.muted)
+                .frame(height: 24)
+                .accessibilityHidden(true)
+            // The field runs to the card's trailing line; delete overlays its end on hover.
+            TextField(toPrompt, text: to, prompt: Text(toPrompt), axis: .vertical)
+                .lineLimit(1...4)
+                .hubField().labelsHidden()
+                .overlay(alignment: .topTrailing) {
+                    HubIconButton("trash", label: deleteLabel, action: onDelete)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(Theme.field))
+                        .modifier(HoverReveal(hovering: hovering))
+                }
+        }
+        .padding(.horizontal, HubLayout.rowInset)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .contextMenu { Button("Delete", role: .destructive, action: onDelete) }
+    }
+}
+
+/// Column labels above a MappingRow list.
+struct MappingHeader: View {
+    let from: String
+    let to: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(from).frame(width: 170, alignment: .leading)
+            Color.clear.frame(width: 11, height: 1)
+            Text(to).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(Theme.muted)
+        .padding(.horizontal, HubLayout.rowInset)
+        .padding(.top, 10).padding(.bottom, 2)
+    }
+}
 
 struct SnippetsPage: View {
     @ObservedObject var model: HubModel
@@ -594,47 +808,30 @@ struct SnippetsPage: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HubSection("Snippets",
-                       footer: "Say the trigger phrase while dictating and Parla types the expansion instead."
-                           + (duplicateTriggers.isEmpty ? "" : " Some triggers repeat; only the last one is kept.")) {
-                if model.snippets.isEmpty {
-                    EmptyHint(text: "No snippets yet")
-                } else {
-                    ForEach($model.snippets) { $row in
-                        HStack(spacing: 8) {
-                            TextField("Trigger phrase", text: $row.trigger)
-                                .hubField().frame(width: 170)
-                                .overlay {
-                                    if duplicateTriggers.contains(row.trigger.trimmingCharacters(in: .whitespaces)) {
-                                        RoundedRectangle(cornerRadius: 8).stroke(Theme.danger)
-                                    }
-                                }
-                            Image(systemName: "arrow.right")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Theme.muted)
-                            TextField("Expansion", text: $row.expansion)
-                                .hubField()
-                            Button {
-                                model.snippets.removeAll { $0.id == row.id }
-                            } label: {
-                                Image(systemName: "trash")
-                                    .foregroundStyle(Theme.muted)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        if row.id != model.snippets.last?.id { HubDivider() }
-                    }
+        HubSection("Snippets",
+                   footer: "Say the phrase while dictating and Parla types the text instead. Import and export them with your dictionary."
+                       + (duplicateTriggers.isEmpty ? "" : " Some phrases repeat; only the last one is kept."),
+                   accessory: {
+                       HStack(spacing: 8) {
+                           HubMoreMenu(label: "Import or export") {
+                               // The import preview lives on Dictionary, so open it there.
+                               Button("Import…") { model.requestedPage = .dictionary; model.chooseVocabularyImport() }
+                               Button("Export…") { model.exportVocabulary() }
+                           }
+                           HubAddButton("Add Snippet") { model.snippets.append(.init()) }
+                       }
+                   }) {
+            if model.snippets.isEmpty {
+                EmptyHint(text: "No snippets yet", detail: "Add a short phrase, like “my address”, and what it should become.")
+            } else {
+                MappingHeader(from: "When I say", to: "Type this")
+                ForEach($model.snippets) { $row in
+                    MappingRow(from: $row.trigger, to: $row.expansion, fromPrompt: "Phrase", toPrompt: "Text to type",
+                               invalid: duplicateTriggers.contains(row.trigger.trimmingCharacters(in: .whitespaces)),
+                               deleteLabel: "Delete snippet") { model.snippets.removeAll { $0.id == row.id } }
+                    if row.id != model.snippets.last?.id { HubDivider() }
                 }
             }
-            Button {
-                model.snippets.append(.init())
-            } label: {
-                Label("Add snippet", systemImage: "plus")
-            }
-            .buttonStyle(HubButtonStyle(kind: .primary))
         }
     }
 }
@@ -645,37 +842,54 @@ struct HistoryPage: View {
     @ObservedObject var model: HubModel
     @State private var query = ""
     @State private var confirmClear = false
+    @State private var expanded: Set<HistoryEntry.ID> = []
+    @State private var hovered: HistoryEntry.ID?
+
+    /// Today / Yesterday / Earlier, newest first, as the store already orders them.
+    private var groups: [(title: String, entries: [HistoryEntry])] {
+        let calendar = Calendar.current
+        var today: [HistoryEntry] = [], yesterday: [HistoryEntry] = [], earlier: [HistoryEntry] = []
+        for entry in filtered {
+            if calendar.isDateInToday(entry.date) { today.append(entry) }
+            else if calendar.isDateInYesterday(entry.date) { yesterday.append(entry) }
+            else { earlier.append(entry) }
+        }
+        return [("Today", today), ("Yesterday", yesterday), ("Earlier", earlier)].filter { !$0.1.isEmpty }
+    }
 
     private var filtered: [HistoryEntry] { model.filteredHistory(query) }
+    private var retryBlocked: Bool { model.loadError != nil || model.saveError != nil || model.history.loadBlocked }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.muted)
-                    TextField("Search history", text: $query)
+                        .accessibilityHidden(true)
+                    TextField("Search history", text: $query, prompt: Text("Search"))
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12.5))
+                        .font(.system(size: 13))
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border))
+                .frame(height: 24)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.field))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.control))
 
-                Spacer()
-
-                Button("Export (\(filtered.count))…") { model.prepareFilteredHistoryExport(query) }
-                    .buttonStyle(HubButtonStyle(kind: .normal))
+                Button("Export…") { model.prepareFilteredHistoryExport(query) }
+                    .buttonStyle(HubButtonStyle())
                     .disabled(filtered.isEmpty)
+                    .help(query.isEmpty ? "Export all dictations" : "Export the \(filtered.count) dictations shown")
 
-                Button("Clear history") { confirmClear = true }
-                    .buttonStyle(HubButtonStyle(kind: .danger))
+                Button("Clear…") { confirmClear = true }
+                    .buttonStyle(HubButtonStyle())
                     .disabled((model.historyEntries.isEmpty && model.pendingHistory.isEmpty) || model.history.loadBlocked)
-                    .confirmationDialog("Delete all dictation history? Saved audio isn't affected.",
+                    .help("Delete all dictation history")
+                    .confirmationDialog("Delete all dictation history? Saved audio isn’t affected.",
                                         isPresented: $confirmClear) {
-                        Button("Delete all", role: .destructive) { model.clearHistory() }
+                        Button("Delete All", role: .destructive) { model.clearHistory() }
                     }
             }
 
@@ -683,110 +897,157 @@ struct HistoryPage: View {
             if let request = model.historyExport {
                 HistoryExportReview(model: model, request: request)
             }
-            if let message = model.historyExportMessage {
-                Text(message).font(.caption).foregroundStyle(Theme.muted)
-            }
-            if let message = model.historyRetryMessage {
-                Text(message).font(.caption).foregroundStyle(Theme.muted)
-            }
+            if let message = model.historyExportMessage { HubNote(message) }
+            if let message = model.historyRetryMessage { HubNote(message) }
             ForEach(model.historyRetries.values.sorted { $0.original.date > $1.original.date }) { preview in
                 HistoryRetryReview(model: model, preview: preview)
             }
 
             ForEach(model.pendingHistory) { entry in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Not saved — kept until you quit Parla").font(.system(size: 12, weight: .semibold))
-                    historyRow(entry, pending: true)
-                    HStack {
-                        Button("Try saving again") { model.retryHistorySave(entry.id) }.disabled(model.history.loadBlocked)
-                        Button("Discard", role: .destructive) { model.discardHistory(entry.id) }
-                    }
+                    HubBanner(text: "Not saved. Parla keeps this until you quit.", kind: .warning,
+                              actionTitle: model.history.loadBlocked ? nil : "Try Again") { model.retryHistorySave(entry.id) }
+                    HubSection(nil) { historyRow(entry, pending: true) }
                 }
             }
 
             if filtered.isEmpty {
-                VStack(spacing: 0) {
-                    EmptyHint(text: model.historyEntries.isEmpty
-                        ? (model.pendingHistory.isEmpty ? "No dictations yet" : "Nothing saved yet")
-                        : "No matches for “\(query)”")
+                HubSection(nil) {
+                    if !model.historyEntries.isEmpty {
+                        EmptyHint(text: "No matches for “\(query)”")
+                    } else if !model.pendingHistory.isEmpty {
+                        EmptyHint(text: "Nothing saved yet")
+                    } else {
+                        EmptyHint(text: "No dictations yet",
+                                  detail: "Hold \(model.shortcutDisplay(model.settings.hotkeys.pushToTalk)) in any app to dictate. Your text shows up here.")
+                    }
                 }
-                .frame(maxWidth: .infinity)
-                .background(Theme.card)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
             } else {
-                VStack(spacing: 10) {
-                    ForEach(filtered) { entry in
-                        historyRow(entry, pending: false)
+                ForEach(groups, id: \.title) { group in
+                    HubSection(group.title) {
+                        ForEach(group.entries) { entry in
+                            if entry.id != group.entries.first?.id { HubDivider() }
+                            historyRow(entry, pending: false)
+                        }
                     }
                 }
             }
         }
     }
 
+    @ViewBuilder
+    private func actions(_ entry: HistoryEntry, pending: Bool) -> some View {
+        Button(expanded.contains(entry.id) ? "Hide Original" : "Compare with Original") {
+            if expanded.contains(entry.id) { expanded.remove(entry.id) } else { expanded.insert(entry.id) }
+        }
+        Divider()
+        Button("Copy Original") { model.copyOriginal(entry) }
+        Button("Copy Result") { model.copyResult(entry) }
+        if pending {
+            Divider()
+            Button("Try Saving Again") { model.retryHistorySave(entry.id) }.disabled(model.history.loadBlocked)
+            Button("Discard", role: .destructive) { model.discardHistory(entry.id) }
+        } else {
+            Divider()
+            Button(entry.operation == nil ? "Clean Up Again…" : "Apply Preset Again…") {
+                model.prepareHistoryRetry(entry.id, applyPreset: entry.operation != nil)
+            }.disabled(retryBlocked)
+            if entry.operation == nil {
+                Button("Clean Up in Sections…") { model.prepareSegmentedHistoryRetry(entry.id) }
+            }
+            Button("Export…") { model.prepareHistoryExport(rowID: entry.id) }
+            Divider()
+            Button("Delete Text", role: .destructive) { model.deleteHistory(entry.id) }
+                .disabled(model.history.loadBlocked)
+        }
+    }
+
     private func historyRow(_ entry: HistoryEntry, pending: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let retry = entry.retries?.last {
-                Text(retry.configuration.retryMode == .segmentedV1 ? "Cleaned up in sections" : retry.configuration.kind == .cleanup ? "Cleaned up again" : "Preset applied")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.muted)
-            }
-            if let operation = entry.operation {
-                Text(operation.name).font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.muted)
-            }
+        VStack(alignment: .leading, spacing: 8) {
             Text(entry.best)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.text)
                 .lineLimit(4)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
-            DisclosureGroup("Original and result") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Original").font(.caption).foregroundStyle(Theme.muted)
-                    Text(entry.raw).textSelection(.enabled)
-                    Text("Result").font(.caption).foregroundStyle(Theme.muted)
-                    Text(entry.best).textSelection(.enabled)
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 8) {
                 if let app = entry.appName {
                     Text(app)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(Theme.text)
                         .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Theme.accentFill))
+                        .frame(height: 18)
+                        .background(Capsule().fill(Theme.border))
+                        .fixedSize()
                 }
-                Text(entry.date.formatted(.relative(presentation: .named)))
-                    .font(.system(size: 11))
+                Text(tags(entry))
+                    .font(.system(size: 12))
                     .foregroundStyle(Theme.muted)
-                if entry.cleaned == nil {
-                    Text("raw")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.muted)
-                }
-                Spacer()
-                Button("Copy original") { model.copyOriginal(entry) }.buttonStyle(.plain)
-                Button("Copy result") { model.copyResult(entry) }.buttonStyle(.plain)
-                if !pending {
-                    if entry.operation == nil {
-                        Button("Clean up in sections…") { model.prepareSegmentedHistoryRetry(entry.id) }
-                            .buttonStyle(.plain)
+                    .lineLimit(1)
+                let open = expanded.contains(entry.id)
+                Button {
+                    if open { expanded.remove(entry.id) } else { expanded.insert(entry.id) }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("Compare")
+                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(open ? 90 : 0))
                     }
-                    Button("Export…") { model.prepareHistoryExport(rowID: entry.id) }.buttonStyle(.plain)
-                    Button(entry.operation == nil ? "Clean up again…" : "Apply preset again…") {
-                        model.prepareHistoryRetry(entry.id, applyPreset: entry.operation != nil)
-                    }.buttonStyle(.plain).disabled(model.loadError != nil || model.saveError != nil || model.history.loadBlocked)
-                    Button("Delete", role: .destructive) { model.deleteHistory(entry.id) }
-                        .buttonStyle(.plain).disabled(model.history.loadBlocked)
-                        .help("Deletes the text only")
+                    .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .modifier(HoverReveal(hovering: open || hovered == entry.id))
+                .help(open ? "Hide the original text" : "Compare the original and the result")
+                .accessibilityLabel(open ? "Hide original and result" : "Show original and result")
+                Spacer(minLength: 8)
+                // Copy rests on the trailing line; ⋯ appears beside it on hover.
+                HStack(spacing: 2) {
+                    HubMoreMenu { actions(entry, pending: pending) }
+                        .modifier(HoverReveal(hovering: hovered == entry.id || pending))
+                    HubIconButton("doc.on.doc", label: "Copy text") { model.copyResult(entry) }
+                }
+                .padding(.trailing, -6) // the glyph, not its hit area, meets the trailing line
+            }
+            if expanded.contains(entry.id) {
+                VStack(alignment: .leading, spacing: 10) {
+                    version("Original", entry.raw) { model.copyOriginal(entry) }
+                    version("Result", entry.best) { model.copyResult(entry) }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.field))
             }
         }
-        .padding(14)
+        .padding(.horizontal, 14).padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.card)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 ? entry.id : (hovered == entry.id ? nil : hovered) }
+        .contextMenu { actions(entry, pending: pending) }
+    }
+
+    /// "12 minutes ago · Cleaned up again" — one line, never wraps.
+    private func tags(_ entry: HistoryEntry) -> String {
+        var parts = [entry.date.formatted(.relative(presentation: .named))]
+        if let retry = entry.retries?.last {
+            parts.append(retry.configuration.retryMode == .segmentedV1 ? "Cleaned up in sections"
+                         : retry.configuration.kind == .cleanup ? "Cleaned up again" : "Preset applied")
+        }
+        if let operation = entry.operation { parts.append(operation.name) }
+        if entry.cleaned == nil { parts.append("Not cleaned up") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func version(_ title: String, _ text: String, copy: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
+                Spacer()
+                Button("Copy", action: copy).buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.accent)
+            }
+            Text(text).font(.system(size: 13)).foregroundStyle(Theme.text).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -794,91 +1055,76 @@ struct HistoryPage: View {
 
 struct PrivacyPage: View {
     @ObservedObject var model: HubModel
-    @State private var confirmClear = false
+    @State private var showDetails = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HubSection("History",
-                       footer: "Dictations into password fields and canceled dictations are never saved.") {
-                HubRow("Keep history",
-                       detail: "Saved on this Mac only") {
-                    Toggle("", isOn: $model.settings.historyEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
+        VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+            HubSection(nil) {
+                HubRow("Speech recognition runs on this Mac", detail: "Your audio never leaves it. Online cleanup, if you use it, gets text only.")
                 HubDivider()
-                HubRow("History limit", detail: "Number of dictations to keep") {
-                    Stepper(value: $model.settings.historyTextCount, in: HistoryStore.countRange) {
-                        Text("\(model.settings.historyTextCount)").monospacedDigit()
-                    }.frame(width: 130)
-                }
-                HubDivider()
-                HubRow("Clear history",
-                       detail: "\(model.historyEntries.count) saved" + (model.pendingHistory.isEmpty ? "" : ", \(model.pendingHistory.count) not saved")) {
-                    Button("Clear…") { confirmClear = true }
-                        .buttonStyle(HubButtonStyle(kind: .danger))
-                        .disabled((model.historyEntries.isEmpty && model.pendingHistory.isEmpty) || model.history.loadBlocked)
-                        .confirmationDialog("Delete all dictation history? Saved audio isn't affected.",
-                                            isPresented: $confirmClear) {
-                            Button("Delete all", role: .destructive) { model.clearHistory() }
-                        }
-                }
-            }.disabled(model.loadError != nil)
-            HistoryStatus(model: model)
-
-            HubSection("Clipboard") {
-                HubRow("Restore clipboard sooner", detail: "Puts your clipboard back as soon as the app has read the pasted text") {
-                    Toggle("", isOn: $model.settings.clipboardReceiptRestoreEnabled).toggleStyle(.switch).labelsHidden()
-                }
-            }.disabled(model.loadError != nil)
-
-            HubSection("Undo cancel") {
-                HubRow("Allow undoing a canceled dictation", detail: "For 3 seconds after you cancel. Audio stays in memory only and is never saved.") {
-                    Toggle("", isOn: $model.settings.canceledCaptureUndoEnabled).toggleStyle(.switch).labelsHidden()
+                HubDisclosureRow(title: "How Parla handles your data", summary: "Passwords, clipboard, cleanup, nearby text", isExpanded: $showDetails)
+                if showDetails {
+                    HubDivider()
+                    HubRow("Password fields are protected", detail: "Parla never types, saves or sends anything in a password field")
+                    HubDivider()
+                    HubRow("Your clipboard is restored", detail: "Parla pastes through the clipboard, then puts back what was there")
+                    HubDivider()
+                    HubRow("Cleanup sends text only", detail: "Apple Intelligence stays on this Mac. Online cleanup gets your dictation, selected text, dictionary and snippets — never audio, app names or web addresses.")
+                    HubDivider()
+                    HubRow("Nearby text", detail: "Online cleanup also gets about 256 characters before the cursor, only in the app you turn this on for. "
+                           + (model.surroundingPolicy?.revision != nil ? "Currently on for one app." : "Currently off.")) {
+                        Button("Manage") { model.requestedPage = .profiles }.buttonStyle(HubButtonStyle())
+                    }
                 }
             }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HubSection("History",
+                           footer: "Dictations into password fields and canceled dictations are never saved.") {
+                    HubToggleRow("Keep history", detail: "Saved on this Mac only", isOn: $model.settings.historyEnabled)
+                    HubDivider()
+                    HubRow("Keep the last") {
+                        HStack(spacing: 6) {
+                            Text("\(model.settings.historyTextCount) dictations").monospacedDigit()
+                                .font(.system(size: 13)).foregroundStyle(Theme.text)
+                            Stepper("History limit", value: $model.settings.historyTextCount, in: HistoryStore.countRange).labelsHidden()
+                        }
+                    }
+                    HubDivider()
+                    HubRow("Saved history",
+                           detail: model.historyEntries.isEmpty && model.pendingHistory.isEmpty ? "Empty"
+                               : "\(model.historyEntries.count) saved" + (model.pendingHistory.isEmpty ? "" : ", \(model.pendingHistory.count) not saved")) {
+                        Button("Open History") { model.requestedPage = .history }.buttonStyle(HubButtonStyle())
+                    }
+                }.disabled(model.loadError != nil)
+                HistoryStatus(model: model)
+            }
+
             HubSection("Original text") {
-                HubRow("Keep original text briefly", detail: "Keeps your last dictation's original text in memory for 30 seconds, even with history off") {
-                    Toggle("", isOn: $model.settings.keepLastOriginalEnabled).toggleStyle(.switch).labelsHidden()
-                }
-                HubDivider()
-                HubRow("Copy original", detail: model.originalCopyStatus.message) {
-                    Button("Copy original") { model.copyLastOriginal() }.buttonStyle(HubButtonStyle())
-                        .disabled(model.originalCopyStatus.token == nil || model.loadError != nil)
+                HubToggleRow("Keep original text briefly", detail: "Holds your last dictation’s original text in memory for 30 seconds, even with history off",
+                             isOn: $model.settings.keepLastOriginalEnabled)
+                if model.settings.keepLastOriginalEnabled {
+                    HubDivider()
+                    HubRow("Last original text", detail: model.originalCopyStatus.token == nil ? "Nothing to copy right now" : model.originalCopyStatus.message) {
+                        Button("Copy") { model.copyLastOriginal() }.buttonStyle(HubButtonStyle())
+                            .disabled(model.originalCopyStatus.token == nil || model.loadError != nil)
+                    }
                 }
             }.disabled(model.loadError != nil)
 
             // Release builds ship without App Intents metadata, so Shortcuts can't see Parla's actions.
             if Bundle.main.url(forResource: "Metadata", withExtension: "appintents") != nil {
-            HubSection("Shortcuts app") {
-                HubRow("Allow Shortcuts to dictate", detail: "Shortcuts receive the text; nothing is pasted. The last result is kept in memory for up to 5 minutes.") {
-                    Toggle("", isOn: $model.settings.automationEnabled).toggleStyle(.switch).labelsHidden()
-                }
-                HubDivider()
-                HubRow("Clear last result") {
-                    Button("Clear") { model.onClearAutomationResult() }.buttonStyle(HubButtonStyle())
-                }
-            }.disabled(model.loadError != nil)
+                HubSection("Shortcuts app") {
+                    HubToggleRow("Allow Shortcuts to dictate", detail: "Shortcuts receive the text; nothing is pasted. The last result is kept in memory for up to 5 minutes.",
+                                 isOn: $model.settings.automationEnabled)
+                    HubDivider()
+                    HubRow("Last result") {
+                        Button("Clear") { model.onClearAutomationResult() }.buttonStyle(HubButtonStyle())
+                    }
+                }.disabled(model.loadError != nil)
             }
 
             HubRecoveryView(model: model)
-            HubDiagnosticsView(model: model)
-
-            HubSection("How Parla handles your data") {
-                HubRow("Speech recognition runs on this Mac",
-                       detail: "Your audio never leaves this Mac") { EmptyView() }
-                HubDivider()
-                HubRow("Your clipboard is restored",
-                       detail: "Parla pastes through the clipboard, then puts back what was there") { EmptyView() }
-                HubDivider()
-                HubRow("Password fields are protected",
-                       detail: "Parla never types, saves or sends anything in a password field") { EmptyView() }
-                HubDivider()
-                HubRow("Apple Intelligence cleanup stays on this Mac", detail: "Your text isn't sent to a server") { EmptyView() }
-                HubDivider()
-                HubRow("Online cleanup sends text only",
-                       detail: "Your dictation, selected text, dictionary and snippets — never audio, app names or web addresses") { EmptyView() }
-            }
         }
         .onAppear { model.refreshRecovery(); model.refreshOriginalCopy() }
         .onDisappear { model.stopRecoveryPlayback() }
@@ -891,89 +1137,138 @@ struct HistoryStatus: View {
     @ObservedObject var model: HubModel
     var body: some View {
         if let error = model.historyError {
-            VStack(alignment: .leading, spacing: 8) {
+            if model.history.loadBlocked {
+                HubBanner(text: error, actionTitle: "Try Again") { model.reloadHistory() }
+            } else if let limit = model.history.countLimit, model.historyEntries.count > limit {
+                HubBanner(text: error, actionTitle: "Apply Limit") { model.retryHistoryTrim() }
+            } else {
                 HubBanner(text: error)
-                if model.history.loadBlocked {
-                    Button("Try again") { model.reloadHistory() }
-                } else if let limit = model.history.countLimit, model.historyEntries.count > limit {
-                    Button("Apply history limit") { model.retryHistoryTrim() }
-                }
             }
         }
     }
 }
 
 
-private struct CleanupFailoverSection: View {
+/// Backup services live in a sheet: they're set up once, and their editor
+/// is too large to sit inline on the page.
+private struct CleanupFailoverSheet: View {
     @ObservedObject var model: HubModel
+    @Environment(\.dismiss) private var dismiss
+
     var body: some View {
-        HubSection("Backup cleanup", footer: "If cleanup fails, Parla tries up to two backup services in order. Each one gets your text and may charge you.") {
-            Text(model.failoverState).font(.headline)
-            ForEach(model.failoverBackups.indices, id: \.self) { index in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Backup \(index + 1)").font(.headline)
-                    Picker("Provider", selection: $model.failoverBackups[index].provider) {
-                        Text("Anthropic").tag("anthropic")
-                        Text("OpenAI-compatible").tag("openai-compatible")
+        HubSheet(title: "Backup cleanup", width: 560) {
+            Text("If cleanup fails, Parla tries up to two backup services in order. Each one gets your text and may charge you.")
+                .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if model.failoverBackups.isEmpty {
+                        HubSection(nil) { EmptyHint(text: "No backup services", detail: "Add one to use it when cleanup fails.") }
                     }
-                    .onChange(of: model.failoverBackups[index].provider) { provider in
-                        if provider == "anthropic" { model.failoverBackups[index].baseURL = nil }
-                    }
-                    TextField("Base URL (blank for Anthropic)", text: optBinding($model.failoverBackups[index].baseURL)).hubField()
-                    TextField("Model", text: $model.failoverBackups[index].model).hubField()
-                    Picker("API key", selection: $model.failoverBackups[index].source) {
-                        Text("Environment variable").tag(CleanupBackupSource.namedEnvironment)
-                        Text("Keychain").tag(CleanupBackupSource.scopedKeychain)
-                        Text("No key needed").tag(CleanupBackupSource.keylessCompatible)
-                    }
-                    .onChange(of: model.failoverBackups[index].source) { source in
-                        if source != .namedEnvironment { model.failoverBackups[index].environmentName = nil }
-                    }
-                    if model.failoverBackups[index].source == .namedEnvironment {
-                        TextField("Environment variable name", text: optBinding($model.failoverBackups[index].environmentName)).hubField()
-                    }
-                    if model.failoverBackups[index].source == .scopedKeychain {
-                        Text("Shared by every model on this server.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        SecureField("New key", text: Binding(get: { model.failoverKeyDraft(index) }, set: { model.setFailoverKeyDraft(index, $0) })).hubField()
-                        HStack {
-                            Button("Save key") { model.changeFailoverKey(index) }.disabled(model.failoverKeyDraft(index).isEmpty)
-                            Button("Remove key") { model.changeFailoverKey(index, remove: true) }
+                    ForEach(model.failoverBackups.indices, id: \.self) { index in backup(index) }
+                    if let review = model.failoverReview {
+                        HubSection("Confirm these services") {
+                            identity(review.primary, label: "Primary")
+                            ForEach(review.policy.backups.indices, id: \.self) { index in
+                                if let value = try? review.policy.backups[index].identity() {
+                                    HubDivider()
+                                    identity(value, label: "Backup \(index + 1)")
+                                }
+                            }
                         }
                     }
-                    HStack {
-                        Button("Move up") { model.moveFailoverBackup(index, by: -1) }.disabled(index == 0)
-                        Button("Move down") { model.moveFailoverBackup(index, by: 1) }.disabled(index + 1 == model.failoverBackups.count)
-                        Button("Remove backup") { model.failoverBackups.remove(at: index) }
-                    }
-                }.padding(12)
+                    if let message = model.failoverMessage { HubNote(message) }
+                }
             }
-            HStack {
-                Button("Add backup") { model.failoverBackups.append(CleanupBackup()) }.disabled(model.failoverBackups.count >= 2)
-                Button("Reload saved", action: model.loadFailoverDraft)
-                Button("Save without turning on", action: model.saveFailoverDraft)
-                Button("Review and turn on…", action: model.reviewFailover)
-                Button("Turn off", action: model.disableFailover)
+            .frame(height: 380)
+        } actions: {
+            Button { model.failoverBackups.append(CleanupBackup()) } label: { Label("Add Backup", systemImage: "plus") }
+                .buttonStyle(HubButtonStyle())
+                .disabled(model.failoverBackups.count >= 2)
+            HubMoreMenu(label: "More backup actions") {
+                Button("Revert to Saved", action: model.loadFailoverDraft)
+                Button("Save Without Turning On", action: model.saveFailoverDraft)
             }
-            if let review = model.failoverReview {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Confirm these services").font(.headline)
-                    identity(review.primary, label: "Primary")
-                    ForEach(review.policy.backups.indices, id: \.self) { index in
-                        if let value = try? review.policy.backups[index].identity() { identity(value, label: "Backup \(index + 1)") }
-                    }
-                    Button("Turn on backups", action: model.confirmFailover)
-                }.padding(12)
+            Spacer()
+            Button("Close") { dismiss() }
+                .buttonStyle(HubButtonStyle())
+                .keyboardShortcut(.cancelAction)
+            if model.failoverReview != nil {
+                Button("Turn On Backups", action: model.confirmFailover)
+                    .buttonStyle(HubButtonStyle(kind: .primary)).keyboardShortcut(.defaultAction)
+            } else {
+                Button("Review and Turn On…", action: model.reviewFailover)
+                    .buttonStyle(HubButtonStyle(kind: .primary)).keyboardShortcut(.defaultAction)
+                    .disabled(model.failoverBackups.isEmpty)
             }
-            if let message = model.failoverMessage { Text(message).font(.caption) }
         }
     }
+
+    private func backup(_ index: Int) -> some View {
+        HubSection("Backup \(index + 1)", accessory: {
+            HStack(spacing: 2) {
+                HubIconButton("arrow.up", label: "Move up") { model.moveFailoverBackup(index, by: -1) }.disabled(index == 0)
+                HubIconButton("arrow.down", label: "Move down") { model.moveFailoverBackup(index, by: 1) }
+                    .disabled(index + 1 == model.failoverBackups.count)
+                HubIconButton("trash", label: "Remove backup") { model.failoverBackups.remove(at: index) }
+            }
+        }) {
+            HubRow("Provider") {
+                Picker("Provider", selection: $model.failoverBackups[index].provider) {
+                    Text("Anthropic").tag("anthropic")
+                    Text("OpenAI-compatible").tag("openai-compatible")
+                }
+                .hubControl()
+                .onChange(of: model.failoverBackups[index].provider) { provider in
+                    if provider == "anthropic" { model.failoverBackups[index].baseURL = nil }
+                }
+            }
+            HubDivider()
+            HubRow("Base URL", detail: "Leave empty for Anthropic") {
+                TextField("Base URL", text: optBinding($model.failoverBackups[index].baseURL)).hubField().hubControl()
+            }
+            HubDivider()
+            HubRow("Model") {
+                TextField("Model", text: $model.failoverBackups[index].model).hubField().hubControl()
+            }
+            HubDivider()
+            HubRow("API key") {
+                Picker("API key", selection: $model.failoverBackups[index].source) {
+                    Text("Environment variable").tag(CleanupBackupSource.namedEnvironment)
+                    Text("Keychain").tag(CleanupBackupSource.scopedKeychain)
+                    Text("No key needed").tag(CleanupBackupSource.keylessCompatible)
+                }
+                .hubControl()
+                .onChange(of: model.failoverBackups[index].source) { source in
+                    if source != .namedEnvironment { model.failoverBackups[index].environmentName = nil }
+                }
+            }
+            if model.failoverBackups[index].source == .namedEnvironment {
+                HubDivider()
+                HubRow("Variable name") {
+                    TextField("Variable name", text: optBinding($model.failoverBackups[index].environmentName)).hubField().hubControl()
+                }
+            }
+            if model.failoverBackups[index].source == .scopedKeychain {
+                HubDivider()
+                HubRow("Key", detail: "Shared by every model on this server") {
+                    HStack(spacing: 8) {
+                        SecureField("Key", text: Binding(get: { model.failoverKeyDraft(index) }, set: { model.setFailoverKeyDraft(index, $0) }),
+                                    prompt: Text("Paste a new key"))
+                            .hubField().hubControl(160)
+                        Button("Save") { model.changeFailoverKey(index) }
+                            .buttonStyle(HubButtonStyle())
+                            .disabled(model.failoverKeyDraft(index).isEmpty)
+                        HubMoreMenu(label: "Key actions") {
+                            Button("Remove Saved Key", role: .destructive) { model.changeFailoverKey(index, remove: true) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func identity(_ value: CleanupChainIdentity, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label + " · " + value.provider).bold()
-            Text(value.endpoint).textSelection(.enabled)
-            Text("Model: " + value.model)
-            Text("Key: " + value.source)
-        }.font(.caption)
+        HubRow(label + " · " + value.provider, detail: value.endpoint + "\nModel: " + value.model + " · Key: " + value.source)
     }
 }
