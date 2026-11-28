@@ -44,6 +44,11 @@ internal class OriginalCopyOwner(private val now: () -> Long, private val schedu
         mutable.value?.let { if(now() !in (it.expiresAt-LIFETIME_MS) until it.expiresAt) clear() }
         return mutable.value
     }
+    /**
+     * The timer runs on uptime, which stops in deep sleep while the deadline (elapsedRealtime) doesn't. Deep sleep
+     * only follows screen-off, so screen-off clears; screen-on/unlock re-checks the deadline as a backstop.
+     */
+    fun screenChanged(off: Boolean) { if(off) clear() else refresh() }
     /** Explicit Copy original. Repeated copies are allowed until the original deadline. */
     @Synchronized fun copy(token: Long): String? = if(refresh()?.token == token) original else null
     companion object { const val LIFETIME_MS = 30_000L }

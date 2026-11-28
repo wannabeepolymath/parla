@@ -28,6 +28,10 @@ class ParlaService : Service() {
     private var stopping = false
     private var anchorOwner: ParlaAccessibilityService? = null
     private var capturedAnchor: EditorAnchor? = null
+    // Only this service creates the kept original, so it owns its suspend-safe expiry (see OriginalCopyOwner.screenChanged).
+    private val screen = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) { OriginalCopy.screenChanged(intent.action == Intent.ACTION_SCREEN_OFF) }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -37,6 +41,7 @@ class ParlaService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "parla dictation controls", NotificationManager.IMPORTANCE_LOW)
         )
+        registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT) }, RECEIVER_NOT_EXPORTED)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -241,6 +246,8 @@ class ParlaService : Service() {
     private fun updateNotification() { if (bubble != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification()) }
     override fun onBind(intent: Intent?) = null
     override fun onDestroy() {
+        unregisterReceiver(screen)
+        OriginalCopy.clear() // nothing would observe screen-off any more
         cancelSession()
         scope.cancel()
         bubble?.close()

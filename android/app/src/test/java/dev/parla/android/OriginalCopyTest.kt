@@ -10,6 +10,17 @@ class OriginalCopyTest {
     private var canceled = 0
     private val owner = OriginalCopyOwner({ now }) { delay,action -> timers += delay to action; { canceled++ } }
 
+    @Test fun deepSleepCannotOutlastTheDeadlineBecauseScreenOffClearsAndScreenOnRechecks() {
+        // The uptime timer is paused (deep sleep): the fake scheduler never fires while elapsed time moves on.
+        assertTrue(owner.completed(owner.dispatched(),"raw words"))
+        owner.screenChanged(off = true)
+        assertNull(owner.offer.value); assertNull(owner.copy(0))
+        assertTrue(owner.completed(owner.dispatched(),"raw words"))
+        now += 29_999; owner.screenChanged(off = false); assertNotNull(owner.offer.value) // still inside 30 s
+        now += 1; owner.screenChanged(off = false) // screen on / unlock after the deadline passed while asleep
+        assertNull(owner.offer.value)
+    }
+
     @Test fun originalIsClearedAtThirtySecondsWithoutAnyScreenOrRefresh() {
         val attempt = owner.dispatched(); now += 2_000
         assertTrue(owner.completed(attempt,"raw words"))
