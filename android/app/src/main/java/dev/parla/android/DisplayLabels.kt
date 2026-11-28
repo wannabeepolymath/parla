@@ -28,11 +28,6 @@ internal fun speechModelLabel(value: String) = when(value) {
     "large-v3-turbo-q5_0" -> "Large v3 Turbo · Multilingual"
     else -> "Choose a speech model"
 }
-internal fun providerLabel(value: String) = when(value) {
-    "anthropic" -> "Anthropic"
-    "openai-compatible" -> "OpenAI compatible"
-    else -> "Choose a provider"
-}
 internal fun screenLabel(route: String) = when(route) {
     "Practice" -> "Try it here"
     "parla Bubble Size" -> "Voice control size"

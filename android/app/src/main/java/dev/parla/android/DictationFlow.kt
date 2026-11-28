@@ -13,7 +13,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         singleLine: Boolean,
         duration: Long,
         transcribe: suspend () -> String,
-        key: () -> String,
+        key: (String) -> String,
         save: (HistoryEntry, Boolean) -> Boolean,
         deliver: suspend (String, () -> Boolean) -> String,
         stage: (PendingOperation.Stage, String) -> Unit,
@@ -26,7 +26,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
             active(); advance(PendingOperation.Stage.recognizing,"Transcribing on device…")
             val raw = transcribe()
             active(); advance(PendingOperation.Stage.cleaning,"Preparing your text…")
-            val result = pipeline.clean(raw,frozen,category,singleLine,key)
+            val result = pipeline.clean(raw,frozen,category,singleLine,failover = true,key = key)
             active(); advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)
             // Persist a conservative outcome first: later disk failures must never leave a durable no-write claim.

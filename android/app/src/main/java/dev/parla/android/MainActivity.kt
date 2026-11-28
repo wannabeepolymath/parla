@@ -33,7 +33,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,7 +42,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.*
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -122,7 +120,7 @@ private fun ParlaApp() {
         retrySource = null; retryBusy = true
         scope.launch {
             try {
-                val proposed = retry.propose(token,source,frozen,{ store.readKey(frozen.settings) },applyPreset)
+                val proposed = retry.propose(token,source,frozen,store::readKey,applyPreset)
                 if(retry.valid(token,source,store.data.value.history)) proposal = proposed
             } catch(c: CancellationException) { throw c }
             catch(e: Exception) { message(e.message ?: "Retry failed. Previous cleaned text is preserved.") }
@@ -227,8 +225,8 @@ private fun ParlaApp() {
                 "Profiles" -> ProfilesScreen(data,store,::message)
                 "Recovery audio" -> AudioRecoveryScreen(store,::message)
                 "Data recovery" -> DataRecoveryScreen(store,::message)
-                "Settings" -> SettingsScreen(data, store.hasKey, onRoute = { route = it }, onSetup = { setup = true })
-                "API connection" -> ApiScreen(store, data.settings, ::message)
+                "Settings" -> SettingsScreen(data, connectionSummary(store, data.settings), onRoute = { route = it }, onSetup = { setup = true })
+                "API connection" -> ApiScreen(store, data, ::message)
                 "Languages" -> LanguageScreen(data.settings.language) { language -> store.update { it.copy(settings = it.settings.copy(language = language)) } }
                 "Voice control position" -> PositionScreen(data.settings) { settings -> store.update { it.copy(settings = settings) } }
                 "parla Bubble Size", "parla Bubble Opacity" -> BubbleScreen(data.settings, route == "parla Bubble Opacity") { settings -> store.update { it.copy(settings = settings) } }
@@ -536,7 +534,7 @@ private fun EditableListRow(title: String, subtitle: String? = null, onEdit: () 
         dismissButton = { TextButton(onClick = { delete = false }) { Text("Cancel", color = M3Gray) } })
 }
 @Composable
-private fun SettingsScreen(data: LocalData, hasKey: Boolean, onRoute: (String) -> Unit, onSetup: () -> Unit) {
+private fun SettingsScreen(data: LocalData, apiSummary: String, onRoute: (String) -> Unit, onSetup: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         SettingsSection("GENERAL")
         SettingsRow("Models", speechModelLabel(data.settings.localModel)) { onRoute("Models") }
@@ -554,7 +552,7 @@ private fun SettingsScreen(data: LocalData, hasKey: Boolean, onRoute: (String) -
         SettingsSection("DATA & PRIVACY")
         SettingsRow("Privacy", if (data.settings.noHistory) "Text history off" else "Text history on") { onRoute("Privacy") }
         SettingsSection("GENERAL")
-        SettingsRow("API connection", if (hasKey) providerLabel(data.settings.provider) else "Optional") { onRoute("API connection") }
+        SettingsRow("API connection", apiSummary) { onRoute("API connection") }
         Spacer(Modifier.height(8.dp))
         SettingsRow("Permissions", onClick = onSetup)
     }
@@ -596,57 +594,6 @@ private fun FeedbackScreen(title: String, onCopy: (String) -> Unit) {
         Text("Write a note to copy and share yourself. Nothing is sent from this screen.",style = BodyStyle,color = Muted)
         OutlinedTextField(text, { text = it.take(4000) }, Modifier.fillMaxWidth().weight(1f), label = { Text(title) })
         Button(onClick = { onCopy(text) }, enabled = text.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("Copy") }
-    }
-}
-@Composable
-private fun ApiScreen(store: Store, settings: Settings, message: (String) -> Unit) {
-    var base by remember { mutableStateOf(settings.baseUrl) }
-    var provider by remember { mutableStateOf(settings.provider) }
-    var cleanup by remember { mutableStateOf(settings.cleanupModel) }
-    var key by remember { mutableStateOf("") }
-    var hasKey by remember { mutableStateOf(store.hasKey) }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-    val url = base.trim().trimEnd('/').toHttpUrlOrNull()
-    val valid = url != null && url.isHttps && url.username.isEmpty() && url.password.isEmpty() && url.query == null && url.fragment == null && cleanup.isNotBlank()
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        PageTitle("AI text cleanup", "Audio stays on your device. AI cleanup sends your transcript, vocabulary and snippets to the provider you choose. Your provider may charge for use and has its own data retention policy.")
-        OutlinedTextField(base, { base = it.take(500) }, label = { Text("API address (HTTPS)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        Text("Text provider")
-        listOf("openai-compatible","anthropic").forEach { choice -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(provider == choice,{ provider = choice; if(choice == "anthropic") { base = "https://api.anthropic.com/v1"; cleanup = "claude-haiku-4-5" } else { base = "https://api.openai.com/v1"; cleanup = "gpt-4.1-mini" } }); Text(providerLabel(choice)) } }
-        Text("Changing the provider or API address requires saving again to authorize use of your key.",fontSize = 12.sp)
-        OutlinedTextField(cleanup, { cleanup = it.take(100) }, label = { Text("AI model ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(key, { key = it.take(8192) }, label = { Text(if (hasKey) "Replace saved key (optional)" else "API key") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
-        Text(if (hasKey) "A key is saved in encrypted device storage. Leave this field blank to keep it." else "Your key is encrypted on this device and excluded from backups.", color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
-        if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-        Button(onClick = {
-            busy = true; error = null
-            val savedKey = key
-            val savedBase = base.trim().trimEnd('/')
-
-            val savedCleanup = cleanup.trim()
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) { store.saveConnection(settings.copy(provider = provider,baseUrl = savedBase,cleanupModel = savedCleanup),savedKey) }
-                    hasKey = store.hasKey; key = ""; message("API settings saved. No test request was sent.")
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (failure: Exception) { error = failure.message ?: "Could not save your key." }
-                finally { busy = false }
-            }
-        }, enabled = valid && !busy, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(if (busy) "Saving…" else "Save API settings") }
-        if (hasKey) OutlinedButton(onClick = {
-            scope.launch {
-                busy = true; error = null
-                try {
-                    withContext(Dispatchers.IO) { store.saveKey("") }
-                    key = ""; hasKey = store.hasKey; message("Saved key removed")
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { error = "Saved key could not be removed. Check device storage and try again." }
-                finally { busy = false }
-            }
-        }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Remove saved key") }
-        Text("If cleanup fails, your original words are kept. As spoken mode, AI cleanup off, and snippets used on their own work without an API connection.", color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
     }
 }
 private val Languages = listOf("auto" to "Follow the speaker automatically") + SpeechLanguages.all

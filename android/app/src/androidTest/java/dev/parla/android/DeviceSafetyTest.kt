@@ -17,22 +17,25 @@ class DeviceSafetyTest {
 
     @Test fun keyRoundTripsEncryptedAndCorruptionHasAnActionableRecovery() {
         val store = Store.get(context)
-        // Never overwrite a key supplied by a person on a reused device.
-        assumeFalse("A user key is already present", store.hasKey)
-        val file = File(context.noBackupFilesDir, "provider-key.enc")
+        // A synthetic scope no person would configure, so a real saved key is never touched.
+        val scope = "openai-compatible|https://synthetic-device-test.invalid/v1"
+        assumeFalse("A synthetic key is already present", store.hasKey(scope))
         val synthetic = "synthetic-device-test-key-never-sent"
         try {
-            store.saveKey(synthetic)
-            assertEquals(synthetic, store.readKey())
+            store.saveKey(scope, synthetic)
+            assertEquals(synthetic, store.readKey(scope))
+            assertEquals("", store.readKey("openai-compatible|https://other-synthetic.invalid/v1"))
+            val name = java.security.MessageDigest.getInstance("SHA-256").digest(scope.toByteArray()).joinToString("") { "%02x".format(it) }
+            val file = File(File(context.noBackupFilesDir, "provider-keys"), "$name.key")
             assertFalse(file.readBytes().toString(Charsets.UTF_8).contains(synthetic))
             file.writeBytes(byteArrayOf(0, 1, 2))
-            val failure = runCatching { store.readKey() }.exceptionOrNull()
+            val failure = runCatching { store.readKey(scope) }.exceptionOrNull()
             assertTrue(failure is IllegalStateException)
             assertTrue(failure!!.message!!.contains("Remove it"))
         } finally {
-            store.saveKey("")
+            store.removeKey(scope)
         }
-        assertFalse(store.hasKey)
+        assertFalse(store.hasKey(scope))
     }
 
     @Test fun stoppingBeforeStartupDoesNotOpenMicrophoneOrCreateAudio() = runBlocking {
