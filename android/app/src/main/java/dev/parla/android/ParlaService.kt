@@ -28,6 +28,10 @@ class ParlaService : Service() {
     private var stopping = false
     private var anchorOwner: ParlaAccessibilityService? = null
     private var capturedAnchor: EditorAnchor? = null
+    // Only this service creates the kept original, so it owns its suspend-safe expiry (see OriginalCopyOwner.screenChanged).
+    private val screen = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) { OriginalCopy.screenChanged(intent.action == Intent.ACTION_SCREEN_OFF) }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -37,6 +41,8 @@ class ParlaService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "parla dictation controls", NotificationManager.IMPORTANCE_LOW)
         )
+        registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT) }, RECEIVER_NOT_EXPORTED)
+        OriginalCopy.interactive = getSystemService(android.os.PowerManager::class.java).isInteractive
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -115,13 +121,14 @@ class ParlaService : Service() {
         anchorOwner = owner
         capturedAnchor = anchor
         val effective = snapshot.forApp(anchor.snapshot.packageName)
-        val settings = if (anchor.privateEditor) effective.settings.copy(noHistory = true) else effective.settings
+        val settings = if (anchor.privateEditor) effective.settings.copy(noHistory = true, keepLastOriginal = false) else effective.settings
         val frozen = effective.copy(settings = settings)
         val model = manager.selected(settings)
         if (model == null || !manager.file(model).isFile) {
             owner.release(anchor); capturedAnchor = null; anchorOwner = null
             fail("Your speech model is missing. Download it in Models."); openApp(); return
         }
+        OriginalCopy.clear() // a new capture replaces the previous dictation's original
         val op = PendingOperation(); operation = op
         op.advance(PendingOperation.Stage.recording)
         val file = CaptureAudio.reserve(File(cacheDir, "audio"))
@@ -240,6 +247,8 @@ class ParlaService : Service() {
     private fun updateNotification() { if (bubble != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification()) }
     override fun onBind(intent: Intent?) = null
     override fun onDestroy() {
+        unregisterReceiver(screen)
+        OriginalCopy.clear() // nothing would observe screen-off any more
         cancelSession()
         scope.cancel()
         bubble?.close()

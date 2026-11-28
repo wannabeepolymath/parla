@@ -26,6 +26,10 @@ data class Settings(
     val bubbleX: Int = 16,
     val bubbleY: Int = 280,
     val bubbleDocked: Boolean = true,
+    /** Desktop keepLastOriginalEnabled: last original in RAM for 30 s, independent of history. */
+    val keepLastOriginal: Boolean = true,
+    /** Desktop scratchpadDictionaryAlternativesEnabled. */
+    val scratchpadSpelling: Boolean = false,
 )
 data class Snippet(val id: String = UUID.randomUUID().toString(), val trigger: String, val expansion: String)
 data class LiteralReplacement(val source: String, val replacement: String)
@@ -49,8 +53,10 @@ data class AppProfile(val id: String = UUID.randomUUID().toString(), val name: S
 /** app: target package (local only), model: speech model ID, latencyMs: recording end to text ready. Optional; empty/0 = unknown. */
 data class HistoryEntry(val id: String = UUID.randomUUID().toString(), val createdAt: Long = System.currentTimeMillis(), val raw: String, val text: String, val note: String = "", val durationMs: Long = 0, val revision: Long = 0, val app: String = "", val model: String = "", val latencyMs: Long = 0)
 data class LocalData(val settings: Settings = Settings(), val dictionary: List<String> = emptyList(), val snippets: List<Snippet> = emptyList(), val history: List<HistoryEntry> = emptyList(), val replacements: List<LiteralReplacement> = emptyList(), val presets: List<TransformPreset> = emptyList(), val profiles: List<AppProfile> = emptyList()) {
+    /** The profile [forApp] applies: first enabled exact package match. */
+    fun profileFor(packageName: String?): AppProfile? = profiles.firstOrNull { it.enabled && it.target == packageName }
     fun forApp(packageName: String?): LocalData {
-        val p = profiles.firstOrNull { it.enabled && it.target == packageName } ?: return this
+        val p = profileFor(packageName) ?: return this
         return copy(settings = settings.copy(cleanupEnabled = when(p.cleanup) { "on" -> true; "off" -> false; else -> settings.cleanupEnabled }, style = p.style.ifEmpty { settings.style }, language = p.language.ifEmpty { settings.language }, localModel = p.localModel.ifEmpty { settings.localModel }, providers = if(p.cleanupModel.isEmpty()) settings.providers else settings.providers + (settings.provider to settings.active.copy(model = p.cleanupModel))), dictionary = p.vocabulary + dictionary)
     }
 }

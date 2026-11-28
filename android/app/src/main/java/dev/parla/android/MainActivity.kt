@@ -233,7 +233,8 @@ private fun ParlaApp() {
                 "parla Bubble Size", "parla Bubble Opacity" -> BubbleScreen(data.settings, route == "parla Bubble Opacity") { settings -> store.update { it.copy(settings = settings) } }
                 "Account" -> AccountScreen(onApi = { route = "API connection" }, onPrivacy = { route = "Privacy" })
                 "Report an issue", "Share feedback" -> FeedbackScreen(route, onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
-                "Privacy" -> PrivacyScreen(data, onSettings = { settings -> store.update { it.copy(settings = settings) } }, onClear = { retry.clear(); if(store.update { it.copy(history = emptyList()) }) message("History cleared") })
+                "Privacy" -> PrivacyScreen(data, onSettings = { settings -> store.update { it.copy(settings = settings) } }, onClear = { retry.clear(); if(store.update { it.copy(history = emptyList()) }) message("History cleared") },
+                    onCopy = { copyPrivate(context, it); message("Copied original text") })
                 "Practice" -> PracticeScreen(ready, onSetup = { setup = true })
                 "Diagnostics" -> DiagnosticsScreen()
                 "History" -> HistoryScreen(data.history, onCopy = { copyPrivate(context, it); message("Copied to clipboard") },
@@ -241,6 +242,7 @@ private fun ParlaApp() {
                     onRetry = { entry -> retrySource = entry }, message = ::message)
                 "Scratchpad" -> ScratchpadScreen(onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
                 "Microphone test" -> MicrophoneTestScreen()
+                "Voice templates" -> GuidedTemplatesScreen(store, onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
                 "Transcribe a file" -> AudioImportScreen(store, onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
                 "Vocabulary import and export" -> VocabularyTransferScreen(store)
             }
@@ -351,6 +353,7 @@ private fun PermissionRow(title: String, detail: String, granted: Boolean, actio
 @Composable
 private fun HomeScreen(data: LocalData, status: DictationStatus, armed: Boolean, ready: Boolean, recovery: RecoveryResult?, onSetup: () -> Unit, onRecord: () -> Unit, onCancel: () -> Unit, onPractice: () -> Unit, onApi: () -> Unit, onCopy: (String) -> Unit, onDelete: (String) -> Unit, onRetry: (HistoryEntry) -> Unit, onClear: () -> Unit) {
     var clear by remember { mutableStateOf(false) }
+    val original by OriginalCopy.offer.collectAsStateWithLifecycle()
     val words = data.history.sumOf { it.text.split(Regex("""\s+""")).count(String::isNotBlank) }
     val grouped = data.history.groupBy { SimpleDateFormat("MMMM d", Locale.getDefault()).format(Date(it.createdAt)) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -389,6 +392,7 @@ private fun HomeScreen(data: LocalData, status: DictationStatus, armed: Boolean,
                 if (status.phase == Phase.RECORDING) TextButton(onClick = onCancel) { Text("Cancel") }
             }
         }
+        original?.let { offer -> item { Card { OriginalCopyOffer(offer, onCopy) } } }
         recovery?.takeIf { it.expiresAt > System.currentTimeMillis() }?.let { pending -> item {
             Card {
                 Text(pending.outcome)
@@ -563,6 +567,8 @@ private fun SettingsScreen(data: LocalData, apiSummary: String, onRoute: (String
         Spacer(Modifier.height(8.dp))
         SettingsRow("Scratchpad") { onRoute("Scratchpad") }
         Spacer(Modifier.height(8.dp))
+        SettingsRow("Voice templates", "Fill in a form by voice") { onRoute("Voice templates") }
+        Spacer(Modifier.height(8.dp))
         SettingsRow("Transcribe a file", "WAV, M4A or MP3 on this device") { onRoute("Transcribe a file") }
         Spacer(Modifier.height(8.dp))
         SettingsRow("Microphone test") { onRoute("Microphone test") }
@@ -657,7 +663,7 @@ private fun PositionScreen(settings: Settings, onChange: (Settings) -> Unit) {
     }
 }
 @Composable
-private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onClear: () -> Unit) {
+private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onClear: () -> Unit, onCopy: (String) -> Unit) {
     var clear by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         PageTitle("Privacy")
@@ -665,6 +671,7 @@ private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onCle
             Row(verticalAlignment = Alignment.CenterVertically) { Text("Pause text history", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)); Switch(data.settings.noHistory, { onSettings(data.settings.copy(noHistory = it)) }) }
             Text("Stops saving new text without deleting your history. The latest result may still be available to copy for up to 5 minutes, until parla closes, or until another result replaces it.", color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         }
+        Card { OriginalCopySettings(data.settings, onSettings, onCopy) }
         var limit by remember(data.settings.historyLimit) { mutableStateOf(data.settings.historyLimit.toString()) }
         OutlinedTextField(limit,{ limit = it.filter(Char::isDigit).take(4) },label = { Text("History limit (1–1000 entries)") })
         Button(onClick = { limit.toIntOrNull()?.takeIf { it in 1..1000 }?.let { onSettings(data.settings.copy(historyLimit = it)) } }, enabled = limit.toIntOrNull() in 1..1000) { Text("Save history limit") }
