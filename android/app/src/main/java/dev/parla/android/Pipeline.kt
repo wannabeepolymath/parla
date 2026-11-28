@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-/** Frozen output settings; neither editor text nor package identifiers leave the device. */
+/** Frozen output settings. Package identifiers never leave the device; editor text only as a selected-text change or reviewed nearby text. */
 class Pipeline(private val api: ApiClient = ApiClient(), private val clock: () -> Long = { System.nanoTime() / 1_000_000 }) {
     /**
      * [key] receives a credential scope and must return only the key saved for that scope.

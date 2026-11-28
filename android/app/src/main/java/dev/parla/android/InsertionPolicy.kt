@@ -39,6 +39,11 @@ object InsertionPolicy {
         editor.visible && !sensitive(editor) && editor.text.length <= MAX_EDITOR_CHARS &&
         editor.selectionStart in 0..editor.text.length && editor.selectionEnd in 0..editor.text.length
 
+    /** Private when IME metadata can't be tied to this editor, or the app asks keyboards not to learn from it. */
+    fun privateEditor(editor: EditorSnapshot, infoPackage: String?, infoInputType: Int?, imeOptions: Int): Boolean =
+        infoPackage == null || infoPackage != editor.packageName || infoInputType != editor.inputType ||
+            imeOptions and android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0
+
     fun sameIdentity(original: EditorSnapshot, current: EditorSnapshot): Boolean =
         original.packageName == current.packageName && original.windowId == current.windowId &&
             original.viewId == current.viewId && original.uniqueId == current.uniqueId &&

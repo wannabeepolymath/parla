@@ -25,6 +25,18 @@ class InsertionPolicyTest {
             .forEach { assertFalse(InsertionPolicy.safe(it)); assertEquals("", NearbyText.prefix(it.copy(selectionStart = 11))) }
     }
 
+    @Test fun privacyMetadataIsRecheckedAgainstTheEditorBeforeEachRead() {
+        val noLearning = android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        assertFalse(InsertionPolicy.privateEditor(editor, "dev.test", 1, 0))
+        // The same editor restarting as private (incognito) stops the correction watch.
+        assertTrue(InsertionPolicy.privateEditor(editor, "dev.test", 1, noLearning))
+        assertTrue(InsertionPolicy.privateEditor(editor, "dev.test", 1, noLearning or android.view.inputmethod.EditorInfo.IME_ACTION_DONE))
+        // Metadata that can't be tied to this editor counts as private.
+        assertTrue(InsertionPolicy.privateEditor(editor, null, null, 0))
+        assertTrue(InsertionPolicy.privateEditor(editor, "other.app", 1, 0))
+        assertTrue(InsertionPolicy.privateEditor(editor, "dev.test", 0x81, 0))
+    }
+
     @Test fun identitySurvivesOurWriteButRejectsChangedEditorMetadata() {
         val inserted = editor.copy(text = "Hello friend", selectionStart = 12, selectionEnd = 12)
         assertTrue(InsertionPolicy.sameIdentity(editor, inserted))

@@ -94,7 +94,8 @@ class ParlaAccessibilityService : AccessibilityService() {
             if (!hasConsent()) { revokeEdits(); return }
             super.onStartInput(attribute, restarting)
             inputGeneration++
-            invalidateAnchor()
+            // A restarted input can carry new privacy metadata: the correction watch never outlives it.
+            invalidateAnchor(); disarmCorrection()
             selection = !InsertionPolicy.sensitiveType(attribute.inputType) && attribute.initialSelStart >= 0 && attribute.initialSelStart != attribute.initialSelEnd
             publish()
         }
@@ -103,7 +104,7 @@ class ParlaAccessibilityService : AccessibilityService() {
             if (!hasConsent()) { revokeEdits(); return }
             super.onFinishInput()
             inputGeneration++
-            invalidateAnchor()
+            invalidateAnchor(); disarmCorrection()
             selection = false; publish()
         }
 
@@ -178,8 +179,7 @@ class ParlaAccessibilityService : AccessibilityService() {
             }
             val info = inputMethod?.currentInputEditorInfo
             // When privacy metadata cannot be tied to this editor, suppress history and outgoing context.
-            val privateEditor = info == null || info.packageName != editor.packageName || info.inputType != editor.inputType ||
-                info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0
+            val privateEditor = InsertionPolicy.privateEditor(editor, info?.packageName, info?.inputType, info?.imeOptions ?: 0)
             val context = if (!requireSelection && !privateEditor && nearby(editor.packageName)) NearbyText.prefix(editor) else ""
             // A new capture ends the previous dictation's undo and correction watch (Mac captureAccepted).
             clearReceipt(); disarmCorrection()
@@ -359,6 +359,9 @@ class ParlaAccessibilityService : AccessibilityService() {
     private fun evaluateCorrection() {
         val w = watch ?: return
         if (SystemClock.elapsedRealtime() > w.deadline) { disarmCorrection(); return }
+        // Privacy metadata is rechecked before every read; password/sensitive metadata is checked by refreshNode before text.
+        val info = inputMethod?.currentInputEditorInfo
+        if (InsertionPolicy.privateEditor(w.baseline, info?.packageName, info?.inputType, info?.imeOptions ?: 0)) { disarmCorrection(); return }
         val current = refreshNode(w.node, w.baseline) ?: return
         // Keep watching while the user may still be mid-correction; one proposal per insertion.
         val proposal = DictionaryLearner.propose(w.inserted, w.baseline.text, current.text, w.dictionary) ?: return

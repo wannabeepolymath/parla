@@ -78,7 +78,8 @@ class NearbyTextTest {
     }
 
     @Test fun browsersTerminalsPasswordManagersAndUnprofiledAppsCanNotUseIt() {
-        for (app in listOf("com.android.chrome", "org.mozilla.firefox", "com.termux", "com.x8bit.bitwarden", "com.foxdebug.acode", "com.example.browser")) {
+        for (app in listOf("com.android.chrome", "org.mozilla.firefox", "com.termux", "com.x8bit.bitwarden", "com.foxdebug.acode", "com.foxdebug.acodefree",
+            "io.spck", "jackpal.androidterm", "com.example.browser")) {
             assertNull(app, NearbyText.signature(LocalData(compatible("https://example.test/v1"), profiles = listOf(AppProfile(name = "A", target = app))), app))
         }
         assertNull(NearbyText.signature(LocalData(compatible("https://example.test/v1")), pkg))
