@@ -122,7 +122,9 @@ internal object AudioFileDecoder {
     const val UNREADABLE = "This file couldn’t be decoded. Try exporting it as M4A or WAV."
     private val tracks = setOf(MediaFormat.MIMETYPE_AUDIO_RAW,MediaFormat.MIMETYPE_AUDIO_AAC,MediaFormat.MIMETYPE_AUDIO_MPEG)
 
-    fun decode(file: File, canceled: () -> Boolean): FloatArray {
+    const val TIMED_SOURCE = "Timestamps need a 16 kHz WAV file."
+    /** [timed] keeps the whisper clock exact: only 16 kHz PCM WAV, never resampled. */
+    fun decode(file: File, canceled: () -> Boolean, timed: Boolean = false): FloatArray {
         val extractor = MediaExtractor()
         try {
             try { extractor.setDataSource(file.absolutePath) } catch(_: Exception) { throw ImportFailure(UNREADABLE) }
@@ -131,6 +133,7 @@ internal object AudioFileDecoder {
             val format = extractor.getTrackFormat(index)
             val mime = format.getString(MediaFormat.KEY_MIME)
             if(mime !in tracks) throw ImportFailure("Use a WAV (PCM), M4A (AAC) or MP3 file.")
+            if(timed && mime != MediaFormat.MIMETYPE_AUDIO_RAW) throw ImportFailure(TIMED_SOURCE)
             val duration = if(format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else -1
             if(duration > WavInput.MAX_SECONDS*1_000_000L+500_000) throw ImportFailure(TOO_LONG)
             extractor.selectTrack(index)
@@ -158,6 +161,7 @@ internal object AudioFileDecoder {
                     val channels = out.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
                     val encoding = if(out.containsKey(MediaFormat.KEY_PCM_ENCODING)) out.getInteger(MediaFormat.KEY_PCM_ENCODING) else AudioFormat.ENCODING_PCM_16BIT
                     val sourceRate = out.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    if(timed && sourceRate != Resampler.OUTPUT_RATE) throw ImportFailure(TIMED_SOURCE)
                     if(channels !in 1..8) throw ImportFailure(UNREADABLE)
                     if(encoding != AudioFormat.ENCODING_PCM_16BIT && encoding != AudioFormat.ENCODING_PCM_FLOAT) throw ImportFailure("Use a 16-bit WAV, M4A or MP3 file.")
                     // A rate change after audio was resampled would corrupt timing; refuse rather than guess.
@@ -211,7 +215,13 @@ internal suspend fun stagePrivateCopy(file: File, copy: suspend () -> ImportSour
 }
 
 internal data class ImportSource(val name: String, val bytes: Long, val file: File)
-internal data class ImportState(val source: ImportSource? = null, val busy: Boolean = false, val message: String = "", val preview: String? = null, val model: String = "", val saved: Boolean = false)
+/** [recognition] keeps the raw result for JSON export; its cues exist only for an explicit timed transcription. */
+internal data class ImportState(val source: ImportSource? = null, val busy: Boolean = false, val message: String = "", val preview: String? = null, val model: String = "", val saved: Boolean = false,
+                                val recognition: TimedTranscript? = null, val language: String = "")
+/** One saved transcript in review. [token] is set only for a just-finished attempt whose result may still need writing. */
+internal data class SavedReview(val jobID: String, val resultID: String, val token: SavedImportStore.Token?, val text: String, val date: Long, val model: String, val language: String,
+                                val accepted: SavedImportStore.Result?, val historySaved: Boolean = false)
+internal data class SavedState(val busy: Boolean = false, val message: String = "", val review: SavedReview? = null)
 
 /** One screen-owned import: private copy, local decode and recognition, explicit save. Never uploads or inserts. */
 internal class AudioImport(private val context: Context, private val store: Store) {
@@ -245,19 +255,29 @@ internal class AudioImport(private val context: Context, private val store: Stor
         return ImportSource(name,input.use { copyBounded(it,file,canceled) },file)
     }
 
-    fun transcribe() {
+    private fun frozenModel(report: (String) -> Unit): Pair<LocalData, SpeechModel>? {
+        val frozen = store.data.value.takeIf { store.ready } ?: run { report("Repair settings in Data recovery first. Nothing was sent."); return null }
+        val manager = ModelManager.get(context)
+        val model = manager.selected(frozen.settings)?.takeIf { manager.file(it).isFile } ?: run { report("Select a downloaded speech model in Models."); return null }
+        return frozen to model
+    }
+    private suspend fun decode(file: File, timed: Boolean) = withContext(Dispatchers.Default) { val work = coroutineContext; AudioFileDecoder.decode(file,{ !work.isActive },timed) }
+
+    fun transcribe(timed: Boolean = false) {
         val source = value.value.source ?: return
         if(job?.isActive == true) return
-        val frozen = store.data.value.takeIf { store.ready } ?: run { value.update { it.copy(message = "Repair settings in Data recovery first. Nothing was sent.") }; return }
-        val manager = ModelManager.get(context)
-        val model = manager.selected(frozen.settings)?.takeIf { manager.file(it).isFile } ?: run { value.update { it.copy(message = "Select a downloaded speech model in Models.") }; return }
+        val (frozen, model) = frozenModel { m -> value.update { it.copy(message = m) } } ?: return
+        if(timed && SpeechLanguagePolicy.language(model,frozen.settings.language) == "auto") { value.update { it.copy(message = "Timestamps need a chosen language. Choose one in Languages.") }; return }
+        val file = ModelManager.get(context).file(model)
         value.value = ImportState(source,busy = true,message = "Decoding on device…")
         job = scope.launch {
             value.value = try {
-                val samples = withContext(Dispatchers.Default) { val work = coroutineContext; AudioFileDecoder.decode(source.file) { !work.isActive } }
+                val samples = decode(source.file,timed)
                 value.update { it.copy(message = "Transcribing on device…") }
-                val text = LocalSpeech().transcribe(samples,manager.file(model),model,frozen.dictionary,frozen.settings.language)
-                ImportState(source,preview = text,model = model.id,message = "Transcript ready. Nothing was uploaded or inserted.")
+                val recognition = if(timed) LocalSpeech().transcribeTimed(samples,file,model,frozen.dictionary,frozen.settings.language)
+                    else TimedTranscript(LocalSpeech().transcribe(samples,file,model,frozen.dictionary,frozen.settings.language),samples.size,null)
+                ImportState(source,preview = recognition.text,model = model.id,recognition = recognition,language = frozen.settings.language,
+                    message = if(timed && recognition.cues == null) "Transcript ready, but timestamps weren’t available for it. Nothing was uploaded or inserted." else "Transcript ready. Nothing was uploaded or inserted.")
             } catch(c: CancellationException) { throw c } // cancel()/discard() publish their own state
             catch(e: ImportFailure) { ImportState(source,message = e.message.orEmpty()) }
             catch(e: Exception) { ImportState(source,message = e.message?.take(200) ?: "Could not transcribe this file.") }
@@ -283,6 +303,109 @@ internal class AudioImport(private val context: Context, private val store: Stor
 
     fun close() { discard(); scope.cancel() }
 
+    // Saved files: an explicit, durable copy and transcript ledger (desktop SavedAudioImportView).
+    val saved = SavedImportStore.get(context)
+    private val savedValue = MutableStateFlow(SavedState())
+    val savedState = savedValue.asStateFlow()
+    private var savedJob: Job? = null
+    private fun savedMessage(text: String) = savedValue.update { it.copy(message = text) }
+    private fun failed(e: Throwable) = (e as? SavedImportStore.Failure ?: e as? ImportFailure)?.message ?: e.message?.take(200) ?: "Something went wrong. Try again."
+    init { scope.launch(Dispatchers.IO) { runCatching { saved.maintenance() } } }
+
+    fun keepAndTranscribe() {
+        val source = value.value.source ?: return
+        if(savedJob?.isActive == true || job?.isActive == true) return
+        val (frozen, model) = frozenModel(::savedMessage) ?: return
+        start(frozen, model) { saved.admit(source.file, source.name) }
+    }
+    fun retrySaved(id: String) {
+        if(savedJob?.isActive == true) return
+        val (frozen, model) = frozenModel(::savedMessage) ?: return
+        start(frozen, model) { saved.begin(id) }
+    }
+    /** One attempt: admit/begin, verified source, local recognition, then a storage-only result write. */
+    private fun start(frozen: LocalData, model: SpeechModel, admit: () -> SavedImportStore.Token) {
+        savedValue.value = SavedState(busy = true, message = "Saving a private copy…")
+        savedJob = scope.launch {
+            var token: SavedImportStore.Token? = null
+            try {
+                val t = withContext(Dispatchers.IO) { admit().also { token = it; saved.running(it) } }
+                savedMessage("Transcribing on device…")
+                val file = withContext(Dispatchers.IO) { saved.source(t) }
+                val samples = decode(file, false)
+                val text = LocalSpeech().transcribe(samples, ModelManager.get(context).file(model), model, frozen.dictionary, frozen.settings.language)
+                val review = SavedReview(t.job, UUID.randomUUID().toString(), t, text, System.currentTimeMillis(), model.id, frozen.settings.language, null)
+                savedValue.value = SavedState(review = review, message = "Transcript ready.")
+                writeResult(review)
+            } catch(c: CancellationException) {
+                token?.let { saved.finish(it, true) }; savedValue.value = SavedState(message = "Canceled. The saved copy is kept."); throw c
+            } catch(e: Exception) {
+                token?.let { saved.finish(it, false) }; savedValue.value = SavedState(message = failed(e))
+            }
+        }
+    }
+    private suspend fun writeResult(review: SavedReview) {
+        val token = review.token ?: return
+        try {
+            val accepted = withContext(Dispatchers.IO) { saved.saveResult(token, review.resultID, review.text, review.model, review.language, review.date) }
+            savedValue.update { if(it.review?.resultID == review.resultID) it.copy(review = review.copy(accepted = accepted), message = "Transcript saved with the file. Nothing was uploaded or inserted.") else it }
+        } catch(e: Exception) { savedMessage("The transcript wasn’t kept. Try saving again; it won’t be transcribed again.") }
+    }
+    /** Storage only: rewrites the same result ID and bytes, never recognition. */
+    fun retrySaveResult() {
+        val review = savedValue.value.review?.takeIf { it.accepted == null } ?: return
+        if(savedJob?.isActive == true) return
+        savedJob = scope.launch { writeResult(review) }
+    }
+    fun cancelSaved() { savedJob?.cancel() }
+    fun openSaved(id: String) {
+        if(savedJob?.isActive == true) return
+        savedJob = scope.launch {
+            savedValue.value = try {
+                val (result, text) = withContext(Dispatchers.IO) { saved.openResult(id) }
+                SavedState(review = SavedReview(id, result.id, null, text, result.date, result.model, result.language, result, result.association == SavedImportStore.Association.saved), message = "Saved transcript.")
+            } catch(e: Exception) { SavedState(message = failed(e)) }
+        }
+    }
+    fun deleteSaved(id: String) {
+        if(savedValue.value.review?.jobID == id) savedValue.update { it.copy(review = null) }
+        scope.launch {
+            val result = runCatching { withContext(Dispatchers.IO) { saved.delete(id) } }
+            savedMessage(result.exceptionOrNull()?.let { "Couldn’t delete the saved file. " + failed(it) } ?: "Saved file deleted.")
+        }
+    }
+    /**
+     * Desktop saveHistory: persist savingIntent before the history write; the row's ID is the result ID, so an
+     * interrupted save is resolved by looking for that exact row ("Check history"), never by adding a duplicate.
+     */
+    fun saveSavedToHistory() {
+        val review = savedValue.value.review ?: return
+        val accepted = review.accepted ?: return
+        if(savedJob?.isActive == true) return
+        if(!store.ready || store.data.value.settings.noHistory) { savedMessage("Turn on text history in Privacy to save. You can still copy this text."); return }
+        val entry = HistoryEntry(id = accepted.id, createdAt = accepted.date, raw = review.text, text = review.text, note = "Transcribed from a saved audio file. Nothing inserted into an app.", model = accepted.model)
+        fun present() = store.data.value.history.any { it.id == entry.id && it.raw == entry.raw && it.createdAt == entry.createdAt }
+        savedJob = scope.launch {
+            try {
+                val unknown = accepted.association == SavedImportStore.Association.savingIntent || accepted.association == SavedImportStore.Association.unknown
+                if(review.historySaved || unknown) {
+                    if(!present()) { savedMessage("Couldn’t tell whether this was saved to history. You can still copy or export it."); return@launch }
+                } else {
+                    withContext(Dispatchers.IO) { saved.association(review.jobID, accepted.id, SavedImportStore.Association.savingIntent) }
+                    val written = store.update { local -> if(local.settings.noHistory || local.history.any { it.id == entry.id }) local else local.copy(history = (local.history + entry).sortedByDescending { it.createdAt }) }
+                    if(!written || !present()) {
+                        val reset = runCatching { withContext(Dispatchers.IO) { saved.association(review.jobID, accepted.id, SavedImportStore.Association.notSaved) } }
+                        savedValue.update { it.copy(review = review.copy(accepted = reset.getOrNull() ?: accepted.copy(association = SavedImportStore.Association.unknown)), message = "Couldn’t save to history. Try again.") }
+                        return@launch
+                    }
+                }
+                savedValue.update { it.copy(review = review.copy(historySaved = true, accepted = accepted.copy(association = SavedImportStore.Association.savingIntent))) }
+                val recorded = withContext(Dispatchers.IO) { saved.association(review.jobID, accepted.id, SavedImportStore.Association.saved) }
+                savedValue.update { it.copy(review = review.copy(historySaved = true, accepted = recorded), message = "Saved to history.") }
+            } catch(e: Exception) { savedMessage("Saved files couldn’t record this. " + failed(e)) }
+        }
+    }
+
     companion object {
         val MIME_TYPES = arrayOf("audio/wav","audio/x-wav","audio/wave","audio/vnd.wave","audio/mp4","audio/x-m4a","audio/m4a","audio/aac","audio/mp4a-latm","audio/mpeg","audio/mp3")
     }
@@ -296,15 +419,36 @@ internal class AudioImport(private val context: Context, private val store: Stor
     val status by ParlaService.status.collectAsState()
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if(uri != null) owner.choose(uri) }
     DisposableEffect(owner) { onDispose { owner.close() } }
+    val savedState by owner.savedState.collectAsState()
+    val rows by owner.saved.rows.collectAsState()
+    val savedFailure by owner.saved.failure.collectAsState()
+    var exportMessage by remember { mutableStateOf("") }
+    var pending by remember { mutableStateOf("") }
+    val written: (Uri?) -> Unit = { uri ->
+        if(uri != null) exportMessage = runCatching {
+            check(pending.isNotEmpty())
+            (context.contentResolver.openOutputStream(uri) ?: error("No destination")).bufferedWriter().use { it.write(pending) }
+        }.fold({ "Exported." }, { "Couldn’t export. Choose another location and try again." })
+        pending = ""
+    }
+    val launchers = mapOf("vtt" to SubtitleExport.Format.webVTT.mime, "srt" to SubtitleExport.Format.srt.mime, "json" to "application/json", "txt" to "text/plain")
+        .mapValues { (_, mime) -> rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(mime), written) }
+    fun export(extension: String, name: String, payload: () -> String) {
+        exportMessage = try { pending = payload(); launchers.getValue(extension).launch(name); "" }
+        catch(e: SubtitleExport.Refused) { pending = ""; if(extension == "json") "This transcript can’t be exported as JSON. Copy or save it instead." else SubtitleExport.message(e.refusal, if(extension == "srt") SubtitleExport.Format.srt else SubtitleExport.Format.webVTT) }
+    }
+    val busy = state.busy || savedState.busy
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("Transcribe an audio file",style = MaterialTheme.typography.headlineMedium)
         Text("WAV, M4A or MP3, up to ${WavInput.MAX_SECONDS/60} minutes and 20 MB. Transcribed on this device with your speech model, language and dictionary. Nothing is uploaded, sent for AI cleanup or inserted into an app.")
         Text("Language: ${if(data.settings.language == "auto") "auto-detect" else data.settings.language} · Model: ${speechModelLabel(data.settings.localModel)}",style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { pick.launch(arrayOf("audio/*")) },enabled = !state.busy) { Text("Choose file…") }
-            Button(onClick = owner::transcribe,enabled = state.source != null && !state.busy && status.phase != Phase.RECORDING) { Text("Transcribe") }
+            Button(onClick = { pick.launch(arrayOf("audio/*")) },enabled = !busy) { Text("Choose file…") }
+            Button(onClick = { owner.transcribe() },enabled = state.source != null && !busy && status.phase != Phase.RECORDING) { Text("Transcribe") }
             TextButton(onClick = owner::discard,enabled = state.source != null || state.preview != null) { Text("Discard") }
         }
+        OutlinedButton(onClick = { owner.transcribe(timed = true) },enabled = state.source != null && !busy && status.phase != Phase.RECORDING) { Text("Transcribe with timestamps") }
+        Text("Timestamps need a 16 kHz WAV and a chosen language.",style = MaterialTheme.typography.bodySmall)
         state.source?.let { Text("${it.name} · ${fileSizeLabel(it.bytes)}") }
         if(state.busy) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -314,12 +458,82 @@ internal class AudioImport(private val context: Context, private val store: Stor
         state.preview?.let { text ->
             HorizontalDivider(); Text("Transcript",style = MaterialTheme.typography.titleMedium)
             SelectionContainer { Text(text) }
-            Row {
+            val cues = state.recognition?.cues
+            if(cues != null) {
+                Text("Timestamps",style = MaterialTheme.typography.titleMedium)
+                Text("Timestamps are approximate and are lost when you leave this screen.",style = MaterialTheme.typography.bodySmall)
+                cues.take(200).forEach { cue ->
+                    Text("${runCatching { SubtitleExport.timestamp(cue.start) }.getOrDefault("–")} → ${runCatching { SubtitleExport.timestamp(cue.end) }.getOrDefault("–")}",style = MaterialTheme.typography.labelSmall)
+                    Text(cue.text)
+                }
+                if(cues.size > 200) Text("${cues.size - 200} more in the exported file.",style = MaterialTheme.typography.bodySmall)
+            }
+            FlowRow {
                 TextButton(onClick = { onCopy(text) }) { Text("Copy") }
+                if(cues != null) {
+                    TextButton(onClick = { export("vtt","Parla-transcript.vtt") { SubtitleExport.encode(cues,SubtitleExport.Format.webVTT) } }) { Text("Export WebVTT") }
+                    TextButton(onClick = { export("srt","Parla-transcript.srt") { SubtitleExport.encode(cues,SubtitleExport.Format.srt) } }) { Text("Export SRT") }
+                }
+                state.recognition?.let { r -> ModelCatalog.all.firstOrNull { it.id == state.model }?.let { model ->
+                    TextButton(onClick = { export("json",RecognitionExport.filename(System.currentTimeMillis())) { RecognitionExport.encode(r,model,state.language.takeIf { it != "auto" }) } }) { Text("Export JSON") }
+                } }
                 if(data.settings.noHistory) Text("History is off.",Modifier.padding(12.dp))
                 else TextButton(onClick = owner::save,enabled = !state.saved) { Text(if(state.saved) "Saved" else "Save to history") }
             }
+            Text("JSON includes the raw transcript, model, and timestamps when available.",style = MaterialTheme.typography.bodySmall)
         }
+        if(exportMessage.isNotEmpty()) Text(exportMessage)
         Text("Leaving this screen discards the transcript and the private copy of the file.",style = MaterialTheme.typography.bodySmall)
+        HorizontalDivider()
+        Text("Saved files",style = MaterialTheme.typography.titleMedium)
+        Text("parla can keep a private copy of the file and its transcript on this phone for 7 days, even with history off. Up to ${SavedImportStore.MAX_JOBS} files. Never uploaded or backed up.")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = owner::keepAndTranscribe,enabled = state.source != null && !busy && savedFailure == null && status.phase != Phase.RECORDING) { Text("Save a copy and transcribe") }
+            if(savedState.busy) OutlinedButton(onClick = owner::cancelSaved) { Text("Cancel") }
+        }
+        if(savedState.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+        savedFailure?.let { Text(it,color = MaterialTheme.colorScheme.error) }
+        if(savedState.message.isNotEmpty()) Text(savedState.message)
+        val dates = remember { java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM,java.text.DateFormat.SHORT) }
+        val days = remember { java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM) }
+        rows.forEach { row ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(row.label,style = MaterialTheme.typography.titleSmall)
+                Text("${fileSizeLabel(row.sourceBytes)} · Saved ${dates.format(java.util.Date(row.created))} · Deletes ${days.format(java.util.Date(row.expires))}",style = MaterialTheme.typography.bodySmall)
+                Text(savedStatus(row.state),style = MaterialTheme.typography.bodySmall)
+                if(!row.sourceAvailable && row.state != SavedImportStore.State.deleting) Text("The audio file is missing.",style = MaterialTheme.typography.bodySmall)
+                FlowRow {
+                    if(row.result != null) TextButton(onClick = { owner.openSaved(row.id) },enabled = !busy) { Text("Open transcript") }
+                    TextButton(onClick = { owner.retrySaved(row.id) },enabled = row.sourceAvailable && !busy && status.phase != Phase.RECORDING) { Text("Transcribe again") }
+                    TextButton(onClick = { owner.deleteSaved(row.id) }) { Text(if(row.state == SavedImportStore.State.deleting) "Try deleting again" else "Delete",color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
+        savedState.review?.let { review ->
+            Text("Saved transcript",style = MaterialTheme.typography.titleMedium)
+            SelectionContainer { Text(review.text) }
+            FlowRow {
+                TextButton(onClick = { onCopy(review.text) }) { Text("Copy") }
+                TextButton(onClick = { export("txt","Parla-transcript.txt") { review.text } }) { Text("Export text") }
+                when {
+                    review.accepted == null -> TextButton(onClick = owner::retrySaveResult,enabled = !savedState.busy) { Text("Try saving again") }
+                    review.historySaved && review.accepted.association == SavedImportStore.Association.saved -> Text("Saved to history",Modifier.padding(12.dp))
+                    data.settings.noHistory -> Text("History is off.",Modifier.padding(12.dp))
+                    else -> TextButton(onClick = owner::saveSavedToHistory,enabled = !savedState.busy) { Text(
+                        if(review.historySaved) "Try saving again" else if(review.accepted.association == SavedImportStore.Association.notSaved) "Save to history" else "Check history") }
+                }
+            }
+        }
     }
+}
+
+private fun savedStatus(state: SavedImportStore.State) = when(state) {
+    SavedImportStore.State.staging -> "Saving…"
+    SavedImportStore.State.committed -> "Saved"
+    SavedImportStore.State.queued -> "Waiting…"
+    SavedImportStore.State.running -> "Transcribing…"
+    SavedImportStore.State.failed -> "Transcription failed"
+    SavedImportStore.State.canceled -> "Canceled"
+    SavedImportStore.State.interrupted -> "Interrupted"
+    SavedImportStore.State.deleting -> "Deleting…"
 }
