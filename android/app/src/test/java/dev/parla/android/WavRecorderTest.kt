@@ -28,7 +28,7 @@ class WavRecorderTest {
     @Test fun emptyAndMaximumSessionRemainValidAndBelowUploadLimit() {
         assertEquals(36, ByteBuffer.wrap(WavHeader.create(0)).order(ByteOrder.LITTLE_ENDIAN).getInt(4))
         val maximum = WavRecorder.MAX_DATA_BYTES
-        assertEquals(9_600_000L, maximum)
+        assertEquals(19_200_000L, maximum)
         assertEquals(maximum.toInt(), ByteBuffer.wrap(WavHeader.create(maximum)).order(ByteOrder.LITTLE_ENDIAN).getInt(40))
         assertTrue(maximum + 44 < 25_000_000)
     }

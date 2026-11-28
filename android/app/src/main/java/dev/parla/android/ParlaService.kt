@@ -138,6 +138,7 @@ class ParlaService : Service() {
         session = scope.launch {
             entered.set(true)
             try {
+                check(MicrophoneOwner.acquire(coroutineContext.job)) { "Finish the microphone test in parla, then try again." }
                 timing.span(TimingStage.record_start, TimingStage.record_stop) {
                     capture.record(file) { level ->
                         scope.launch {
@@ -163,7 +164,7 @@ class ParlaService : Service() {
                     } },
                     deliver = { text, authorize -> owner.insert(anchor,text,authorize) },
                     stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) },
-                    timing = timing)
+                    timing = timing, app = anchor.snapshot.packageName)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {

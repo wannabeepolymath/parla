@@ -236,6 +236,13 @@ private fun ParlaApp() {
                 "Privacy" -> PrivacyScreen(data, onSettings = { settings -> store.update { it.copy(settings = settings) } }, onClear = { retry.clear(); if(store.update { it.copy(history = emptyList()) }) message("History cleared") })
                 "Practice" -> PracticeScreen(ready, onSetup = { setup = true })
                 "Diagnostics" -> DiagnosticsScreen()
+                "History" -> HistoryScreen(data.history, onCopy = { copyPrivate(context, it); message("Copied to clipboard") },
+                    onDelete = { id -> retry.invalidate(id); store.update { it.copy(history = it.history.filterNot { row -> row.id == id }) } },
+                    onRetry = { entry -> retrySource = entry }, message = ::message)
+                "Scratchpad" -> ScratchpadScreen(onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
+                "Microphone test" -> MicrophoneTestScreen()
+                "Transcribe a file" -> AudioImportScreen(store, onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
+                "Vocabulary import and export" -> VocabularyTransferScreen(store)
             }
             if (error != null) Column(Modifier.align(Alignment.BottomCenter).background(Cream).padding(12.dp)) {
                 Text(error!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
@@ -551,6 +558,16 @@ private fun SettingsScreen(data: LocalData, apiSummary: String, onRoute: (String
         SettingsRow("Voice control opacity") { onRoute("parla Bubble Opacity") }
         Spacer(Modifier.height(8.dp))
         SettingsRow("Voice control position", if (data.settings.bubbleDocked) "Follow keyboard" else "Manual") { onRoute("Voice control position") }
+        SettingsSection("TOOLS")
+        SettingsRow("History", "Search, review and export") { onRoute("History") }
+        Spacer(Modifier.height(8.dp))
+        SettingsRow("Scratchpad") { onRoute("Scratchpad") }
+        Spacer(Modifier.height(8.dp))
+        SettingsRow("Transcribe a file", "WAV, M4A or MP3 on this device") { onRoute("Transcribe a file") }
+        Spacer(Modifier.height(8.dp))
+        SettingsRow("Microphone test") { onRoute("Microphone test") }
+        Spacer(Modifier.height(8.dp))
+        SettingsRow("Vocabulary import and export") { onRoute("Vocabulary import and export") }
         SettingsSection("DATA & PRIVACY")
         SettingsRow("Privacy", if (data.settings.noHistory) "Text history off" else "Text history on") { onRoute("Privacy") }
         Spacer(Modifier.height(8.dp))
@@ -657,7 +674,7 @@ private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onCle
         Button(onClick = { days.toIntOrNull()?.takeIf { it in 1..30 }?.let { onSettings(data.settings.copy(recoveryAudioDays = it)) } },enabled = days.toIntOrNull() in 1..30) { Text("Save audio retention") }
         Text("Text already in your editor and app identities stay on this device. AI cleanup sends your transcript, vocabulary and snippets to your chosen provider, which has its own retention policy.",fontSize = 13.sp)
         OutlinedButton(onClick = { clear = true }, enabled = data.history.isNotEmpty(), modifier = Modifier.fillMaxWidth()) { Text("Clear saved history (${data.history.size})") }
-        Text("Audio stays on this device and is never uploaded or backed up. With recovery on, failed or interrupted recordings stay until they expire or you delete them in Recovery audio. Successful, canceled and private recordings are removed. Limits: 5 minutes per recording, 134 MB or 128 files total. Turning this off stops saving new recordings; existing ones are kept until expiry or deletion. Text history and audio are managed separately.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
+        Text("Audio stays on this device and is never uploaded or backed up. With recovery on, failed or interrupted recordings stay until they expire or you delete them in Recovery audio. Successful, canceled and private recordings are removed. Limits: ${WavInput.MAX_SECONDS/60} minutes per recording, 134 MB or 128 files total. Turning this off stops saving new recordings; existing ones are kept until expiry or deletion. Text history and audio are managed separately.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
     }
     if (clear) ConfirmDialog("Clear saved history?", "This removes text history from this device.", { clear = false }, { onClear(); clear = false })
 }
