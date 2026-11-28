@@ -14,6 +14,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -25,7 +26,15 @@ internal class ScratchpadFile(private val file: DurableFile) {
         check(bytes.size <= MAX_BYTES) { "Scratchpad is too large." }
         return bytes.toString(Charsets.UTF_8)
     }
-    fun save(text: String) { require(text.length <= MAX_CHARS); file.write(text.toByteArray(Charsets.UTF_8)) }
+    private val tickets = AtomicLong()
+    private var written = 0L
+    /** Take a ticket when the text is read; a write holding an older ticket than the last one written is dropped. */
+    fun ticket() = tickets.incrementAndGet()
+    @Synchronized fun save(text: String, ticket: Long) {
+        require(text.length <= MAX_CHARS)
+        if(ticket < written) return
+        file.write(text.toByteArray(Charsets.UTF_8)); written = ticket
+    }
     companion object {
         const val MAX_CHARS = 100_000
         const val MAX_BYTES = MAX_CHARS * 3 // UTF-8 bytes per UTF-16 unit, at most
@@ -43,11 +52,12 @@ internal class ScratchpadFile(private val file: DurableFile) {
     var clear by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { loaded = withContext(Dispatchers.IO) { runCatching { pad.load() } }.also { r -> r.getOrNull()?.let { text = it; saved = it } } }
     val ready = loaded?.isSuccess == true
+    // Reads state, not the composition-time `ready`: lifecycle callbacks outlive the first composition.
     fun saveNow() {
-        if(!ready || text == saved) return
-        status = try { pad.save(text); saved = text; "" } catch(_: Exception) { "Couldn’t save the scratchpad. Free storage and keep this screen open." }
+        if(loaded?.isSuccess != true || text == saved) return
+        status = try { pad.save(text,pad.ticket()); saved = text; "" } catch(_: Exception) { "Couldn’t save the scratchpad. Free storage and keep this screen open." }
     }
-    LaunchedEffect(text,ready) { if(ready && text != saved) { delay(500); val value = text; withContext(Dispatchers.IO) { runCatching { pad.save(value) } }.onSuccess { saved = value; status = "" }.onFailure { status = "Couldn’t save the scratchpad. Free storage and keep this screen open." } } }
+    LaunchedEffect(text,ready) { if(ready && text != saved) { delay(500); val value = text; val ticket = pad.ticket(); withContext(Dispatchers.IO) { runCatching { pad.save(value,ticket) } }.onSuccess { saved = value; status = "" }.onFailure { status = "Couldn’t save the scratchpad. Free storage and keep this screen open." } } }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycle) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _,event -> if(event == androidx.lifecycle.Lifecycle.Event.ON_STOP) saveNow() }

@@ -126,6 +126,7 @@ class ParlaService : Service() {
         session = scope.launch {
             entered.set(true)
             try {
+                check(MicrophoneOwner.acquire(coroutineContext.job)) { "Finish the microphone test in parla, then try again." }
                 capture.record(file) { level ->
                     scope.launch {
                         if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) {

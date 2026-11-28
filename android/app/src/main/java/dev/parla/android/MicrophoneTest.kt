@@ -53,6 +53,20 @@ internal object MicTestPolicy {
     }
 }
 
+/**
+ * One app-wide microphone owner. A coroutine Job holds it until the Job completes, which is after the
+ * recorder's finally has released its AudioRecord (withContext waits for its block even when canceled).
+ */
+internal object MicrophoneOwner {
+    private var owner: Job? = null
+    @Synchronized fun acquire(job: Job): Boolean {
+        if(owner != null && owner !== job) return false
+        owner = job
+        job.invokeOnCompletion { synchronized(this) { if(owner === job) owner = null } }
+        return true
+    }
+}
+
 internal data class MicTestView(val message: String = MicTestPolicy.State.idle.message, val detail: String = "", val level: Float = 0f, val samples: Int = 0,
     val capturing: Boolean = false, val playing: Boolean = false, val hasReview: Boolean = false)
 
@@ -67,12 +81,15 @@ internal class MicrophoneTest(context: Context) {
     private var track: AudioTrack? = null
 
     fun start() {
+        val previous = job
         clear()
         if(app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { value.value = MicTestView("Allow microphone access in parla setup, then try again."); return }
         if(ParlaService.status.value.phase.let { it == Phase.RECORDING || it == Phase.PROCESSING }) { value.value = MicTestView("Finish the current dictation first."); return }
         val stop = AtomicBoolean(false); stopRequested = stop
         value.value = MicTestView(MicTestPolicy.State.starting.message,capturing = true)
         job = scope.launch {
+            previous?.join() // a restarted test waits until the old recorder is released
+            if(!MicrophoneOwner.acquire(coroutineContext.job)) { value.value = MicTestView("Finish the current dictation first."); return@launch }
             val captured = try { withContext(Dispatchers.IO) { capture(stop) } }
             catch(c: CancellationException) { throw c }
             catch(e: Exception) { value.value = MicTestView(e.message ?: "Couldn’t start the microphone. Check access and your device."); return@launch }

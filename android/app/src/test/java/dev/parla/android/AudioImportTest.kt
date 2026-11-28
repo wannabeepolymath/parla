@@ -4,6 +4,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -47,6 +48,35 @@ class AudioImportTest {
         // 12 kHz would alias to 4 kHz at 16 kHz without the low-pass.
         val out = resample(tone(12_000.0, 48_000, 0.5), 48_000)
         assertTrue(rms(out, 400, out.size - 400) < 0.005)
+    }
+
+    @Test fun canceledCopyNeverLeavesAPrivateFileBehind() = kotlinx.coroutines.runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("parla-import").toFile()
+        try {
+            // Cancellation during the copy loop removes the partial copy.
+            val partial = dir.resolve("import-a"); var reads = 0
+            val input = object : java.io.InputStream() {
+                override fun read() = 0
+                override fun read(b: ByteArray, off: Int, len: Int): Int { reads++; return len }
+            }
+            assertTrue(runCatching { copyBounded(input, partial) { reads >= 2 } }.exceptionOrNull() is kotlinx.coroutines.CancellationException)
+            assertFalse(partial.exists())
+            // A finished copy whose result is discarded at the dispatcher handoff is deleted too.
+            val done = dir.resolve("import-b"); val entered = java.util.concurrent.CountDownLatch(1); val finish = java.util.concurrent.CountDownLatch(1)
+            var published = false
+            val job = launch {
+                stagePrivateCopy(done, { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    done.writeText("audio"); entered.countDown(); finish.await(); ImportSource("a.wav", 5, done)
+                } }) { published = true }
+            }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { entered.await() }
+            job.cancel(); finish.countDown(); job.join()
+            assertFalse(published); assertFalse(done.exists())
+            // The normal path publishes and keeps the file.
+            val kept = dir.resolve("import-c")
+            stagePrivateCopy(kept, { kept.writeText("audio"); ImportSource("c.wav", 5, kept) }) { published = true }
+            assertTrue(published); assertTrue(kept.exists())
+        } finally { dir.deleteRecursively() }
     }
 
     @Test fun sinkClampsRefusesNonFiniteAndEnforcesTheDurationCeiling() {

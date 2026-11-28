@@ -4,7 +4,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -57,6 +57,28 @@ class AudioLimitsTest {
             assertEquals("imported", LocalSpeech(native).transcribe(FloatArray(8000) { 0.1f }, model, m, emptyList(), "auto"))
             assertEquals(8000, received)
         } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun microphoneOwnerIsExclusiveUntilTheHolderFinallyHasReleasedItsRecorder() = runBlocking {
+        val released = CompletableDeferred<Unit>()
+        val acquired = CompletableDeferred<Boolean>()
+        val test = launch(Dispatchers.Default) {
+            acquired.complete(MicrophoneOwner.acquire(coroutineContext.job))
+            try { awaitCancellation() }
+            finally { withContext(NonCancellable) { released.await() } } // stands in for AudioRecord.release()
+        }
+        val dictation = Job()
+        try {
+            assertTrue(acquired.await())
+            assertFalse(MicrophoneOwner.acquire(dictation))
+            test.cancel()
+            assertFalse("Cancel alone must not hand over a still-open recorder", MicrophoneOwner.acquire(dictation))
+            released.complete(Unit); test.join()
+            assertTrue(MicrophoneOwner.acquire(dictation))
+            assertFalse(MicrophoneOwner.acquire(Job()))
+        } finally { released.complete(Unit); test.cancelAndJoin(); dictation.complete() } // fail fast, never hang
+        val next = Job(); assertTrue(MicrophoneOwner.acquire(next)); next.complete()
+        Unit
     }
 
     @Test fun microphoneTestStatusPrefersSilencingOverQuietAudio() {

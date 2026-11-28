@@ -186,6 +186,30 @@ internal object AudioFileDecoder {
     }
 }
 
+/** Copies at most MAX_FILE_BYTES, checking cancellation per chunk. Any failure removes the partial copy. */
+internal fun copyBounded(input: java.io.InputStream, file: File, canceled: () -> Boolean): Long {
+    try {
+        var total = 0L
+        file.outputStream().use { output ->
+            val buffer = ByteArray(64*1024)
+            while(true) {
+                if(canceled()) throw CancellationException("Import canceled")
+                val n = input.read(buffer); if(n < 0) break
+                total += n; if(total > AudioFileDecoder.MAX_FILE_BYTES) throw ImportFailure(AudioFileDecoder.TOO_LONG)
+                output.write(buffer,0,n)
+            }
+        }
+        if(total == 0L) throw ImportFailure(AudioFileDecoder.UNREADABLE)
+        return total
+    } catch(t: Throwable) { file.delete(); throw t }
+}
+
+/** Publishes the copy, or deletes it, including when cancellation discards a finished result at the dispatcher handoff. */
+internal suspend fun stagePrivateCopy(file: File, copy: suspend () -> ImportSource, publish: (ImportSource) -> Unit) {
+    var published = false
+    try { publish(copy()); published = true } finally { if(!published) file.delete() }
+}
+
 internal data class ImportSource(val name: String, val bytes: Long, val file: File)
 internal data class ImportState(val source: ImportSource? = null, val busy: Boolean = false, val message: String = "", val preview: String? = null, val model: String = "", val saved: Boolean = false)
 
@@ -202,34 +226,23 @@ internal class AudioImport(private val context: Context, private val store: Stor
         if(job?.isActive == true) return
         discard()
         value.value = ImportState(busy = true,message = "Reading file…")
+        val file = File(directory,"import-${UUID.randomUUID()}")
         job = scope.launch {
-            value.value = try {
-                ImportState(source = withContext(Dispatchers.IO) { copy(uri) })
-            } catch(c: CancellationException) { throw c } catch(e: ImportFailure) { ImportState(message = e.message.orEmpty()) }
-            catch(_: Exception) { ImportState(message = "Couldn’t open the file. Choose it again.") }
+            try {
+                stagePrivateCopy(file,{ withContext(Dispatchers.IO) { val work = coroutineContext; copy(uri,file) { !work.isActive } } }) { value.value = ImportState(source = it) }
+            } catch(c: CancellationException) { throw c } catch(e: ImportFailure) { value.value = ImportState(message = e.message.orEmpty()) }
+            catch(_: Exception) { value.value = ImportState(message = "Couldn’t open the file. Choose it again.") }
         }
     }
 
-    private fun copy(uri: Uri): ImportSource {
+    private fun copy(uri: Uri, file: File, canceled: () -> Boolean): ImportSource {
         val resolver = context.contentResolver
         val name = resolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME),null,null,null)?.use { if(it.moveToFirst()) it.getString(0) else null } ?: "Audio file"
         val type = resolver.getType(uri).orEmpty()
         if(type !in MIME_TYPES && name.substringAfterLast('.',"").lowercase() !in setOf("wav","m4a","mp3")) throw ImportFailure("Choose a WAV, M4A or MP3 file.")
         directory.mkdirs()
-        val file = File(directory,"import-${UUID.randomUUID()}")
-        try {
-            var total = 0L
-            (resolver.openInputStream(uri) ?: throw ImportFailure("Couldn’t open the file. Choose it again.")).use { input -> file.outputStream().use { output ->
-                val buffer = ByteArray(64*1024)
-                while(true) {
-                    val n = input.read(buffer); if(n < 0) break
-                    total += n; if(total > AudioFileDecoder.MAX_FILE_BYTES) throw ImportFailure(AudioFileDecoder.TOO_LONG)
-                    output.write(buffer,0,n)
-                }
-            } }
-            if(total == 0L) throw ImportFailure(AudioFileDecoder.UNREADABLE)
-            return ImportSource(name,total,file)
-        } catch(t: Throwable) { file.delete(); throw t }
+        val input = resolver.openInputStream(uri) ?: throw ImportFailure("Couldn’t open the file. Choose it again.")
+        return ImportSource(name,input.use { copyBounded(it,file,canceled) },file)
     }
 
     fun transcribe() {
