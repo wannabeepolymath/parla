@@ -106,4 +106,16 @@ class InsertionPolicyTest {
         assertNull(InsertionPolicy.replacement(editor, "a".repeat(100_001)))
         assertFalse(InsertionPolicy.safe(editor.copy(text = "a".repeat(100_001))))
     }
+
+    @Test fun correctionWatchNeedsTheExactPostWriteFieldAndCaret() {
+        val after = editor.copy(text = "Hello friend", selectionStart = 12, selectionEnd = 12)
+        assertTrue(InsertionPolicy.inserted(editor, "friend", after))
+        // Any other readback is not our write.
+        listOf(after.copy(text = "Hello friend!"), after.copy(selectionStart = 11, selectionEnd = 11), after.copy(selectionStart = 6),
+            after.copy(windowId = 5), after.copy(viewId = "other"), after.copy(uniqueId = "2"), after.copy(packageName = "other"),
+            after.copy(focused = false), after.copy(password = true))
+            .forEach { assertFalse(it.toString(), InsertionPolicy.inserted(editor, "friend", it)) }
+        assertFalse(InsertionPolicy.inserted(editor, "", editor))
+        assertFalse(InsertionPolicy.inserted(editor.copy(inputType = 0x81), "friend", after.copy(inputType = 0x81)))
+    }
 }

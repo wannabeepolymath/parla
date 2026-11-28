@@ -54,6 +54,13 @@ object InsertionPolicy {
             original.text == current.text && original.selectionStart == current.selectionStart &&
             original.selectionEnd == current.selectionEnd
 
+    /** Our write and nothing else: the same editor, our replacement, a collapsed caret right after it. */
+    fun inserted(before: EditorSnapshot, dictated: String, after: EditorSnapshot): Boolean {
+        val caret = minOf(before.selectionStart, before.selectionEnd) + dictated.length
+        return dictated.isNotEmpty() && safe(before) && safe(after) && sameIdentity(before, after) &&
+            after.text == replacement(before, dictated) && after.selectionStart == caret && after.selectionEnd == caret
+    }
+
     fun replacement(editor: EditorSnapshot, dictated: String): String? {
         if (!safe(editor) || dictated.isBlank() || dictated.length > MAX_EDITOR_CHARS) return null
         val start = minOf(editor.selectionStart, editor.selectionEnd)

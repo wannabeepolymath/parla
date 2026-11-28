@@ -79,9 +79,7 @@ class ParlaService : Service() {
                 combine(ParlaAccessibilityService.editActions, store.data, status) { edits, data, state ->
                     if (state.phase == Phase.RECORDING || state.phase == Phase.PROCESSING) emptyList() else listOfNotNull(
                         BubbleAction.COMMAND.takeIf { edits.selection },
-                        BubbleAction.PRESET.takeIf { edits.selection && data.presets.any { it.id == data.settings.selectedPresetID } },
-                        BubbleAction.UNDO.takeIf { edits.undo },
-                        BubbleAction.ORIGINAL.takeIf { edits.restore })
+                        BubbleAction.PRESET.takeIf { edits.selection && data.presets.any { it.id == data.settings.selectedPresetID } })
                 }.collect { bubble?.setActions(it) }
             }
             scope.launch {
@@ -117,14 +115,6 @@ class ParlaService : Service() {
         when (action) {
             BubbleAction.COMMAND -> beginRecording(command = true)
             BubbleAction.PRESET -> runPreset()
-            BubbleAction.UNDO, BubbleAction.ORIGINAL -> {
-                if (!requireAccessibilityConsent() || session?.isCompleted == false) return
-                val owner = ParlaAccessibilityService.instance ?: return
-                scope.launch {
-                    val outcome = owner.edit(if (action == BubbleAction.UNDO) GuardedEdits.Action.undo else GuardedEdits.Action.restoreOriginal)
-                    mutableStatus.value = DictationStatus(Phase.IDLE, outcome)
-                }
-            }
         }
     }
 
@@ -261,16 +251,14 @@ class ParlaService : Service() {
                 if (command) transformFlow(op, owner, anchor, frozen,
                     editor.text.substring(minOf(editor.selectionStart, editor.selectionEnd), maxOf(editor.selectionStart, editor.selectionEnd)), elapsed, speech)
                 else {
-                    var spoken = ""
                     // Re-checked against live settings before sending and before accepting the reply.
                     val nearby = anchor.context.takeIf { it.isNotEmpty() }?.let { prefix ->
                         NearbyContext(prefix) { anchor.valid && NearbyText.granted(store.data.value, editor.packageName) }
                     }
                     DictationFlow().run(op,frozen,category,singleLine,elapsed,
-                        transcribe = { speech().also { spoken = it } },
+                        transcribe = speech,
                         key = store::readKey, failover = store.data, save = ::saveHistory,
                         deliver = { text, authorize -> owner.insert(anchor,text,authorize,
-                            original = spoken.takeIf { frozen.settings.outputMode != "selectedPreset" },
                             // Mac no-learning: a capture that read nearby text never teaches the dictionary.
                             learn = frozen.dictionary.takeIf { !anchor.privateEditor && anchor.context.isEmpty() }) },
                         stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) },

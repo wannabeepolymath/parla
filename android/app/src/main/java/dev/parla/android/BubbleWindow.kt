@@ -7,8 +7,8 @@ import android.os.Looper
 import android.view.*
 import kotlin.math.abs
 
-/** Idle shortcuts beside the control: selected-text changes, and guarded undo after a verified dictation. */
-enum class BubbleAction(val label: String) { COMMAND("Command"), PRESET("Preset"), UNDO("Undo"), ORIGINAL("Original") }
+/** Idle shortcuts beside the control: selected-text changes. */
+enum class BubbleAction(val label: String) { COMMAND("Command"), PRESET("Preset") }
 
 /** A non-focusable control leaves the originating editor and keyboard focused. */
 class BubbleWindow(
