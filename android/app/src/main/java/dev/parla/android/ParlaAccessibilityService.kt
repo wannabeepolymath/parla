@@ -64,7 +64,8 @@ class ParlaAccessibilityService : AccessibilityService() {
     private var watch: CorrectionWatch? = null
     private var selection = false
     private val handler = Handler(Looper.getMainLooper())
-    private val evaluate = Runnable { evaluateCorrection() }
+    // A learning failure costs one suggestion, never the service: log it and stop watching.
+    private val evaluate = Runnable { runCatching { evaluateCorrection() }.onFailure { CaptureLog("learn").failure(it); disarmCorrection() } }
     private val giveUp = Runnable { disarmCorrection() }
     private fun hasConsent(): Boolean = Store.get(this).accessibilityConsentGranted
     private fun publish() {
@@ -212,8 +213,9 @@ class ParlaAccessibilityService : AccessibilityService() {
                         "textSame=${anchor.snapshot.text == editor.text} selectionSame=${anchor.snapshot.selectionStart == editor.selectionStart && anchor.snapshot.selectionEnd == editor.selectionEnd}")
                     return@withLock recovery(text, "The text field changed or is no longer available.")
                 }
-                val expected = InsertionPolicy.replacement(editor, text) ?: run {
-                    log.reject("replacement", "dictatedLength=${text.length} maxTextLength=${editor.maxTextLength}")
+                val spaced = InsertionPolicy.separated(editor, text)
+                val expected = InsertionPolicy.replacement(editor, spaced) ?: run {
+                    log.reject("replacement", "dictatedLength=${spaced.length} maxTextLength=${editor.maxTextLength}")
                     return@withLock recovery(text, "This field cannot accept dictation safely.")
                 }
                 // A second use of an anchor is never permitted, including after a failed verification.
@@ -235,7 +237,7 @@ class ParlaAccessibilityService : AccessibilityService() {
                 }
                 if (canCommit) {
                     // This API has no success return. Once invoked, never perform a second write.
-                    connection.commitText(text, 1, null)
+                    connection.commitText(spaced, 1, null)
                 } else {
                     val args = Bundle().apply {
                         putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, expected)
@@ -247,14 +249,14 @@ class ParlaAccessibilityService : AccessibilityService() {
                 }
                 if (verify(anchor, expected)) {
                     if (!canCommit && hasConsent()) {
-                        val cursor = minOf(editor.selectionStart, editor.selectionEnd) + text.length
+                        val cursor = minOf(editor.selectionStart, editor.selectionEnd) + spaced.length
                         val selected = current.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
                             putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
                             putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
                         })
                         if (!selected) log.reject("setSelection", "accepted=false cursor=$cursor")
                     }
-                    if (learn != null && !anchor.privateEditor) watchCorrection(anchor, text, learn)
+                    if (learn != null && !anchor.privateEditor) watchCorrection(anchor, spaced, learn)
                     DictationFlow.INSERTED
                 } else recovery(text, "Text insertion is unconfirmed. Check the field before pasting.")
             } catch (cancelled: CancellationException) {

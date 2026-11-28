@@ -118,4 +118,51 @@ class InsertionPolicyTest {
         assertFalse(InsertionPolicy.inserted(editor, "", editor))
         assertFalse(InsertionPolicy.inserted(editor.copy(inputType = 0x81), "friend", after.copy(inputType = 0x81)))
     }
+
+    @Test fun aSpaceSeparatesDictationFromAWordRightAfterTheCaret() {
+        fun at(text: String, start: Int, end: Int = start, dictated: String = "Middle.") =
+            editor.copy(text = text, selectionStart = start, selectionEnd = end).let { e -> InsertionPolicy.replacement(e, InsertionPolicy.separated(e, dictated)) }
+        assertEquals("alpha Middle. omega", at("alpha omega", 6))                // device F2: was "alpha Middle.omega"
+        assertEquals("Middle.", at("", 0))                                       // empty field
+        assertEquals("alpha Middle.", at("alpha ", 6))                           // end of text
+        assertEquals("alpha Middle. 42", at("alpha 42", 6))                      // before a digit
+        assertEquals("alpha Middle. éclair", at("alpha éclair", 6))              // before a non-ASCII letter
+        assertEquals("alpha Middle, omega", at("alpha , omega", 6, dictated = "Middle"))  // before punctuation: no space
+        assertEquals("alpha Middle.. omega", at("alpha . omega", 6))
+        assertEquals("alpha Middle. omega", at("alpha  omega", 6))               // before whitespace: no double space
+        assertEquals("alpha Middle.\nomega", at("alpha \nomega", 6))
+        assertEquals("alpha Middle. omega", at("alpha  omega", 6))
+        assertEquals("alpha middle omega", at("alpha omega", 6, dictated = "middle "))  // dictation already ends in a space
+        assertEquals("on my favorite kitchen", at("on the kitchen", 3, 6, "my favorite"))       // selection: existing space kept
+        assertEquals("on my favorite kitchen", at("on the kitchen", 6, 3, "my favorite"))       // reversed selection
+        assertEquals("on my favorite kitchen", at("on thekitchen", 3, 6, "my favorite"))        // selection ending before a letter
+        // Scripts written without spaces never get one.
+        assertEquals("我喜欢你好世界", at("我喜欢世界", 3, dictated = "你好"))
+        assertEquals("Hello世界", at("世界", 0, dictated = "Hello"))
+        assertEquals("你好world", at("world", 0, dictated = "你好"))
+        assertEquals("こんにちはカタカナ", at("カタカナ", 0, dictated = "こんにちは"))
+        assertEquals("Hiสวัสดี", at("สวัสดี", 0, dictated = "Hi"))
+        // The script comes from the word, not one code point: decomposed kana, ー, a variation selector, 。.
+        assertEquals("が" + "world", at("world", 0, dictated = "が"))                    // precomposed が
+        assertEquals("が" + "world", at("world", 0, dictated = "が"))        // か + combining voiced mark
+        assertEquals("スーパーworld", at("world", 0, dictated = "スーパー"))                      // ー is COMMON
+        assertEquals("葛︀world", at("world", 0, dictated = "葛︀"))            // Han + variation selector
+        assertEquals("你好。world", at("world", 0, dictated = "你好。"))
+        assertEquals("Helloー世界", at("ー世界", 0, dictated = "Hello"))                          // next word starts with ー
+        assertEquals("Hello 123", at("123", 0, dictated = "Hello"))                              // digits alone stay spaced
+        assertEquals("Hello 123,你好", at("123,你好", 0, dictated = "Hello"))                     // digits and punctuation end the walk
+        assertEquals("Total 123.45,数量", at("123.45,数量", 0, dictated = "Total"))
+        assertEquals("「東京」world", at("world", 0, dictated = "「東京」"))                       // CJK brackets attach
+    }
+
+    @Test fun addressesNeverGetAnAutomaticSpace() {
+        fun at(text: String, dictated: String, inputType: Int = 1) =
+            editor.copy(text = text, selectionStart = 0, selectionEnd = 0, inputType = inputType).let { e -> InsertionPolicy.replacement(e, InsertionPolicy.separated(e, dictated)) }
+        assertEquals("support@example.com", at("example.com", "support@"))                     // plain text field
+        assertEquals("https://example.com", at("example.com", "https://"))
+        assertEquals("name.surname@x.com", at("surname@x.com", "name.", inputType = 0x21))     // email
+        assertEquals("name.surname@x.com", at("surname@x.com", "name.", inputType = 0xd1))     // web email
+        assertEquals("www.example.com", at("example.com", "www.", inputType = 0x11))           // URI
+        assertEquals("www. example.com", at("example.com", "www."))                            // prose keeps the F2 space
+    }
 }

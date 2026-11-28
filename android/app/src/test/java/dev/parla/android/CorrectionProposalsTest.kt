@@ -41,6 +41,29 @@ class CorrectionProposalsTest {
         assertEquals("José", propose("Ask Jose now", "Ask José now")?.to)
     }
 
+    @Test fun wordsSplitOnUnicodeWhitespace() {
+        for (space in listOf(" ", "　", " ", "\u0085", "\t"))
+            assertEquals(space, "Sinead", propose("Meet${space}Shunade${space}at noon.", "Meet${space}Sinead${space}at noon.")?.to)
+    }
+
+    /** JVM tests accept syntax Android's ICU regex engine rejects at class init (1.3.2 crash). DeviceSafetyTest runs them on ICU. */
+    @Test fun noMainSourceUsesJvmOnlyRegexSyntax() {
+        assertTrue(File("src/main/java/dev/parla/android/CorrectionProposals.kt").isFile) // scanning the real tree
+        // Every line, comments included: a banned token in a comment is reworded, not parsed around.
+        val hits = File("src/main/java").walk().filter { it.extension == "kt" }
+            .flatMap { f -> f.readLines().withIndex().filter { (_, l) -> jvmOnlyRegex.containsMatchIn(l) }.map { "${f.name}:${it.index + 1}" } }.toList()
+        assertTrue(hits.joinToString(), hits.isEmpty())
+    }
+
+    @Test fun jvmOnlyRegexDetectorCatchesEveryUnicodeFlagGroup() {
+        listOf("(?U)", "(?iU)", "(?U-i)", "(?iU-m:foo)", "UNICODE_CHARACTER_CLASS", "CANON_EQ", "\\p{javaLowerCase}")
+            .forEach { assertTrue(it, jvmOnlyRegex.containsMatchIn(it)) }
+        listOf("(?i)", "(?-i)", "(?:x)", "(?<name>x)", "\\p{L}").forEach { assertFalse(it, jvmOnlyRegex.containsMatchIn(it)) }
+    }
+
+    // Any inline flag group that mentions U before it closes, plus the Pattern flags and \p{javaXxx} classes ICU lacks.
+    private val jvmOnlyRegex = Regex("""\(\?[a-zA-Z-]*U|UNICODE_CHARACTER_CLASS|CANON_EQ|p\{java""")
+
     @Test fun bookDedupesKeepsOneNoFinalAndCapsPending() {
         val dir = Files.createTempDirectory("proposals").toFile()
         try {

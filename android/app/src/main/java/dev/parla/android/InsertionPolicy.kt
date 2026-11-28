@@ -1,5 +1,7 @@
 package dev.parla.android
 
+import java.lang.Character.UnicodeScript
+
 /** A captured editor is an insertion capability, never a query for a new target. */
 data class EditorSnapshot(
     val packageName: String,
@@ -60,6 +62,44 @@ object InsertionPolicy {
         return dictated.isNotEmpty() && safe(before) && safe(after) && sameIdentity(before, after) &&
             after.text == replacement(before, dictated) && after.selectionStart == caret && after.selectionEnd == caret
     }
+
+    /**
+     * [dictated] plus a space when the caret sits right before a word, so "alpha |omega" doesn't become
+     * "alpha middleomega". Nothing before punctuation, whitespace or the end, after "@" or "/", in URI or email
+     * fields, nor in scripts written without spaces. The Mac app pastes verbatim (no caret-context spacing or
+     * casing), so the left side stays as dictated.
+     */
+    fun separated(editor: EditorSnapshot, dictated: String): String {
+        val end = maxOf(editor.selectionStart, editor.selectionEnd)
+        // URI, email and web email variations, as in NearbyText.prefix: addresses never get a space.
+        if (dictated.isEmpty() || end !in editor.text.indices || editor.inputType and 0x0ff0 in setOf(0x10, 0x20, 0xd0)) return dictated
+        val next = editor.text.codePointAt(end); val last = dictated.codePointBefore(dictated.length)
+        val joins = Character.isLetterOrDigit(next) && !Character.isWhitespace(last) && !Character.isSpaceChar(last) &&
+            last != '@'.code && last != '/'.code &&
+            wordScript(editor.text, end, forward = true) !in unspaced && wordScript(dictated, dictated.length, forward = false) !in unspaced
+        return if (joins) "$dictated " else dictated
+    }
+    // ponytail: common scripts written without spaces; add one here if it shows up.
+    private val unspaced = setOf(UnicodeScript.HAN, UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA, UnicodeScript.THAI,
+        UnicodeScript.LAO, UnicodeScript.KHMER, UnicodeScript.MYANMAR)
+
+    /**
+     * The script at the edge of the adjoining token. Combining marks, variation selectors and ZWJ (INHERITED) and
+     * the CJK-attached marks below take their neighbour's script; any other character (digits, punctuation,
+     * whitespace) decides, so "Hello" before "123,你好" keeps its space.
+     */
+    private fun wordScript(s: String, from: Int, forward: Boolean): UnicodeScript {
+        var i = from
+        while (if (forward) i < s.length else i > 0) {
+            val cp = if (forward) s.codePointAt(i) else s.codePointBefore(i)
+            val script = UnicodeScript.of(cp)
+            if (script != UnicodeScript.INHERITED && cp !in cjkMarks) return script
+            i += if (forward) Character.charCount(cp) else -Character.charCount(cp)
+        }
+        return UnicodeScript.COMMON
+    }
+    // ー 々 〆 〻 ゛ ゜ 、 。 「 」 『 』
+    private val cjkMarks = setOf(0x30FC, 0x3005, 0x3006, 0x303B, 0x309B, 0x309C, 0x3001, 0x3002, 0x300C, 0x300D, 0x300E, 0x300F)
 
     fun replacement(editor: EditorSnapshot, dictated: String): String? {
         if (!safe(editor) || dictated.isBlank() || dictated.length > MAX_EDITOR_CHARS) return null
