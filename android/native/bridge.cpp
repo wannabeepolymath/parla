@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <whisper.h>
+#include <ggml-backend.h>
 #include "bridge_policy.h"
 #include <atomic>
 #include <algorithm>
@@ -37,6 +38,22 @@ std::string bytes(JNIEnv *env, jbyteArray a, size_t limit) {
     return s;
 }
 bool aborted(void *data) { return static_cast<Token *>(data)->canceled.load(std::memory_order_relaxed); }
+// CPU only; flash attention is whisper's own default and the faster CPU encoder.
+whisper_context *load(const std::string &model) {
+#ifdef PARLA_CPU_VARIANTS
+    // arm64 ships every ggml Android CPU variant. Best first: ggml refuses (score 0) one this CPU can't run,
+    // so fp16/dotprod phones get those kernels and armv8.0 phones still get the baseline.
+    static const bool cpu = [] {
+        for (const char *v : {"android_armv9.2_2", "android_armv9.2_1", "android_armv9.0_1", "android_armv8.6_1",
+                              "android_armv8.2_2", "android_armv8.2_1", "android_armv8.0_1"})
+            if (ggml_backend_load((std::string("libggml-cpu-") + v + ".so").c_str())) return true;
+        return false;
+    }();
+    if (!cpu) throw std::runtime_error("On-device speech isn't available on this processor.");
+#endif
+    auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = true;
+    return whisper_init_from_file_with_params(model.c_str(), cp);
+}
 }
 extern "C" JNIEXPORT jlong JNICALL Java_dev_parla_android_WhisperJni_createToken(JNIEnv *env, jobject) {
     try { std::lock_guard<std::mutex> lock(registryMutex); const auto id = nextID++; tokens.emplace(id, std::make_shared<Token>()); return id; }
@@ -91,8 +108,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         std::vector<float> samples(count);
         env->GetFloatArrayRegion(sampleArray, 0, count, samples.data());
         if (env->ExceptionCheck()) return nullptr;
-        auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = false;
-        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(whisper_init_from_file_with_params(model.c_str(), cp), whisper_free);
+        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(load(model), whisper_free);
         if (!ctx) throw std::runtime_error("Model could not be loaded. Verify the model or choose a smaller one.");
         // Init cannot abort; token still invalidates delivery immediately and owns state until return.
         if (token->canceled.load()) return nullptr;
@@ -117,7 +133,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         auto decode = [&]() {
             auto p = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
             p.n_threads = std::max(4, std::min(8, int(std::thread::hardware_concurrency()) - 2));
-            p.no_timestamps = !timed; p.print_progress = false; p.print_realtime = false;
+            p.no_timestamps = !parla::decode_timestamps(timed, count); p.print_progress = false; p.print_realtime = false;
             p.print_special = false; p.print_timestamps = false;
             if (timed) {
                 p.offset_ms = 0; p.duration_ms = 0; p.single_segment = false; p.token_timestamps = false;
@@ -171,8 +187,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_dev_parla_android_WhisperJni_prepare(
     try {
         std::lock_guard<std::mutex> lock(inferenceMutex);
         const auto model = bytes(env, modelBytes, 8192);
-        auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = false;
-        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(whisper_init_from_file_with_params(model.c_str(), cp), whisper_free);
+        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(load(model), whisper_free);
         return ctx ? JNI_TRUE : JNI_FALSE;
     } catch (const std::exception &e) { failure(env, e.what()); return JNI_FALSE; }
     catch (...) { failure(env, "Native model load failed"); return JNI_FALSE; }

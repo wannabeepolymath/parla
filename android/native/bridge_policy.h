@@ -23,6 +23,11 @@ inline std::string join(const std::vector<std::string>& terms) {
     return out;
 }
 
+// Untimed whisper_full still seeks a whole 30 s window after each window, even when the decoder ended early,
+// so speech after its last token was skipped (F3: two sentences lost from a 114 s file). Past one window,
+// timestamp tokens make each seek follow the decoded text. One window keeps the untimed (desktop) decode.
+inline bool decode_timestamps(bool timed, long samples) { return timed || samples > 16000L * 30; }
+
 // Languages of a loaded multilingual model: the language tokens sit between sot and translate.
 inline int language_count(int sot, int translate) { return std::max(0, translate - sot - 1); }
 
