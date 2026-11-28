@@ -85,7 +85,7 @@ class CleanupUsageTest {
             save = { _, _ -> false }, deliver = { _, authorize -> authorize(); "Text inserted." }, stage = { _, _ -> })
         val kept = PendingHistory.value.value.single()
         assertEquals(finished.id, kept.id); assertEquals("keep me", kept.text)
-        assertFalse(kept.note.contains("History was not saved"))
+        assertEquals("Text inserted.", kept.note) // the kept row carries the final insertion outcome, not the save failure
         assertFalse(PendingHistory.retry(kept.id) { false }); assertEquals(1, PendingHistory.value.value.size)
         var written: HistoryEntry? = null
         assertTrue(PendingHistory.retry(kept.id) { written = it; true })
