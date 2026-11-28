@@ -19,9 +19,10 @@ class ImportedModelTest {
     @Test fun headerAcceptsWhisperHparamsAndRejectsEachMismatch() {
         assertTrue(ImportedModelFile.header(header()))
         assertTrue(ImportedModelFile.header(header(0 to 51866,2 to 1280,6 to 1280,3 to 20,7 to 20,4 to 32,8 to 4,9 to 128,10 to 2008))) // large-v3-turbo q5_0
+        for(ftype in listOf(0,1,2,3,7,8,9,14,24,1008,2009)) assertTrue("ftype $ftype",ImportedModelFile.header(header(10 to ftype)))
         assertFalse(ImportedModelFile.header(header(magic = 0x67676a74))) // "ggjt" is a llama container
         assertFalse(ImportedModelFile.header(header().copyOf(47)))
-        for(bad in listOf(0 to 32000,1 to 1499,2 to 500,3 to 0,4 to 5,5 to 512,6 to 768,7 to 9,8 to 0,9 to 40,10 to -1,10 to 28,10 to 3009))
+        for(bad in listOf(0 to 32000,1 to 1499,2 to 500,3 to 0,4 to 5,5 to 512,6 to 768,7 to 9,8 to 0,9 to 40,10 to -1,10 to 28,10 to 3009,10 to 4,10 to 5,10 to 6,10 to 1006))
             assertFalse("field ${bad.first}=${bad.second}",ImportedModelFile.header(header(bad)))
     }
     @Test fun copyChecksHeaderBeforeCopyingAndBoundsSize() {

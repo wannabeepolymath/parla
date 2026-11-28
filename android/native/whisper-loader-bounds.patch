@@ -1,5 +1,5 @@
 diff --git a/src/whisper.cpp b/src/whisper.cpp
-index 5ffc70a..a484c11 100644
+index 5ffc70a..f913de2 100644
 --- a/src/whisper.cpp
 +++ b/src/whisper.cpp
 @@ -1518,6 +1518,15 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
@@ -18,7 +18,21 @@ index 5ffc70a..a484c11 100644
          assert(hparams.n_text_state == hparams.n_audio_state);
  
          std::string mver = "";
-@@ -1580,8 +1589,18 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+@@ -1550,6 +1559,13 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+ 
+         hparams.ftype %= GGML_QNT_VERSION_FACTOR;
+ 
++        // parla: ggml_ftype_to_ggml_type GGML_ASSERTs (aborts) on any ftype it cannot map, before the check below runs.
++        // Allow exactly the ftypes it maps: 0-3 (f32, f16, q4_0, q4_1), 7-27 (q8_0, q5_0, q5_1, k-quants, iq*, bf16, ...).
++        if (qntvr < 0 || hparams.ftype < 0 || (hparams.ftype >= 4 && hparams.ftype <= 6) || hparams.ftype > GGML_FTYPE_MOSTLY_Q1_0) {
++            WHISPER_LOG_ERROR("%s: invalid model (unsupported ftype %d)\n", __func__, hparams.ftype);
++            return false;
++        }
++
+         // for the big tensors, we have the option to store the data in 16-bit floats or quantized
+         // in order to save memory and also to speed up the computation
+         wctx.wtype = ggml_ftype_to_ggml_type((ggml_ftype) (model.hparams.ftype));
+@@ -1580,8 +1596,18 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
          read_safe(loader, filters.n_mel);
          read_safe(loader, filters.n_fft);
  
@@ -37,7 +51,7 @@ index 5ffc70a..a484c11 100644
          BYTESWAP_FILTERS(filters);
      }
  
-@@ -1595,6 +1614,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+@@ -1595,6 +1621,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
          //            __func__, fname.c_str(), n_vocab, model.hparams.n_vocab);
          //    return false;
          //}
@@ -49,7 +63,7 @@ index 5ffc70a..a484c11 100644
  
          std::string word;
          std::vector<char> tmp;
-@@ -1605,9 +1629,18 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+@@ -1605,9 +1636,18 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
              uint32_t len;
              read_safe(loader, len);
  
@@ -68,7 +82,7 @@ index 5ffc70a..a484c11 100644
                  word.assign(&tmp[0], tmp.size());
              } else {
                  // seems like we have an empty-string token in multi-language models (i = 50256)
-@@ -1879,10 +1912,20 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+@@ -1879,10 +1919,20 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
                  break;
              }
  
@@ -89,7 +103,7 @@ index 5ffc70a..a484c11 100644
                  nelements *= ne[i];
              }
  
-@@ -1891,6 +1934,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+@@ -1891,6 +1941,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
              loader->read(loader->context, &tmp[0], tmp.size()); // read to buffer
              name.assign(&tmp[0], tmp.size());
  
@@ -101,7 +115,7 @@ index 5ffc70a..a484c11 100644
              if (model.tensors.find(name) == model.tensors.end()) {
                  WHISPER_LOG_ERROR("%s: unknown tensor '%s' in model file\n", __func__, name.data());
                  return false;
-@@ -1932,6 +1980,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+@@ -1932,6 +1987,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
                  ggml_backend_tensor_set(tensor, read_buf.data(), 0, ggml_nbytes(tensor));
              }
  
@@ -113,25 +127,36 @@ index 5ffc70a..a484c11 100644
              total_size += ggml_nbytes(tensor);
              model.n_loaded++;
          }
-@@ -4797,6 +4850,10 @@ struct whisper_vad_context * whisper_vad_init_with_params(
+@@ -3737,7 +3797,9 @@ struct whisper_context * whisper_init_with_params_no_state(struct whisper_model_
+     if (!model_loaded) {
+         loader->close(loader->context);
+         WHISPER_LOG_ERROR("%s: failed to load model\n", __func__);
+-        delete ctx;
++        // parla: a failed load may already own ggml contexts and backend buffers (model.ctxs/buffers).
++        // whisper_free releases them; state is still nullptr here, which whisper_free_state accepts.
++        whisper_free(ctx);
+         return nullptr;
+     }
+ 
+@@ -4797,6 +4859,10 @@ struct whisper_vad_context * whisper_vad_init_with_params(
      {
          int32_t str_len;
          read_safe(loader, str_len);
 +        if (str_len < 0 || str_len > 128) { // parla: bounded model-type string
 +            WHISPER_LOG_ERROR("%s: invalid model data (type length %d)\n", __func__, str_len);
-+            return nullptr;
++            delete vctx; return nullptr; // parla: nothing else is allocated yet (hparams arrays are not)
 +        }
          std::vector<char> buffer(str_len + 1, 0);
          loader->read(loader->context, buffer.data(), str_len);
          std::string model_type(buffer.data(), str_len);
-@@ -5021,10 +5078,20 @@ struct whisper_vad_context * whisper_vad_init_with_params(
+@@ -5021,10 +5087,20 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                  break;
              }
  
 +            // parla: same tensor-header bounds as whisper_model_load (Parla never loads a VAD model).
 +            if (n_dims < 1 || n_dims > 4 || length < 1 || length > 128 || ttype < 0 || ttype >= GGML_TYPE_COUNT) {
 +                WHISPER_LOG_ERROR("%s: invalid tensor header (dims %d, name length %d, type %d)\n", __func__, n_dims, length, ttype);
-+                return nullptr;
++                whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
 +            }
 +
              int32_t nelements = 1;
@@ -140,30 +165,30 @@ index 5ffc70a..a484c11 100644
                  read_safe(loader, ne[i]);
 +                if (ne[i] <= 0 || nelements > INT32_MAX / ne[i]) { // parla: positive dims, no overflow
 +                    WHISPER_LOG_ERROR("%s: invalid tensor dimension %d\n", __func__, ne[i]);
-+                    return nullptr;
++                    whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
 +                }
                  nelements *= ne[i];
              }
  
-@@ -5033,6 +5100,11 @@ struct whisper_vad_context * whisper_vad_init_with_params(
+@@ -5033,6 +5109,11 @@ struct whisper_vad_context * whisper_vad_init_with_params(
              loader->read(loader->context, &tmp[0], tmp.size());
              name.assign(&tmp[0], tmp.size());
  
 +            if (loader->eof(loader->context)) { // parla: truncated file
 +                WHISPER_LOG_ERROR("%s: truncated tensor header\n", __func__);
-+                return nullptr;
++                whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
 +            }
 +
              if (model.tensors.find(name) == model.tensors.end()) {
                  WHISPER_LOG_ERROR("%s: unknown tensor '%s' in model file\n", __func__, name.data());
                  return nullptr;
-@@ -5074,6 +5146,11 @@ struct whisper_vad_context * whisper_vad_init_with_params(
+@@ -5074,6 +5155,11 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                  ggml_backend_tensor_set(tensor, read_buf.data(), 0, ggml_nbytes(tensor));
              }
  
 +            if (loader->eof(loader->context)) { // parla: tensor data must lie within the file
 +                WHISPER_LOG_ERROR("%s: tensor '%s' data is truncated\n", __func__, name.data());
-+                return nullptr;
++                whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
 +            }
 +
              total_size += ggml_nbytes(tensor);

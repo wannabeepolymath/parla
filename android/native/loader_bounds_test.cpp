@@ -1,6 +1,7 @@
 // Host self-check for the "parla:" loader bounds in vendor/whisper/src/whisper.cpp. Crafted files must be
 // refused (nullptr) without crashing. Build and run on the host: sh android/native/loader-bounds-test.sh
-// Against unpatched v1.9.1, n_dims-99 segfaults, vocab-size hangs, and four other cases load.
+// Against unpatched v1.9.1, n_dims-99 segfaults, ftype 4-6 abort, vocab-size hangs, and four other cases load.
+// PARLA_LEAKS=1 in the script repeats every refusal under `leaks --atExit`.
 #include <whisper.h>
 #include <algorithm>
 #include <cstdint>
@@ -18,10 +19,10 @@ struct Bytes {
     Bytes &zeros(size_t n) { b.insert(b.end(), n, 0); return *this; }
 };
 // tiny.en-shaped hparams (passes the Kotlin header check), then mel filters and a one-word vocab.
-Bytes header() {
+Bytes header(int32_t ftype = 0) {
     Bytes w; w.i(0x67676d6c);
-    for (int32_t v : {51864, 1500, 384, 6, 4, 448, 384, 6, 4, 80, 0}) w.i(v);
-    return w;
+    for (int32_t v : {51864, 1500, 384, 6, 4, 448, 384, 6, 4, 80}) w.i(v);
+    return w.i(ftype);
 }
 Bytes prefix(int32_t n_fft = 201, int32_t n_vocab = 1, int32_t word = 1) {
     Bytes w = header(); w.i(80).i(n_fft).zeros(size_t(80) * 201 * sizeof(float));
@@ -46,6 +47,14 @@ int main(int argc, char **argv) {
     if (argc > 2) only = argv[2];
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     whisper_log_set([](ggml_log_level, const char *, void *) {}, nullptr);
+    // Repeated refusals, so a leak per failed load shows up under `leaks --atExit` (PARLA_REPEAT=n).
+    const int rounds = std::getenv("PARLA_REPEAT") ? std::atoi(std::getenv("PARLA_REPEAT")) : 1;
+    for (int round = 0; round < rounds; ++round) {
+    // ftypes 4-6 have no ggml type: upstream GGML_ASSERTs (SIGABRT). 8 MiB, otherwise valid tiny.en files.
+    for (int32_t ftype : {4, 5, 6, 1004}) {
+        Bytes w = header(ftype); w.zeros(8u * 1024 * 1024 - w.b.size());
+        refused(dir, ("ftype-" + std::to_string(ftype)).c_str(), w);
+    }
     Bytes truncated = header(); truncated.b.resize(30);
     refused(dir, "truncated-hparams", truncated);
     Bytes mel = prefix(); mel.b.resize(header().b.size() + 8 + 1000);
@@ -65,6 +74,7 @@ int main(int argc, char **argv) {
     refused(dir, "tensor-type", type);
     Bytes data = prefix(); data.i(2).i(18).i(0).i(1).i(384).s("encoder.conv1.bias").zeros(100);
     refused(dir, "truncated-tensor-data", data);
+    }
     // Positive control: real catalog models still load (PARLA_REAL_MODELS=path1:path2).
     if (const char *real = std::getenv("PARLA_REAL_MODELS")) {
         std::string list = real;

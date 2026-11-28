@@ -1559,6 +1559,13 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
 
         hparams.ftype %= GGML_QNT_VERSION_FACTOR;
 
+        // parla: ggml_ftype_to_ggml_type GGML_ASSERTs (aborts) on any ftype it cannot map, before the check below runs.
+        // Allow exactly the ftypes it maps: 0-3 (f32, f16, q4_0, q4_1), 7-27 (q8_0, q5_0, q5_1, k-quants, iq*, bf16, ...).
+        if (qntvr < 0 || hparams.ftype < 0 || (hparams.ftype >= 4 && hparams.ftype <= 6) || hparams.ftype > GGML_FTYPE_MOSTLY_Q1_0) {
+            WHISPER_LOG_ERROR("%s: invalid model (unsupported ftype %d)\n", __func__, hparams.ftype);
+            return false;
+        }
+
         // for the big tensors, we have the option to store the data in 16-bit floats or quantized
         // in order to save memory and also to speed up the computation
         wctx.wtype = ggml_ftype_to_ggml_type((ggml_ftype) (model.hparams.ftype));
@@ -3790,7 +3797,9 @@ struct whisper_context * whisper_init_with_params_no_state(struct whisper_model_
     if (!model_loaded) {
         loader->close(loader->context);
         WHISPER_LOG_ERROR("%s: failed to load model\n", __func__);
-        delete ctx;
+        // parla: a failed load may already own ggml contexts and backend buffers (model.ctxs/buffers).
+        // whisper_free releases them; state is still nullptr here, which whisper_free_state accepts.
+        whisper_free(ctx);
         return nullptr;
     }
 
@@ -4852,7 +4861,7 @@ struct whisper_vad_context * whisper_vad_init_with_params(
         read_safe(loader, str_len);
         if (str_len < 0 || str_len > 128) { // parla: bounded model-type string
             WHISPER_LOG_ERROR("%s: invalid model data (type length %d)\n", __func__, str_len);
-            return nullptr;
+            delete vctx; return nullptr; // parla: nothing else is allocated yet (hparams arrays are not)
         }
         std::vector<char> buffer(str_len + 1, 0);
         loader->read(loader->context, buffer.data(), str_len);
@@ -5081,7 +5090,7 @@ struct whisper_vad_context * whisper_vad_init_with_params(
             // parla: same tensor-header bounds as whisper_model_load (Parla never loads a VAD model).
             if (n_dims < 1 || n_dims > 4 || length < 1 || length > 128 || ttype < 0 || ttype >= GGML_TYPE_COUNT) {
                 WHISPER_LOG_ERROR("%s: invalid tensor header (dims %d, name length %d, type %d)\n", __func__, n_dims, length, ttype);
-                return nullptr;
+                whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
             }
 
             int32_t nelements = 1;
@@ -5090,7 +5099,7 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                 read_safe(loader, ne[i]);
                 if (ne[i] <= 0 || nelements > INT32_MAX / ne[i]) { // parla: positive dims, no overflow
                     WHISPER_LOG_ERROR("%s: invalid tensor dimension %d\n", __func__, ne[i]);
-                    return nullptr;
+                    whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
                 }
                 nelements *= ne[i];
             }
@@ -5102,7 +5111,7 @@ struct whisper_vad_context * whisper_vad_init_with_params(
 
             if (loader->eof(loader->context)) { // parla: truncated file
                 WHISPER_LOG_ERROR("%s: truncated tensor header\n", __func__);
-                return nullptr;
+                whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
             }
 
             if (model.tensors.find(name) == model.tensors.end()) {
@@ -5148,7 +5157,7 @@ struct whisper_vad_context * whisper_vad_init_with_params(
 
             if (loader->eof(loader->context)) { // parla: tensor data must lie within the file
                 WHISPER_LOG_ERROR("%s: tensor '%s' data is truncated\n", __func__, name.data());
-                return nullptr;
+                whisper_vad_free(vctx); return nullptr; // parla: releases contexts and buffers
             }
 
             total_size += ggml_nbytes(tensor);

@@ -79,7 +79,7 @@ internal object ImportedModelFile {
         val state = h(2); val ftype = h(10)
         return b.getInt(0) == MAGIC && h(0) in 51864..51866 && h(1) == 1500 && state in setOf(384,512,768,1024,1280) &&
             h(3) in 1..32 && h(4) in setOf(4,6,12,24,32) && h(5) == 448 && h(6) == state && h(7) == h(3) && h(8) in 1..32 &&
-            h(9) in setOf(80,128) && ftype >= 0 && ftype/1000 <= 2 && ftype%1000 in 0..27
+            h(9) in setOf(80,128) && ftype >= 0 && ftype/1000 <= 2 && ftype%1000 in 0..27 && ftype%1000 !in 4..6 // 4-6 abort in ggml_ftype_to_ggml_type
     }
     fun verify(file: File, model: SpeechModel) {
         val path = file.toPath(); val nofollow = java.nio.file.LinkOption.NOFOLLOW_LINKS

@@ -147,6 +147,6 @@
     "src/whisper.cpp": "a884ff3eb3bbf7558958c4d06a299cd8d97d87a7d5c7aac9138b8ff6a2ef04d7"
   },
   "patched": {
-    "src/whisper.cpp": "eb56127470525772615731eea47dc4635f2334b38cc606f4e905d28ee66f6c0f"
+    "src/whisper.cpp": "a7a700675d9006052a66faa004deffa042680ca0d1e65d3157adadaa22b88c69"
   }
 }
