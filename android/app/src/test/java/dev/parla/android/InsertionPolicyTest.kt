@@ -142,5 +142,24 @@ class InsertionPolicyTest {
         assertEquals("你好world", at("world", 0, dictated = "你好"))
         assertEquals("こんにちはカタカナ", at("カタカナ", 0, dictated = "こんにちは"))
         assertEquals("Hiสวัสดี", at("สวัสดี", 0, dictated = "Hi"))
+        // The script comes from the word, not one code point: decomposed kana, ー, a variation selector, 。.
+        assertEquals("が" + "world", at("world", 0, dictated = "が"))                    // precomposed が
+        assertEquals("が" + "world", at("world", 0, dictated = "が"))        // か + combining voiced mark
+        assertEquals("スーパーworld", at("world", 0, dictated = "スーパー"))                      // ー is COMMON
+        assertEquals("葛︀world", at("world", 0, dictated = "葛︀"))            // Han + variation selector
+        assertEquals("你好。world", at("world", 0, dictated = "你好。"))
+        assertEquals("Helloー世界", at("ー世界", 0, dictated = "Hello"))                          // next word starts with ー
+        assertEquals("Hello 123", at("123", 0, dictated = "Hello"))                              // digits alone stay spaced
+    }
+
+    @Test fun addressesNeverGetAnAutomaticSpace() {
+        fun at(text: String, dictated: String, inputType: Int = 1) =
+            editor.copy(text = text, selectionStart = 0, selectionEnd = 0, inputType = inputType).let { e -> InsertionPolicy.replacement(e, InsertionPolicy.separated(e, dictated)) }
+        assertEquals("support@example.com", at("example.com", "support@"))                     // plain text field
+        assertEquals("https://example.com", at("example.com", "https://"))
+        assertEquals("name.surname@x.com", at("surname@x.com", "name.", inputType = 0x21))     // email
+        assertEquals("name.surname@x.com", at("surname@x.com", "name.", inputType = 0xd1))     // web email
+        assertEquals("www.example.com", at("example.com", "www.", inputType = 0x11))           // URI
+        assertEquals("www. example.com", at("example.com", "www."))                            // prose keeps the F2 space
     }
 }

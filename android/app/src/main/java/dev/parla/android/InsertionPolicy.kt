@@ -65,20 +65,39 @@ object InsertionPolicy {
 
     /**
      * [dictated] plus a space when the caret sits right before a word, so "alpha |omega" doesn't become
-     * "alpha middleomega". Nothing before punctuation, whitespace or the end, nor in scripts written without
-     * spaces. The Mac app pastes verbatim (no caret-context spacing or casing), so the left side stays as dictated.
+     * "alpha middleomega". Nothing before punctuation, whitespace or the end, after "@" or "/", in URI or email
+     * fields, nor in scripts written without spaces. The Mac app pastes verbatim (no caret-context spacing or
+     * casing), so the left side stays as dictated.
      */
     fun separated(editor: EditorSnapshot, dictated: String): String {
         val end = maxOf(editor.selectionStart, editor.selectionEnd)
-        if (dictated.isEmpty() || end !in editor.text.indices) return dictated
+        // URI, email and web email variations, as in NearbyText.prefix: addresses never get a space.
+        if (dictated.isEmpty() || end !in editor.text.indices || editor.inputType and 0x0ff0 in setOf(0x10, 0x20, 0xd0)) return dictated
         val next = editor.text.codePointAt(end); val last = dictated.codePointBefore(dictated.length)
         val joins = Character.isLetterOrDigit(next) && !Character.isWhitespace(last) && !Character.isSpaceChar(last) &&
-            UnicodeScript.of(next) !in unspaced && UnicodeScript.of(last) !in unspaced
+            last != '@'.code && last != '/'.code &&
+            wordScript(editor.text, end, forward = true) !in unspaced && wordScript(dictated, dictated.length, forward = false) !in unspaced
         return if (joins) "$dictated " else dictated
     }
     // ponytail: common scripts written without spaces; add one here if it shows up.
     private val unspaced = setOf(UnicodeScript.HAN, UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA, UnicodeScript.THAI,
         UnicodeScript.LAO, UnicodeScript.KHMER, UnicodeScript.MYANMAR)
+
+    /**
+     * The script of the nearest code point from [from] within the same word that has one. Combining marks,
+     * variation selectors and ZWJ (INHERITED), and ー, 。 and digits (COMMON) take the script of their neighbour.
+     */
+    private fun wordScript(s: String, from: Int, forward: Boolean): UnicodeScript {
+        var i = from
+        while (if (forward) i < s.length else i > 0) {
+            val cp = if (forward) s.codePointAt(i) else s.codePointBefore(i)
+            if (Character.isWhitespace(cp) || Character.isSpaceChar(cp)) break
+            val script = UnicodeScript.of(cp)
+            if (script != UnicodeScript.COMMON && script != UnicodeScript.INHERITED) return script
+            i += if (forward) Character.charCount(cp) else -Character.charCount(cp)
+        }
+        return UnicodeScript.COMMON
+    }
 
     fun replacement(editor: EditorSnapshot, dictated: String): String? {
         if (!safe(editor) || dictated.isBlank() || dictated.length > MAX_EDITOR_CHARS) return null
