@@ -244,7 +244,7 @@ class ParlaService : Service() {
                 val category = TextRules.category(anchor.snapshot.packageName)
                 val singleLine = anchor.snapshot.inputType and 0x20000 == 0
                 val speech: suspend () -> String = {
-                    LocalSpeech().transcribe(file,manager.file(model),model,frozen.dictionary,settings.language).also(recovery::recognized)
+                    LocalSpeech().transcribe(file,manager.file(model),model,frozen.dictionary,settings.language,timing = timing).also(recovery::recognized)
                 }
                 val elapsed = SystemClock.elapsedRealtime()-startedAt
                 val editor = anchor.snapshot

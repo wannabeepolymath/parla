@@ -37,6 +37,20 @@ object ModelCatalog {
         val actual = hash.digest().joinToString("") { "%02x".format(it) }
         require(actual == model.sha256) { "The download could not be verified. Any installed model is kept. Download again." }
     }
+    /**
+     * Mac verify-once: a full [verify] is trusted while the file's canonical path, length, mtime and model identity
+     * stay the same. In memory only, so each process verifies once. [forget] on any model mutation or failed load.
+     */
+    private val trusted = java.util.concurrent.ConcurrentHashMap<String,String>()
+    fun verifyOnce(file: File, model: SpeechModel) {
+        val path = file.canonicalPath
+        val stamp = "${file.length()}:${file.lastModified()}:${model.key}" // read before hashing: a change during it misses next time
+        if(trusted[path] == stamp) return
+        trusted.remove(path)
+        verify(file,model)
+        trusted[path] = stamp
+    }
+    fun forget(file: File? = null) { if(file == null) trusted.clear() else trusted.remove(file.canonicalPath) }
     fun looksLikeMarkup(head: ByteArray): Boolean {
         val prefix = head.copyOf(minOf(head.size,512)).toString(Charsets.UTF_8).trim().lowercase()
         return listOf("<!doctype","<html","<head","<?xml").any { prefix.startsWith(it) }
@@ -45,7 +59,7 @@ object ModelCatalog {
     fun install(part: File, dest: File, model: SpeechModel, allowed: () -> Boolean = { true }) {
         verify(part,model)
         if(!allowed()) throw CancellationException("Install canceled")
-        Files.move(part.toPath(),dest.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
+        Files.move(part.toPath(),dest.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); forget()
     }
     fun copyDownload(input: InputStream, part: File, model: SpeechModel, canceled: () -> Boolean, progress: (Long) -> Unit) {
         var count = 0L

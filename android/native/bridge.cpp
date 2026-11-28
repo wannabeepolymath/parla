@@ -4,6 +4,7 @@
 #include "bridge_policy.h"
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,6 +20,11 @@ std::mutex registryMutex, inferenceMutex;
 std::unordered_map<jlong, std::shared_ptr<Token>> tokens;
 jlong nextID = 1;
 std::string lastLanguage = "en", lastModel;
+// Diagnostics only: the last recognize's native init and decode milliseconds, -1 when not reached.
+std::atomic<long long> lastLoadMs{-1}, lastDecodeMs{-1};
+long long since(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
+}
 std::shared_ptr<Token> lookup(jlong id) {
     std::lock_guard<std::mutex> lock(registryMutex);
     auto i = tokens.find(id); return i == tokens.end() ? nullptr : i->second;
@@ -97,6 +103,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         if (!token) throw std::runtime_error("Unknown recognition token");
         // Native init, decode and free are one serial lifecycle. Cancellation never takes this lock.
         std::lock_guard<std::mutex> lock(inferenceMutex);
+        lastLoadMs = -1; lastDecodeMs = -1;
         if (token->canceled.load()) return nullptr;
         const auto model = bytes(env, modelBytes, 8192);
         if (model != lastModel) { lastLanguage = "en"; lastModel = model; }
@@ -108,7 +115,9 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         std::vector<float> samples(count);
         env->GetFloatArrayRegion(sampleArray, 0, count, samples.data());
         if (env->ExceptionCheck()) return nullptr;
+        const auto loading = std::chrono::steady_clock::now();
         std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(load(model), whisper_free);
+        lastLoadMs = since(loading);
         if (!ctx) throw std::runtime_error("Model could not be loaded. Verify the model or choose a smaller one.");
         // Init cannot abort; token still invalidates delivery immediately and owns state until return.
         if (token->canceled.load()) return nullptr;
@@ -152,6 +161,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
             }
             return text;
         };
+        const auto decoding = std::chrono::steady_clock::now();
         auto text = decode();
         if (!timed && multi && !pinned && languages > 0 && !token->canceled.load() && !text.empty()) {
             whisper_token sot = whisper_token_sot(ctx.get());
@@ -167,6 +177,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
             }
             if (actual && language != actual) { language = actual; lastLanguage = language; text = decode(); }
         }
+        lastDecodeMs = since(decoding);  // both passes when the language was re-detected
         if (token->canceled.load()) return nullptr;
         // Standard UTF-8 bytes, never JNI Modified UTF-8: emoji and Indic text survive unchanged.
         auto result = env->NewByteArray(static_cast<jsize>(text.size()));
@@ -181,6 +192,12 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
 }
 extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recognizeTimed(JNIEnv *env, jobject, jlong id, jbyteArray modelBytes, jfloatArray sampleArray, jbyteArray promptBytes, jbyteArray languageBytes) {
     return recognize(env, id, modelBytes, sampleArray, promptBytes, languageBytes, true);
+}
+extern "C" JNIEXPORT jlongArray JNICALL Java_dev_parla_android_WhisperJni_lastTimings(JNIEnv *env, jobject) {
+    const jlong values[2] = {jlong(lastLoadMs.load()), jlong(lastDecodeMs.load())};
+    auto result = env->NewLongArray(2);
+    if (result) env->SetLongArrayRegion(result, 0, 2, values);
+    return result;
 }
 // Safe Start's explicit "Try loading once": init and free only, no audio. Same serial lifecycle lock as recognize.
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_parla_android_WhisperJni_prepare(JNIEnv *env, jobject, jbyteArray modelBytes) {
