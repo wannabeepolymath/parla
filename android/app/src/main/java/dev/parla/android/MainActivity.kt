@@ -91,9 +91,14 @@ private fun ParlaApp() {
     var route by rememberSaveable { mutableStateOf("Home") }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     var setup by rememberSaveable { mutableStateOf(!data.settings.onboarded) }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         MainActivity.requestedRoute.collect { requested ->
-            if(requested != null) { route = requested; setup = false; MainActivity.requestedRoute.value = null }
+            if(requested != null) {
+                if (requested == "Setup") { setup = true; showAccessibilityDisclosure = !store.accessibilityConsentGranted }
+                else { route = requested; setup = false }
+                MainActivity.requestedRoute.value = null
+            }
         }
     }
     val snackbar = remember { SnackbarHostState() }
@@ -125,6 +130,7 @@ private fun ParlaApp() {
         }
     }
     fun startBubble() {
+        if (!store.accessibilityConsentGranted) { setup = true; showAccessibilityDisclosure = true; return }
         if (!microphone || !overlay || !accessibility) { setup = true; return }
         try { ParlaService.command(context, ParlaService.SHOW) }
         catch (_: Exception) { message("Could not start parla. Check microphone and overlay permissions.") }
@@ -196,18 +202,18 @@ private fun ParlaApp() {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             if (setup) {
-                SetupScreen(microphone, overlay, accessibility, notifications,
+                SetupScreen(microphone, overlay, accessibility && data.settings.accessibilityConsentGranted, notifications,
                     recoveryEnabled = data.settings.recoveryAudioEnabled,
                     onRecovery = { enabled -> store.update { it.copy(settings = it.settings.copy(recoveryAudioEnabled = enabled)) } },
                     onMic = { permissions.launch(arrayOf(Manifest.permission.RECORD_AUDIO)) },
                     onOverlay = { context.startActivity(Intent(AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))) },
-                    onAccess = { context.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                    onAccess = { showAccessibilityDisclosure = true },
                     onNotify = { permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) },
                     onKeyboard = { context.getSystemService(InputMethodManager::class.java).showInputMethodPicker() },
                     onDone = { store.update { it.copy(settings = it.settings.copy(onboarded = true)) }; setup = false; route = "Models" })
             } else when (route) {
                 "Home" -> HomeScreen(data, status, visible, recovery, onBubble = { if (visible) ParlaService.command(context, ParlaService.HIDE) else startBubble() },
-                    onRecord = { if (!visible) { startBubble() } else ParlaService.command(context, ParlaService.TOGGLE) },
+                    onRecord = { if (!store.accessibilityConsentGranted || !visible) { startBubble() } else ParlaService.command(context, ParlaService.TOGGLE) },
                     onCancel = { ParlaService.command(context, ParlaService.CANCEL) },
                     onPractice = { route = "Practice" },
                     onApi = { route = "Models" },
@@ -238,6 +244,36 @@ private fun ParlaApp() {
         }
     }
     }
+    fun declineAccessibility() {
+        store.setAccessibilityConsent(false)
+        // Android's enabled-service setting must also be revoked if saving consent failed.
+        ParlaAccessibilityService.instance?.disableSelf()
+        if (visible) ParlaService.command(context, ParlaService.HIDE)
+        showAccessibilityDisclosure = false
+    }
+    if (showAccessibilityDisclosure) AlertDialog(
+        onDismissRequest = ::declineAccessibility,
+        shape = RoundedCornerShape(16.dp), containerColor = Color.White,
+        title = { Text("Allow text insertion?", style = TranscriptStyle) },
+        text = {
+            Text(
+                "parla uses Android’s Accessibility service to insert dictated words into the text field where you started.\n\n" +
+                    "It reads that field’s text and cursor or selection to place your words safely. It also checks the app and field type. Password fields and fields marked as sensitive are skipped.\n\n" +
+                    "It checks the keyboard’s position on your screen to place the floating voice control nearby.\n\n" +
+                    "parla does not take screenshots, and it doesn't use or keep text from other fields or the rest of your screen. The field’s text and cursor or selection stay on your phone and are not shared.\n\n" +
+                    "If you enable AI cleanup, your chosen provider may also receive the type of app (such as chat or email) and whether the field is single-line, to format your dictated words.\n\n" +
+                    "You can turn this service off at any time in Android’s Accessibility settings.",
+                modifier = Modifier.verticalScroll(rememberScrollState()), style = BodyStyle,
+            )
+        },
+        confirmButton = { TextButton(onClick = {
+            if (store.setAccessibilityConsent(true)) {
+                showAccessibilityDisclosure = false
+                context.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS))
+            } else message("Consent could not be saved. Check Data recovery and try again.")
+        }) { Text("Agree") } },
+        dismissButton = { TextButton(onClick = ::declineAccessibility) { Text("No thanks", color = M3Gray) } },
+    )
     retrySource?.let { source ->
         AlertDialog(onDismissRequest = { retrySource = null }, title = { Text("Retry original text") },
             text = { Text("Rework the original text with your current settings. AI cleanup sends it to your chosen provider and may incur charges. Preview the result before saving. Nothing is inserted into another app.") },

@@ -23,6 +23,17 @@ class Store private constructor(context: Context) {
     val data = local.data
     val hasKey: Boolean get() = keyFile.baseFile.exists()
     val ready: Boolean get() = !local.blocked
+    @Volatile internal var accessibilityConsentDeclined = false
+        private set
+    val accessibilityConsentGranted: Boolean
+        get() = ready && !accessibilityConsentDeclined && data.value.settings.accessibilityConsentGranted
+    fun setAccessibilityConsent(granted: Boolean): Boolean {
+        // A failed disk write must not leave declined access usable in this process.
+        if (!granted) accessibilityConsentDeclined = true
+        val saved = update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = granted)) }
+        if (granted && saved) accessibilityConsentDeclined = false
+        return saved
+    }
     fun update(transform: (LocalData) -> LocalData) = local.update(transform)
     fun reload() = local.reload()
     fun recoverySource() = local.original()
@@ -92,6 +103,7 @@ internal object LocalDataCodec {
         val s = data.settings
         val settings = JSONObject()
             .put("onboarded", s.onboarded)
+            .put("accessibilityConsentGranted", s.accessibilityConsentGranted)
             .put("provider", s.provider)
             .put("baseUrl", s.baseUrl)
             .put("cleanupModel", s.cleanupModel)
@@ -110,7 +122,7 @@ internal object LocalDataCodec {
             .put("bubbleX", s.bubbleX)
             .put("bubbleY", s.bubbleY)
             .put("bubbleDocked", s.bubbleDocked)
-        return JSONObject().put("version", 3).put("settings", settings)
+        return JSONObject().put("version", 4).put("settings", settings)
             .put("dictionary", JSONArray(data.dictionary))
             .put("snippets", JSONArray(data.snippets.map { JSONObject().put("id",it.id).put("trigger",it.trigger).put("expansion",it.expansion) }))
             .put("history", JSONArray(data.history.map { JSONObject().put("id",it.id).put("createdAt",it.createdAt).put("raw",it.raw).put("text",it.text).put("note",it.note).put("durationMs",it.durationMs).put("revision",it.revision) }))
@@ -124,10 +136,11 @@ internal object LocalDataCodec {
         val root = parser.nextValue() as? JSONObject ?: error("Expected local data object")
         require(parser.nextClean() == '\u0000') { "Unexpected trailing local data" }
         require(root.get("version") is Int)
-        val version = root.getInt("version"); require(version in 1..3) { "Unsupported local schema" }
+        val version = root.getInt("version"); require(version in 1..4) { "Unsupported local schema" }
         val s = root.getJSONObject("settings"); val d = Settings()
         // Reject malformed known fields instead of opt* silently reusing defaults.
         require(!s.has("onboarded") || s.get("onboarded") is Boolean)
+        require(!s.has("accessibilityConsentGranted") || s.get("accessibilityConsentGranted") is Boolean)
         require(!s.has("provider") || s.get("provider") is String)
         require(!s.has("baseUrl") || s.get("baseUrl") is String)
         require(!s.has("cleanupModel") || s.get("cleanupModel") is String)
@@ -148,6 +161,8 @@ internal object LocalDataCodec {
         require(!s.has("bubbleDocked") || s.get("bubbleDocked") is Boolean)
         val settings = Settings(
             onboarded = if(s.has("onboarded")) s.getBoolean("onboarded") else d.onboarded,
+            // Earlier schemas never recorded this disclosure's explicit consent.
+            accessibilityConsentGranted = version >= 4 && s.getBoolean("accessibilityConsentGranted"),
             provider = if(version == 1) "openai-compatible" else if(s.has("provider")) s.getString("provider") else d.provider,
             baseUrl = if(s.has("baseUrl")) s.getString("baseUrl") else if(version == 1) "https://api.openai.com/v1" else d.baseUrl,
             cleanupModel = if(s.has("cleanupModel")) s.getString("cleanupModel") else if(version == 1) "gpt-4.1-mini" else d.cleanupModel,

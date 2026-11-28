@@ -25,11 +25,65 @@ class InsertionPolicyTest {
             .forEach { assertFalse(InsertionPolicy.safe(it)); assertEquals("", InsertionPolicy.context(it, true)) }
     }
 
+    @Test fun identitySurvivesOurWriteButRejectsChangedEditorMetadata() {
+        val inserted = editor.copy(text = "Hello friend", selectionStart = 12, selectionEnd = 12)
+        assertTrue(InsertionPolicy.sameIdentity(editor, inserted))
+        assertFalse(InsertionPolicy.allows(editor, inserted, true, true))
+        listOf(editor.copy(packageName = "another"), editor.copy(windowId = 5), editor.copy(viewId = "new"),
+            editor.copy(uniqueId = "new"), editor.copy(className = "WebView"), editor.copy(inputType = 0))
+            .forEach { assertFalse(InsertionPolicy.sameIdentity(editor, it)) }
+    }
+
     @Test fun replacingSelectedTextPreservesSurroundingTextAndSupportsReversedSelection() {
         assertEquals("Hello friend", InsertionPolicy.replacement(editor, "friend"))
         assertEquals("Hello friend", InsertionPolicy.replacement(editor.copy(selectionStart = 11, selectionEnd = 6), "friend"))
         assertEquals("Hello world!", InsertionPolicy.replacement(editor.copy(selectionStart = 11), "!"))
         assertEquals("Start Hello world", InsertionPolicy.replacement(editor.copy(selectionStart = 0, selectionEnd = 0), "Start "))
+    }
+
+    @Test fun emptyUnknownSelectionAllowsInsertionAndVerification() {
+        val empty = editor.withTextAndSelection("", -1, -1)
+        assertEquals(0, empty.selectionStart)
+        assertEquals(0, empty.selectionEnd)
+        assertTrue(InsertionPolicy.allows(empty, editor.withTextAndSelection("", -1, -1), true, true))
+        val dictated = "First words"
+        val expected = InsertionPolicy.replacement(empty, dictated)
+        assertEquals(dictated, expected)
+        val cursor = minOf(empty.selectionStart, empty.selectionEnd) + dictated.length
+        val inserted = empty.withTextAndSelection(dictated, cursor, cursor)
+        assertEquals(dictated.length, inserted.selectionStart)
+        assertEquals(dictated.length, inserted.selectionEnd)
+        assertTrue(InsertionPolicy.safe(inserted))
+        assertTrue(InsertionPolicy.sameIdentity(empty, inserted))
+        assertEquals(expected, inserted.text)
+    }
+
+    @Test fun eitherUnknownEndpointInAnEmptyEditorNormalizesBothEndpoints() {
+        for ((start, end) in listOf(-1 to 0, 0 to -1)) {
+            val empty = editor.withTextAndSelection("", start, end)
+            assertEquals(0, empty.selectionStart)
+            assertEquals(0, empty.selectionEnd)
+            assertTrue(InsertionPolicy.safe(empty))
+        }
+    }
+
+    @Test fun nonEmptyUnknownSelectionsStayRejected() {
+        for ((start, end) in listOf(-1 to -1, -1 to 0, 0 to -1)) {
+            val unknown = editor.withTextAndSelection(editor.text, start, end)
+            assertEquals(start, unknown.selectionStart)
+            assertEquals(end, unknown.selectionEnd)
+            assertFalse(InsertionPolicy.allows(unknown, unknown, true, true))
+            assertNull(InsertionPolicy.replacement(unknown, "dictated"))
+        }
+    }
+
+    @Test fun knownSelectionsAreNotClampedBySnapshotConstruction() {
+        assertEquals(editor, editor.withTextAndSelection(editor.text, 6, 11))
+        val empty = editor.withTextAndSelection("", 0, 0)
+        assertTrue(InsertionPolicy.safe(empty))
+        val invalid = editor.withTextAndSelection("", 1, 1)
+        assertEquals(1, invalid.selectionStart)
+        assertFalse(InsertionPolicy.safe(invalid))
     }
 
     @Test fun invalidSelectionsAndEmptyResultsNeverProduceAWrite() {

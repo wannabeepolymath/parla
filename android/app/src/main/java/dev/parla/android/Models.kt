@@ -4,6 +4,7 @@ import java.util.UUID
 
 data class Settings(
     val onboarded: Boolean = false,
+    val accessibilityConsentGranted: Boolean = false,
     val provider: String = "anthropic",
     val baseUrl: String = "https://api.anthropic.com/v1",
     val cleanupModel: String = "claude-haiku-4-5",

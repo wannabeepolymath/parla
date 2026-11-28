@@ -12,6 +12,47 @@ class StateOwnershipTest {
         override fun write(value: String) { writes++; if(fail) error("disk full"); bytes = value }
         override fun preserveOriginal() { bytes?.let { backups.add(it) } }
     }
+    @Test fun accessibilityConsentDefaultsOffForNewAndUpgradedUsers() {
+        assertFalse(Settings().accessibilityConsentGranted)
+        assertFalse(LocalState(Memory()).data.value.settings.accessibilityConsentGranted)
+        for (version in 1..3) {
+            val legacy = JSONObject(LocalDataCodec.encode(LocalData(settings = Settings(onboarded = true))))
+                .put("version", version)
+            legacy.getJSONObject("settings").remove("accessibilityConsentGranted")
+            val state = LocalState(Memory(legacy.toString()))
+            assertFalse(state.blocked)
+            assertTrue(state.data.value.settings.onboarded)
+            assertFalse(state.data.value.settings.accessibilityConsentGranted)
+            // Older schemas cannot assert consent even if an unknown field was present.
+            legacy.getJSONObject("settings").put("accessibilityConsentGranted", true)
+            assertFalse(LocalDataCodec.decode(legacy.toString()).settings.accessibilityConsentGranted)
+        }
+    }
+    @Test fun accessibilityConsentPersistsOnlyAfterSuccessfulWriteAndCanBeRevoked() {
+        val memory = Memory()
+        val state = LocalState(memory)
+        memory.fail = true
+        assertFalse(state.update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = true)) })
+        assertFalse(state.data.value.settings.accessibilityConsentGranted)
+        assertNull(memory.bytes)
+        memory.fail = false
+        assertTrue(state.update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = true)) })
+        assertEquals(4, JSONObject(memory.bytes!!).getInt("version"))
+        val reloaded = LocalState(memory)
+        assertTrue(reloaded.data.value.settings.accessibilityConsentGranted)
+        assertTrue(reloaded.update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = false)) })
+        assertFalse(LocalState(memory).data.value.settings.accessibilityConsentGranted)
+    }
+    @Test fun currentSchemaRejectsMissingOrMalformedAccessibilityConsent() {
+        for (value in listOf<Any?>(null, "true", 1, JSONObject.NULL)) {
+            val json = JSONObject(LocalDataCodec.encode(LocalData()))
+            if (value == null) json.getJSONObject("settings").remove("accessibilityConsentGranted")
+            else json.getJSONObject("settings").put("accessibilityConsentGranted", value)
+            val state = LocalState(Memory(json.toString()))
+            assertTrue(state.blocked)
+            assertFalse(state.data.value.settings.accessibilityConsentGranted)
+        }
+    }
     @Test fun schemaMigrationPreservesLegacyDataAndDisablingIsNonDestructive() {
         val row = HistoryEntry(id = "one",raw = "old raw",text = "old result")
         val legacy = JSONObject(LocalDataCodec.encode(LocalData(dictionary = listOf("नमस्ते"),snippets = listOf(Snippet(id = "s",trigger = "email",expansion = "saved")),history = listOf(row))))

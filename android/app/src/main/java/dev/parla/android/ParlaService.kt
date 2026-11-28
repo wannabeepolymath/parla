@@ -39,6 +39,7 @@ class ParlaService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action != HIDE && intent?.action != CANCEL && !requireAccessibilityConsent()) return START_NOT_STICKY
         when (intent?.action) {
             HIDE -> { cancelSession(); stopSelf() }
             CANCEL -> cancelSession()
@@ -86,6 +87,7 @@ class ParlaService : Service() {
     }
 
     private fun beginRecording() {
+        if (!requireAccessibilityConsent()) return
         if (session?.isCompleted == false || stopping) return
         val snapshot = store.data.value
         if (!store.ready) { fail("Reload or repair local data in Settings → Data recovery."); openApp("Data recovery"); return }
@@ -198,6 +200,14 @@ class ParlaService : Service() {
     }
 
     private fun fail(message: String) { mutableStatus.value = DictationStatus(Phase.ERROR, message) }
+    private fun requireAccessibilityConsent(): Boolean {
+        if (store.accessibilityConsentGranted) return true
+        cancelSession()
+        fail("Allow text insertion in parla setup first.")
+        openApp("Setup")
+        stopSelf()
+        return false
+    }
     private fun openApp(route: String = "Models") { runCatching { startActivity(Intent(this, MainActivity::class.java).putExtra("route",route).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)) } }
     private fun pending(action: String, code: Int) = PendingIntent.getService(this, code, Intent(this, ParlaService::class.java).setAction(action), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     private fun notification(): Notification {
@@ -241,6 +251,11 @@ class ParlaService : Service() {
         private val mutableVisible = MutableStateFlow(false)
         val visible = mutableVisible.asStateFlow()
         fun command(context: Context, action: String) {
+            if ((action == SHOW || action == TOGGLE) && !Store.get(context).accessibilityConsentGranted) {
+                context.startActivity(Intent(context, MainActivity::class.java).putExtra("route", "Setup")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                return
+            }
             val intent = Intent(context, ParlaService::class.java).setAction(action)
             if (action == SHOW || action == TOGGLE) context.startForegroundService(intent) else context.startService(intent)
         }

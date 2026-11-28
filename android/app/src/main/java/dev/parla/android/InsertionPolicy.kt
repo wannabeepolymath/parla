@@ -18,7 +18,14 @@ data class EditorSnapshot(
     val password: Boolean,
     val dataSensitive: Boolean = false,
     val maxTextLength: Int = -1,
-)
+) {
+    internal fun withTextAndSelection(text: String, start: Int, end: Int): EditorSnapshot {
+        // An empty editor has only one possible cursor position, even when Android reports -1.
+        val emptyUnknownSelection = text.isEmpty() && (start < 0 || end < 0)
+        return copy(text = text, selectionStart = if (emptyUnknownSelection) 0 else start,
+            selectionEnd = if (emptyUnknownSelection) 0 else end)
+    }
+}
 
 object InsertionPolicy {
     const val MAX_EDITOR_CHARS = 100_000
@@ -36,11 +43,13 @@ object InsertionPolicy {
         editor.visible && !sensitive(editor) && editor.text.length <= MAX_EDITOR_CHARS &&
         editor.selectionStart in 0..editor.text.length && editor.selectionEnd in 0..editor.text.length
 
-    fun allows(original: EditorSnapshot, current: EditorSnapshot, sameNode: Boolean, valid: Boolean): Boolean =
-        valid && sameNode && safe(original) && safe(current) &&
-            original.packageName == current.packageName && original.windowId == current.windowId &&
+    fun sameIdentity(original: EditorSnapshot, current: EditorSnapshot): Boolean =
+        original.packageName == current.packageName && original.windowId == current.windowId &&
             original.viewId == current.viewId && original.uniqueId == current.uniqueId &&
-            original.className == current.className && original.inputType == current.inputType &&
+            original.className == current.className && original.inputType == current.inputType
+
+    fun allows(original: EditorSnapshot, current: EditorSnapshot, sameNode: Boolean, valid: Boolean): Boolean =
+        valid && sameNode && safe(original) && safe(current) && sameIdentity(original, current) &&
             original.text == current.text && original.selectionStart == current.selectionStart &&
             original.selectionEnd == current.selectionEnd
 
