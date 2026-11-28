@@ -50,6 +50,32 @@ internal class ScratchpadFile(private val file: DurableFile) {
     var editor by remember { mutableStateOf<EditText?>(null) }
     var status by remember { mutableStateOf("") }
     var clear by remember { mutableStateOf(false) }
+    val store = remember { Store.get(context) }
+    val data by store.data.collectAsState()
+    var spelling by remember { mutableStateOf<ScratchpadSpelling.Request?>(null) }
+    var spellingStatus by remember { mutableStateOf(ScratchpadSpelling.READY) }
+    LaunchedEffect(spelling) { spelling?.let { delay(it.deadline-android.os.SystemClock.elapsedRealtime()); spelling = null } }
+    fun beginSpelling() {
+        val view = editor ?: return
+        spelling = null
+        spellingStatus = try {
+            val request = ScratchpadSpelling.begin(view.text.toString(),view.selectionStart,view.selectionEnd,store.data.value,android.os.SystemClock.elapsedRealtime())
+            spelling = request
+            if(request.choices.more) "Dictionary spellings (first 5). Choose one." else "Choose a dictionary spelling."
+        } catch(e: ScratchpadSpelling.Refusal) { e.message.orEmpty() }
+    }
+    // One exact, undoable replacement of the reviewed word. Never a second repair write.
+    fun chooseSpelling(candidate: String) {
+        val request = spelling ?: return; spelling = null
+        val view = editor ?: return
+        val edit = ScratchpadSpelling.choose(request,candidate,view.text.toString(),view.selectionStart,view.selectionEnd,
+            store.ready && store.data.value.settings.scratchpadSpelling,store.data.value,android.os.SystemClock.elapsedRealtime())
+            ?: run { spellingStatus = "Your text or dictionary changed. Try again."; return }
+        view.text.replace(edit.start,edit.end,edit.replacement)
+        if(view.text.toString() != edit.expected) { spellingStatus = ScratchpadSpelling.FAILED; return }
+        view.setSelection(edit.selectionStart,edit.selectionEnd)
+        spellingStatus = if(view.selectionStart == edit.selectionStart && view.selectionEnd == edit.selectionEnd) ScratchpadSpelling.READY else ScratchpadSpelling.FAILED
+    }
     LaunchedEffect(Unit) { loaded = withContext(Dispatchers.IO) { runCatching { pad.load() } }.also { r -> r.getOrNull()?.let { text = it; saved = it } } }
     val ready = loaded?.isSuccess == true
     // Reads state, not the composition-time `ready`: lifecycle callbacks outlive the first composition.
@@ -60,18 +86,27 @@ internal class ScratchpadFile(private val file: DurableFile) {
     LaunchedEffect(text,ready) { if(ready && text != saved) { delay(500); val value = text; val ticket = pad.ticket(); withContext(Dispatchers.IO) { runCatching { pad.save(value,ticket) } }.onSuccess { saved = value; status = "" }.onFailure { status = "Couldn’t save the scratchpad. Free storage and keep this screen open." } } }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycle) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _,event -> if(event == androidx.lifecycle.Lifecycle.Event.ON_STOP) saveNow() }
+        val observer = androidx.lifecycle.LifecycleEventObserver { _,event -> if(event == androidx.lifecycle.Lifecycle.Event.ON_STOP) { spelling = null; saveNow() } }
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer); saveNow() }
     }
     Column(Modifier.fillMaxSize().imePadding().padding(16.dp),verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("A private note on this device. Dictate into it with the parla voice control, edit, then copy. It is saved as you type and is separate from history.",style = MaterialTheme.typography.bodySmall)
+        Text("A private note on this device. Dictate into it with the parla voice control, edit, then copy. It is saved as you type and is separate from history. With dictionary spelling on, tap a word, then Dictionary spelling to choose a spelling from your dictionary.",style = MaterialTheme.typography.bodySmall)
         Row {
             TextButton(onClick = { onCopy(text) },enabled = text.isNotEmpty()) { Text("Copy") }
             TextButton(onClick = { editor?.onTextContextMenuItem(android.R.id.undo) },enabled = ready) { Text("Undo") }
             TextButton(onClick = { editor?.onTextContextMenuItem(android.R.id.redo) },enabled = ready) { Text("Redo") }
             TextButton(onClick = { clear = true },enabled = text.isNotEmpty()) { Text("Clear",color = MaterialTheme.colorScheme.error) }
         }
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Checkbox(data.settings.scratchpadSpelling,{ on ->
+                spelling = null
+                spellingStatus = if(store.update { it.copy(settings = it.settings.copy(scratchpadSpelling = on)) }) ScratchpadSpelling.READY else "Couldn’t save this setting. Check Data recovery and try again."
+            },enabled = store.ready)
+            Text("Dictionary spelling in Scratchpad",Modifier.weight(1f))
+            TextButton(onClick = ::beginSpelling,enabled = ready && store.ready && data.settings.scratchpadSpelling) { Text("Dictionary spelling…") }
+        }
+        if(data.settings.scratchpadSpelling) Text(spellingStatus,style = MaterialTheme.typography.bodySmall)
         if(status.isNotEmpty()) Text(status,color = MaterialTheme.colorScheme.error)
         when {
             loaded == null -> Text("Loading…")
@@ -91,6 +126,11 @@ internal class ScratchpadFile(private val file: DurableFile) {
                 editor = this
             } },modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(20.dp)))
         }
+    }
+    spelling?.let { request ->
+        AlertDialog(onDismissRequest = { spelling = null },title = { Text(if(request.choices.more) "Dictionary spellings (first 5)" else "Dictionary spellings") },
+            text = { Column { request.choices.outputs.forEach { word -> TextButton(onClick = { chooseSpelling(word) }) { Text(word) } } } },
+            confirmButton = {},dismissButton = { TextButton(onClick = { spelling = null }) { Text("Cancel") } })
     }
     if(clear) AlertDialog(onDismissRequest = { clear = false },title = { Text("Clear the scratchpad?") },text = { Text("This removes all of its text from this device and can’t be undone.") },
         confirmButton = { TextButton(onClick = { clear = false; editor?.setText("") ?: run { text = "" }; saveNow() }) { Text("Clear",color = MaterialTheme.colorScheme.error) } },
