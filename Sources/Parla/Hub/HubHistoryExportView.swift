@@ -8,24 +8,27 @@ struct HistoryExportReview: View {
     @State private var format = TranscriptExport.Format.text
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Export \(request.count) \(request.count == 1 ? "dictation" : "dictations")").font(.headline)
-            Text(request.scope)
-                .font(.caption).foregroundStyle(Theme.muted)
-            Picker("Text", selection: $content) {
-                ForEach(TranscriptExport.Content.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.segmented)
-            Picker("File format", selection: $format) {
-                ForEach(TranscriptExport.Format.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        HubSection("Export \(request.count) \(request.count == 1 ? "dictation" : "dictations")", footer: request.scope) {
+            HubRow("Text") {
+                Picker("Text", selection: $content) {
+                    ForEach(TranscriptExport.Content.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).hubControl()
             }
-            HStack {
+            HubDivider()
+            HubRow("File format") {
+                Picker("File format", selection: $format) {
+                    ForEach(TranscriptExport.Format.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.hubControl()
+            }
+            HubDivider()
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel") { model.historyExport = nil; model.historyExportMessage = nil }
+                    .buttonStyle(HubButtonStyle())
                 Button("Export…") { model.exportHistory(content: content, format: format) }
                     .buttonStyle(HubButtonStyle(kind: .primary))
-                Button("Cancel") { model.historyExport = nil; model.historyExportMessage = nil }
             }
+            .hubInset()
         }
-        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.card).clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
     }
 }

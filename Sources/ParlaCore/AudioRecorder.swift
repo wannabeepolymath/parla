@@ -180,6 +180,11 @@ public final class AudioRecorder {
         }
     }
 
+    /// Display name of the current system default input. Labels only; never used to open a device.
+    public static func defaultInputName() -> String? {
+        defaultDevice(kAudioHardwarePropertyDefaultInputDevice).flatMap { stringProperty($0, kAudioObjectPropertyName) }
+    }
+
     /// All Core Audio devices that expose an input stream, newest API order.
     public static func availableInputs() -> [InputDevice] {
         var addr = AudioObjectPropertyAddress(

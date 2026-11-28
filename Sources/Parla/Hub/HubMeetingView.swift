@@ -5,7 +5,15 @@ import SwiftUI
 struct HubMeetingView: View {
     @ObservedObject var controller: MeetingHubController
     let openSettings: () -> Void
+    @Binding var microphone: String?
+    var settingsLocked = false
     @State private var consentAcknowledged = false
+    @State private var showRetention = false
+    private var retentionSummary: String {
+        let hours = MeetingSession.RecordingPolicy.successfulAudioRetention / 3_600_000_000_000
+        let days = MeetingSession.RecordingPolicy.transcriptRetention / 86_400_000_000_000
+        return "Audio \(hours) h · Transcript \(days) days"
+    }
     @State private var deletion: DeleteConfirmation?
     private struct DeleteConfirmation: Identifiable { let id = UUID(),session: UUID?,intent: UUID }
     private static func policyDuration(_ nanoseconds: Int64, units: NSCalendar.Unit = [.day,.hour,.minute,.second]) -> String {
@@ -22,133 +30,217 @@ struct HubMeetingView: View {
         let transcript = Self.policyDuration(MeetingSession.RecordingPolicy.transcriptRetention)
         return "Unless you keep a meeting, its audio is deleted \(success) after transcription (or after \(failed) if it isn’t transcribed), and its transcript \(transcript) after the meeting starts. Expired files are removed the next time Parla runs."
     }
+    private func date(_ nanoseconds: Int64) -> String {
+        Date(timeIntervalSince1970: Double(nanoseconds) / 1_000_000_000).formatted(date: .abbreviated, time: .shortened)
+    }
+    private var sourcesLocked: Bool { controller.model.busy || controller.model.stoppingAvailable || controller.model.metadata != nil }
+
     var body: some View {
         let value = controller.model
-        VStack(alignment:.leading,spacing:18) {
-            VStack(alignment:.leading,spacing:4) {
-                Text("Meetings").font(.system(size:26,weight:.semibold)).foregroundStyle(Theme.text)
-                Text("Record your microphone and one app, then transcribe on this Mac.").font(.system(size:13)).foregroundStyle(Theme.muted)
-            }
+        VStack(alignment: .leading, spacing: 0) {
             // The action rail has no scrolling ancestor and no parent disabled state.
-            VStack(alignment:.leading,spacing:8) {
-                if value.stoppingAvailable {
-                    Label("Meeting recording · " + (value.state == .stopping ? "Finishing" : "Active"),systemImage:"record.circle.fill")
-                        .foregroundStyle(.red).font(.system(size:13,weight:.semibold))
-                        .accessibilityLabel("Meeting recording indicator. " + value.status)
-                }
-                Text(value.status).font(.system(size:13,weight:.medium)).fixedSize(horizontal:false,vertical:true)
+            VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+                HubPageHeader(title: "Meetings", subtitle: HubPage.meetings.subtitle)
+                HubSection(nil, footer: value.stoppingAvailable
+                           ? "Recording until you click Stop and Save. Leaving this page stops it, so Parla asks first." : nil) {
+                    HStack(spacing: 12) {
+                        if value.stoppingAvailable, value.state != .stopping, let started = value.metadata?.created {
+                            RecordingClock(startedNanoseconds: started)
+                        }
+                    HubRow(value.stoppingAvailable ? (value.state == .stopping ? "Finishing recording" : "Recording") : "Meeting recorder",
+                           detail: value.stoppingAvailable ? (value.message ?? "From " + value.source) : value.status + (value.captureAvailable && value.state == .idle ? " Up to an hour." : "")) {
+                        HStack(spacing: 8) {
+                            if value.stoppingAvailable {
+                                Image(systemName: "record.circle.fill").foregroundStyle(Theme.danger)
+                                    .accessibilityLabel("Meeting recording indicator. " + value.status)
+                            }
+                            if value.state == .transcribing {
+                                Button("Cancel Transcription", action: controller.cancelTranscription).buttonStyle(HubButtonStyle())
+                            } else if value.canTranscribe {
+                                Button("Transcribe", action: controller.transcribeRemaining).buttonStyle(HubButtonStyle(kind: value.stoppingAvailable ? .normal : .primary))
+                            }
+                            if value.stoppingAvailable {
+                                Button("Stop and Save", action: controller.stopAndSave)
+                                    .buttonStyle(HubButtonStyle(kind: .primary))
+                                    .accessibilityHint("Stops both sources and keeps saved meeting audio.")
+                            } else if value.captureAvailable {
+                                if !value.canTranscribe {
+                                    Button("Start Recording", action: controller.startAndSave)
+                                        .buttonStyle(HubButtonStyle(kind: .primary)).disabled(!value.canStart)
+                                }
+                            } else {
+                                Label("Recording unavailable", systemImage: "mic.slash")
+                                    .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                            }
+                            HubMoreMenu(label: "More meeting actions") {
+                                Button("Reopen Saved Meeting", action: controller.retryOpen).disabled(value.busy)
+                                Divider()
+                                Button("Speech Settings…", action: openSettings)
+                                Button("Microphone Access…", action: controller.openMicrophoneSettings)
+                                Button("App Audio Access…", action: controller.openApplicationPrivacy)
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
                     .accessibilityLabel("Meeting status: " + value.status)
-                HStack {
-                    if value.stoppingAvailable {
-                        Button("Stop and save",action:controller.stopAndSave).accessibilityHint("Stops both sources and keeps saved meeting audio.")
-                    } else if value.captureAvailable {
-                        Button("Start recording",action:controller.startAndSave).disabled(!value.canStart)
-                    } else {
-                        Label("Recording unavailable",systemImage:"mic.slash").foregroundStyle(Theme.muted)
+                    .padding(.leading, value.stoppingAvailable && value.metadata != nil && value.state != .stopping ? -HubLayout.rowInset : 0)
                     }
-                    if value.state == .transcribing {
-                        Button("Cancel transcription",action:controller.cancelTranscription)
-                    } else {
-                        Button("Transcribe",action:controller.transcribeRemaining).disabled(!value.canTranscribe)
-                    }
+                    .padding(.leading, value.stoppingAvailable && value.metadata != nil && value.state != .stopping ? HubLayout.rowInset : 0)
                 }
             }
+            .hubColumn(bottom: HubLayout.sectionSpacing)
+
             ScrollView {
-                VStack(alignment:.leading,spacing:18) {
-                    HubSection("Audio sources",footer:"Recording an app needs macOS 14.2 or later. Only its audio is recorded, not your screen. Some apps can’t be recorded.") {
-                        HubRow("Microphone",detail:"Changes apply to the next recording.") {
-                            Button("Choose microphone…",action:openSettings).disabled(value.stoppingAvailable)
+                VStack(alignment: .leading, spacing: HubLayout.sectionSpacing) {
+                    HubSection("Audio sources", footer: "Recording an app needs macOS 14.2 or later. Only its audio is recorded, not your screen. Some apps can’t be recorded.") {
+                        HubRow("Microphone", detail: MicrophonePicker.detail(for: microphone) ?? "Changes apply to the next recording") {
+                            MicrophonePicker(selection: $microphone).disabled(value.stoppingAvailable || settingsLocked)
                         }
-                        Picker("App audio",selection:Binding<UUID?>(get:{
-                            if case .selectedApplication(let selected) = controller.sourceChoice { return selected.selectionID }
-                            return UUID?.none
-                        },set:{ id in
-                            if let id,let app = controller.applications.first(where: { $0.selectionID == id }) {
-                                _ = controller.acceptSourceChoice(.selectedApplication(app))
-                            } else { _ = controller.acceptSourceChoice(.microphone) }
-                        })) {
-                            Text("Microphone only").tag(UUID?.none)
-                            ForEach(controller.applications,id:\.selectionID) { app in
-                                Text(app.label).tag(Optional(app.selectionID))
+                        HubDivider()
+                        HubRow("Also record an app", detail: "Its sound only, like the other side of a call") {
+                            HStack(spacing: 4) {
+                                Picker("App audio", selection: Binding<UUID?>(get: {
+                                    if case .selectedApplication(let selected) = controller.sourceChoice { return selected.selectionID }
+                                    return UUID?.none
+                                }, set: { id in
+                                    if let id, let app = controller.applications.first(where: { $0.selectionID == id }) {
+                                        _ = controller.acceptSourceChoice(.selectedApplication(app))
+                                    } else { _ = controller.acceptSourceChoice(.microphone) }
+                                })) {
+                                    Text("None").tag(UUID?.none)
+                                    ForEach(controller.applications, id: \.selectionID) { app in
+                                        Text(app.label).tag(Optional(app.selectionID))
+                                    }
+                                }
+                                .hubControl()
+                                .disabled(sourcesLocked)
+                                HubIconButton("arrow.clockwise", label: "Refresh apps", action: controller.refreshApplications)
+                                    .disabled(sourcesLocked)
                             }
-                        }.disabled(value.busy || value.stoppingAvailable || value.metadata != nil)
-                        Button("Refresh apps",action:controller.refreshApplications)
-                            .disabled(value.busy || value.stoppingAvailable || value.metadata != nil)
+                        }
                     }
-                    Text("Audio and transcripts stay on this Mac and aren’t added to History. Recordings last up to an hour; leaving this page stops one.")
-                        .font(.system(size:12)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
-                    Text(retentionNotice)
-                        .font(.system(size:12)).foregroundStyle(Theme.muted).fixedSize(horizontal:false,vertical:true)
                     if let metadata = value.metadata {
-                        VStack(alignment:.leading,spacing:5) {
-                            Text("Started \(Date(timeIntervalSince1970:Double(metadata.created)/1_000_000_000).formatted(date:.abbreviated,time:.shortened))")
-                            if metadata.kept { Text("Kept until you delete it") }
-                            else {
-                                Text("Transcript expires \(Date(timeIntervalSince1970:Double(metadata.expires)/1_000_000_000).formatted(date:.abbreviated,time:.shortened))")
+                        HubSection("This meeting") {
+                            HubRow("Started") { HubValue(date(metadata.created)) }
+                            HubDivider()
+                            if metadata.kept {
+                                HubRow("Kept", detail: "Until you delete it")
+                            } else {
+                                HubRow("Transcript expires") { HubValue(date(metadata.expires)) }
                                 if let raw = metadata.rawExpires {
-                                    Text("Audio expires \(Date(timeIntervalSince1970:Double(raw)/1_000_000_000).formatted(date:.abbreviated,time:.shortened))")
-                                } else if metadata.chunks.contains(where: { $0.audioRemoved }) { Text("Audio deleted") }
+                                    HubDivider()
+                                    HubRow("Audio expires") { HubValue(date(raw)) }
+                                } else if metadata.chunks.contains(where: { $0.audioRemoved }) {
+                                    HubDivider()
+                                    HubRow("Audio") { HubValue("Deleted") }
+                                }
                             }
-                        }.font(.system(size:12)).foregroundStyle(Theme.muted)
-                        Toggle("Keep this meeting until I delete it",isOn:Binding(get:{ metadata.kept },set:controller.keepMeeting))
-                            .disabled(value.busy || value.state != .stopped)
-                        HStack {
-                            Button("Open saved text",action:controller.openSavedText).disabled(!value.canRead)
-                            Button("Copy text",action:controller.copyText).disabled(!value.canRead)
+                            HubDivider()
+                            HubToggleRow("Keep until I delete it", isOn: Binding(get: { metadata.kept }, set: controller.keepMeeting))
+                                .disabled(value.busy || value.state != .stopped)
+                            HubDivider()
+                            HStack(spacing: 8) {
+                                Button("Delete Meeting…") {
+                                    if let confirmation = controller.deleteConfirmation { deletion = .init(session: confirmation.session, intent: confirmation.intent) }
+                                }
+                                .buttonStyle(HubButtonStyle(kind: .danger))
+                                .disabled(value.busy || value.stoppingAvailable)
+                                Spacer()
+                                Button("Open Saved Text", action: controller.openSavedText).buttonStyle(HubButtonStyle()).disabled(!value.canRead)
+                                Button("Copy Text", action: controller.copyText).buttonStyle(HubButtonStyle()).disabled(!value.canRead)
+                            }
+                            .hubInset()
                         }
                         if let text = value.text {
-                            Text("Transcript").font(.system(size:14,weight:.semibold))
-                            Text(verbatim:text).font(.system(size:13)).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)
+                            HubSection("Transcript") {
+                                Text(verbatim: text).font(.system(size: 13)).foregroundStyle(Theme.text).textSelection(.enabled)
+                                    .hubInset()
+                            }
                         }
-                        Button("Delete meeting…",role:.destructive) {
-                            if let confirmation = controller.deleteConfirmation { deletion = .init(session:confirmation.session,intent:confirmation.intent) }
-                        }.disabled(value.busy || value.stoppingAvailable)
                     }
                     if value.recoveryDeleteAvailable {
-                        Button("Delete all meeting data…",role:.destructive) {
-                            if let intent = controller.recoveryDeleteConfirmation { deletion = .init(session:nil,intent:intent) }
-                        }.disabled(value.busy || value.stoppingAvailable)
+                        HubSection(nil) {
+                            HubRow("Leftover meeting data", detail: "Files from a meeting Parla couldn’t open") {
+                                Button("Delete All…") {
+                                    if let intent = controller.recoveryDeleteConfirmation { deletion = .init(session: nil, intent: intent) }
+                                }
+                                .buttonStyle(HubButtonStyle(kind: .danger))
+                                .disabled(value.busy || value.stoppingAvailable)
+                            }
+                        }
                     }
-                    VStack(alignment:.leading,spacing:8) {
-                        Button("Reopen saved meeting",action:controller.retryOpen).disabled(value.busy)
-                        Button("Speech settings",action:openSettings)
-                        Button("Microphone access settings",action:controller.openMicrophoneSettings)
-                        Button("App audio access settings",action:controller.openApplicationPrivacy)
+                    HubSection("Storage") {
+                        HubRow("Kept on this Mac", detail: "Audio and transcripts aren’t added to History")
+                        HubDivider()
+                        HubDisclosureRow(title: "How long meetings are kept", summary: retentionSummary, isExpanded: $showRetention)
+                        if showRetention {
+                            HubDivider()
+                            Text(retentionNotice).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                                .fixedSize(horizontal: false, vertical: true).hubInset()
+                        }
                     }
                 }
-                .padding(.trailing,8)
+                .hubColumn(top: 0)
             }
         }
-        .padding(28).padding(.top,20).frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.bg).tint(Theme.accent)
-        .sheet(item:Binding(get:{ controller.recordingChallenge },set:{ pending in
-            if pending == nil,let current = controller.recordingChallenge { controller.confirmRecordingStart(id:current.id,affirmed:false) }
+        .sheet(item: Binding(get: { controller.recordingChallenge }, set: { pending in
+            if pending == nil, let current = controller.recordingChallenge { controller.confirmRecordingStart(id: current.id, affirmed: false) }
         })) { challenge in
-            VStack(alignment:.leading,spacing:18) {
-                Text("Record this meeting?").font(.headline)
+            HubSheet(title: "Record this meeting?", width: 440) {
                 Text("Parla will save your microphone and the selected app’s audio on this Mac. If macOS asks for access, allow it, then press Start again.")
-                    .fixedSize(horizontal:false,vertical:true)
-                Toggle("Everyone in this meeting knows it's being recorded",isOn:$consentAcknowledged)
-                HStack {
-                    Button("Cancel") { controller.confirmRecordingStart(id:challenge.id,affirmed:false) }.keyboardShortcut(.cancelAction)
-                    Button("Start recording") { controller.confirmRecordingStart(id:challenge.id,affirmed:consentAcknowledged) }
-                        .disabled(!consentAcknowledged).keyboardShortcut(.defaultAction)
-                }
-            }.padding(24).frame(width:430).onAppear { consentAcknowledged = false }
+                    .font(.system(size: 13)).foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle("Everyone in this meeting knows it’s being recorded", isOn: $consentAcknowledged)
+                    .font(.system(size: 13))
+            } actions: {
+                Button("Cancel") { controller.confirmRecordingStart(id: challenge.id, affirmed: false) }
+                    .buttonStyle(HubButtonStyle()).keyboardShortcut(.cancelAction)
+                Button("Start Recording") { controller.confirmRecordingStart(id: challenge.id, affirmed: consentAcknowledged) }
+                    .buttonStyle(HubButtonStyle(kind: .primary))
+                    .disabled(!consentAcknowledged).keyboardShortcut(.defaultAction)
+            }
+            .onAppear { consentAcknowledged = false }
         }
-        .sheet(item:$deletion) { confirmation in
-            VStack(alignment:.leading,spacing:18) {
-                Text(confirmation.session == nil ? "Delete all meeting data?" : "Delete this meeting’s audio and transcript?").font(.headline)
-                Text("Files you exported aren’t affected.").font(.body)
-                HStack {
-                    Button("Cancel") { deletion = nil }.keyboardShortcut(.cancelAction)
-                    Button("Delete",role:.destructive) {
-                        deletion = nil
-                        if let session = confirmation.session { controller.deleteConfirmed(session:session,intent:confirmation.intent) }
-                        else { controller.deleteAllMeetingDataConfirmed(intent:confirmation.intent) }
-                    }
+        .sheet(item: $deletion) { confirmation in
+            HubSheet(title: confirmation.session == nil ? "Delete all meeting data?" : "Delete this meeting’s audio and transcript?", width: 400) {
+                Text("Files you exported aren’t affected.").font(.system(size: 13)).foregroundStyle(Theme.text)
+            } actions: {
+                Button("Cancel") { deletion = nil }.buttonStyle(HubButtonStyle()).keyboardShortcut(.cancelAction)
+                Button("Delete") {
+                    deletion = nil
+                    if let session = confirmation.session { controller.deleteConfirmed(session: session, intent: confirmation.intent) }
+                    else { controller.deleteAllMeetingDataConfirmed(intent: confirmation.intent) }
                 }
-            }.padding(24).frame(width:390)
+                .buttonStyle(HubButtonStyle(kind: .danger))
+            }
         }
+    }
+}
+
+/// Elapsed recording time against the one-hour limit, ticking once a second.
+private struct RecordingClock: View {
+    let startedNanoseconds: Int64
+    // ponytail: mirrors the "up to an hour" recording limit stated in the UI copy.
+    private static let limit: TimeInterval = 3_600
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = max(0, context.date.timeIntervalSince1970 - Double(startedNanoseconds) / 1_000_000_000)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Self.format(elapsed))
+                    .font(.system(size: 20, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Theme.text)
+                Text(elapsed < Self.limit ? "\(Int((Self.limit - elapsed) / 60)) min left" : "At the limit")
+                    .font(.system(size: 11)).foregroundStyle(elapsed > Self.limit - 300 ? Theme.warning : Theme.muted)
+            }
+            .frame(minWidth: 64, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Recording time \(Self.format(elapsed))")
+        }
+    }
+    private static func format(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
     }
 }

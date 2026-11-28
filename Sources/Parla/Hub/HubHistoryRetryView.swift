@@ -6,63 +6,86 @@ struct HistoryRetryReview: View {
     let preview: HistoryRetryPreview
     private var settingsBlocked: Bool { model.loadError != nil || model.saveError != nil }
 
+    private var title: String {
+        preview.request.isSegmented ? "Clean up in sections" : preview.request.configuration.kind == .cleanup ? "Clean up again" : "Apply preset"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(preview.request.isSegmented ? "Clean up in sections" : preview.request.configuration.kind == .cleanup ? "Clean up again" : "Apply preset").font(.headline)
-            Text("Nothing is typed. Save the result to replace it in History.")
-                .font(.caption).foregroundStyle(Theme.muted)
-            if let disclosure = preview.request.disclosure { Text(disclosure).font(.caption).textSelection(.enabled) }
-            Text(preview.request.configuration.summary).font(.caption).textSelection(.enabled)
-            if let review = preview.request.presetReview {
-                Text(review).font(.caption).textSelection(.enabled)
-            }
-            if let prior = preview.original.retries?.last, prior.configuration == preview.request.configuration {
-                Text("These are the same settings as the last time you did this.")
-                    .font(.caption).foregroundStyle(Theme.muted)
-            }
-            version("Original", preview.original.raw) { model.copyHistoryRetryOriginal(preview.id) }
-            version("Previous result", preview.original.best) { model.copyHistoryRetryPrevious(preview.id) }
-            if let proposed = preview.proposed {
-                version("New result", proposed) { model.copyHistoryRetryProposed(preview.id) }
-            }
-            if let provenance = preview.provenance, let counts = provenance.segmented {
-                Text("\(counts.completed) of \(counts.planned) sections done"
-                     + (provenance.configuration.executionKind == .deterministic ? " · no online requests" : ""))
-                    .font(.caption)
-            }
-            // ponytail: segmented runs store a placeholder, not a model name; show nothing then.
-            if let model = preview.provenance?.usage?.cleanupModel, !model.contains("usage") {
-                Text("Model: \(model)").font(.caption)
-            }
-            Text(preview.status).font(.caption).foregroundStyle(Theme.muted)
-            if preview.loading { ProgressView().controlSize(.small) }
-            HStack {
-                if !preview.started {
-                    Button(preview.request.isSegmented || preview.request.configuration.kind == .cleanup ? "Clean up" : "Apply preset") {
-                        Task { await model.startHistoryRetry(preview.id) }
-                    }.disabled(settingsBlocked || preview.stale || model.history.loadBlocked)
+        HubSection(title, footer: "Nothing is typed. Save the result to replace it in History.") {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let disclosure = preview.request.disclosure { caption(disclosure) }
+                    caption(preview.request.configuration.summary)
+                    if let review = preview.request.presetReview { caption(review) }
+                    if let prior = preview.original.retries?.last, prior.configuration == preview.request.configuration {
+                        caption("These are the same settings as last time.")
+                    }
                 }
-                if preview.proposed != nil, !preview.saved, !preview.stale {
-                    Button(preview.saveFailed ? "Try saving again" : "Save result") { model.saveHistoryRetry(preview.id) }
-                        .disabled(settingsBlocked || !model.settings.historyEnabled || model.history.loadBlocked)
+                version("Original", preview.original.raw) { model.copyHistoryRetryOriginal(preview.id) }
+                version("Previous result", preview.original.best) { model.copyHistoryRetryPrevious(preview.id) }
+                if let proposed = preview.proposed {
+                    version("New result", proposed) { model.copyHistoryRetryProposed(preview.id) }
                 }
-                if preview.started, !preview.stale, !preview.loading, !preview.request.isSegmented {
-                    Button("Try again") {
-                        model.prepareHistoryRetry(preview.id, applyPreset: preview.request.configuration.kind == .preset)
-                    }.disabled(settingsBlocked || model.history.loadBlocked)
+                HStack(spacing: 6) {
+                    if preview.loading { ProgressView().controlSize(.small) }
+                    caption(statusLine)
                 }
-                Button(preview.loading ? "Cancel" : "Discard", role: .destructive) { model.discardHistoryRetry(preview.id) }
+                HStack(spacing: 8) {
+                    Button(preview.loading ? "Cancel" : "Discard", role: .destructive) { model.discardHistoryRetry(preview.id) }
+                        .buttonStyle(HubButtonStyle())
+                    Spacer()
+                    if preview.started, !preview.stale, !preview.loading, !preview.request.isSegmented {
+                        Button("Try Again") {
+                            model.prepareHistoryRetry(preview.id, applyPreset: preview.request.configuration.kind == .preset)
+                        }
+                        .buttonStyle(HubButtonStyle())
+                        .disabled(settingsBlocked || model.history.loadBlocked)
+                    }
+                    if !preview.started {
+                        Button(preview.request.isSegmented || preview.request.configuration.kind == .cleanup ? "Clean Up" : "Apply Preset") {
+                            Task { await model.startHistoryRetry(preview.id) }
+                        }
+                        .buttonStyle(HubButtonStyle(kind: .primary))
+                        .disabled(settingsBlocked || preview.stale || model.history.loadBlocked)
+                    }
+                    if preview.proposed != nil, !preview.saved, !preview.stale {
+                        Button(preview.saveFailed ? "Try Saving Again" : "Save Result") { model.saveHistoryRetry(preview.id) }
+                            .buttonStyle(HubButtonStyle(kind: .primary))
+                            .disabled(settingsBlocked || !model.settings.historyEnabled || model.history.loadBlocked)
+                    }
+                }
             }
+            .hubInset()
         }
-        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.card).clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border))
+    }
+
+    /// Progress, model and status on one quiet line.
+    private var statusLine: String {
+        var parts: [String] = []
+        if let provenance = preview.provenance, let counts = provenance.segmented {
+            parts.append("\(counts.completed) of \(counts.planned) sections done"
+                         + (provenance.configuration.executionKind == .deterministic ? " · no online requests" : ""))
+        }
+        // ponytail: segmented runs store a placeholder, not a model name; show nothing then.
+        if let model = preview.provenance?.usage?.cleanupModel, !model.contains("usage") { parts.append("Model: \(model)") }
+        parts.append(preview.status)
+        return parts.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text).font(.system(size: 12)).foregroundStyle(Theme.muted).textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func version(_ title: String, _ text: String, copy: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack { Text(title).font(.caption).foregroundStyle(Theme.muted); Spacer(); Button("Copy", action: copy) }
-            Text(text).font(.system(size: 13)).textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
+                Spacer()
+                Button("Copy", action: copy).buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.accent)
+            }
+            Text(text).font(.system(size: 13)).foregroundStyle(Theme.text).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

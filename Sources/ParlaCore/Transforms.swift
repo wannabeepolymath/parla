@@ -42,9 +42,9 @@ public struct TransformPreset: Codable, Equatable, Identifiable, Sendable {
 
 extension Settings {
     public func selectedTransformPreset() throws -> TransformPreset {
-        guard let id = selectedPresetID else { throw TransformError(description: "Choose a preset in Output & Presets") }
+        guard let id = selectedPresetID else { throw TransformError(description: "Choose a preset in Rewrite Presets") }
         let matches = transformPresets.filter { $0.id == id }
-        guard matches.count == 1 else { throw TransformError(description: "Selected preset is missing — choose one in Output & Presets") }
+        guard matches.count == 1 else { throw TransformError(description: "Selected preset is missing — choose one in Rewrite Presets") }
         let preset = matches[0]
         if let error = preset.validationError { throw TransformError(description: error) }
         return preset
