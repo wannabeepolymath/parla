@@ -144,10 +144,12 @@ final class UpdateController {
             do {
                 let result = try await installer.install(dmg: dmg, currentVersion: version, at: Self.installURL)
                 installed = true
+                NSLog("%@", "Parla update: installed \(update.version), \(result == .relaunching ? "relaunch helper started" : "relaunch helper failed to start")")
                 if result == .reopenToFinish {
                     hud.show(.error("Update installed — reopen Parla to finish"))
                     try? await Task.sleep(nanoseconds: 3_000_000_000) // long enough to read it
                 }
+                Self.armQuitWatchdog()
                 if quitPending { completeTermination() } else { NSApp.terminate(nil) }
             } catch {
                 NSLog("%@", "Parla update failed: \(error)")
@@ -158,6 +160,24 @@ final class UpdateController {
                 let step = (error as? UpdateInstaller.Failure)?.step.rawValue ?? "unknown"
                 hud.show(.error("Update failed: \(step)"))
             }
+        }
+    }
+
+    /// After a successful swap the app must exit: dictation is already refused
+    /// (`committing`) and the restart claim drained every owner, so a Quit still
+    /// held or refused 15 s later is stuck, not busy. Log what it waits on, flush
+    /// the willTerminate saves, and exit. The 30 s background backstop covers a
+    /// blocked main thread, where the first timer can't run.
+    private static func armQuitWatchdog() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+            let waiting = (NSApp.delegate as? AppDelegate)?.termination.pendingOwners ?? "unknown"
+            NSLog("%@", "Parla update: quit still not finished 15 s after install (waiting on: \(waiting)); exiting")
+            NSApp.delegate?.applicationWillTerminate?(Notification(name: NSApplication.willTerminateNotification, object: NSApp))
+            exit(0)
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
+            NSLog("%@", "Parla update: main thread unresponsive 30 s after install; exiting")
+            _exit(0)
         }
     }
 

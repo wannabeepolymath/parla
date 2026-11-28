@@ -725,6 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let message = self?.savedImports.shutdownRefusal.map { "Couldn’t quit: " + $0 } ?? (self?.nativePreparation.core.persistenceFailed == true
                 ? "Couldn’t quit: Safe Start couldn’t save. Open Safe Start."
                 : "Couldn’t quit: your clipboard hasn’t been restored yet.")
+            NSLog("%@", "Parla quit refused: \(message)")
             self?.hud.show(.error(message))
         }, onIntent: { [weak self] in guard let self else { return }; MainActor.assumeIsolated { self.meetingHub.reserveShutdown() }; Self.cleanupFailoverIntent(self.store); Self.guidedQuitIntent(self.templates, imports: self.audioImport) })
 
@@ -1343,6 +1344,7 @@ guard claimSingleInstanceLock() else {
     exit(1)
 }
 logToFile()
+NSLog("%@", "Parla started \(AppDelegate.appVersion ?? "dev") (build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"))")
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

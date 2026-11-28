@@ -305,4 +305,29 @@ final class UpdateInstallerTests: XCTestCase {
         try Data("x".utf8).write(to: framework.appendingPathComponent("Versions/A/Resources/extra.txt"))
         XCTAssertThrowsError(try UpdateInstaller.verify(app: app, against: requirement))
     }
+
+    /// The real relaunch script: waits while the PID lives, then opens the path
+    /// and logs the result to stderr. A 1 s holder can't prove "no deadline"
+    /// (the old one was 30 s), so the script is also checked for any exit path.
+    func testTheRelaunchScriptWaitsForThePIDThenOpensAndLogs() throws {
+        XCTAssertFalse(UpdateInstaller.relaunchScript.contains("exit"), "the helper must never give up before opening the app")
+        let holder = Process()
+        holder.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        holder.arguments = ["1"]
+        try holder.run()
+        let script = Process()
+        script.executableURL = URL(fileURLWithPath: "/bin/sh")
+        let missing = root.appendingPathComponent("Missing.app").path // open fails without launching anything
+        script.arguments = ["-c", UpdateInstaller.relaunchScript, "sh", String(holder.processIdentifier), missing]
+        let err = Pipe()
+        script.standardError = err
+        try script.run()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertTrue(script.isRunning, "must still be waiting while the PID lives")
+        holder.waitUntilExit()
+        script.waitUntilExit()
+        let log = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        XCTAssertTrue(log.contains("Parla relaunch: open failed"), log)
+        XCTAssertTrue(log.contains(missing), log)
+    }
 }

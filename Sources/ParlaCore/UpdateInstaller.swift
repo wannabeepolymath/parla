@@ -81,9 +81,13 @@ public struct UpdateInstaller {
             try? FileManager.default.removeItem(at: staging)
             throw failure
         }
+        // Helper first: if the cleanup below ever stalls, the helper already waits
+        // with no deadline, so ending the process by hand still opens the new app.
+        // ponytail: the watchdog arms only after this returns; staging sits on the
+        // install volume, so a stall here needs that volume itself to hang.
+        let relaunched = (try? relaunch(installed)) != nil
         try? FileManager.default.removeItem(at: staging) // the old app now; harmless if it stays
-        do { try relaunch(installed) } catch { return .reopenToFinish }
-        return .relaunching
+        return relaunched ? .relaunching : .reopenToFinish
     }
 }
 
@@ -272,10 +276,12 @@ extension UpdateInstaller {
         }
     }
 
-    /// Polls for `$1` (this process) to exit, every 0.2 s for at most 30 s, then
-    /// opens `$2`; on timeout it exits without launching. PID and path are
-    /// arguments, never spliced into the script.
-    static let relaunchScript = #"i=0; while /bin/kill -0 "$1" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && exit 1; /bin/sleep 0.2; done; /usr/bin/open "$2""#
+    /// Polls for `$1` (this process) to exit, every 0.2 s with no deadline, then
+    /// opens `$2` and logs the result to the inherited stderr (Parla.log). No
+    /// deadline: a quit that stalls and is ended by hand (Activity Monitor) must
+    /// still open the swapped app. PID and path are arguments, never spliced in.
+    /// ponytail: PID existence only; a reused PID just keeps an idle shell polling.
+    static let relaunchScript = #"while /bin/kill -0 "$1" 2>/dev/null; do /bin/sleep 0.2; done; if /usr/bin/open "$2"; then r=opened; else r="open failed ($?)"; fi; echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') Parla relaunch: $r $2" >&2"#
 
     static func relaunch(app: URL, after pid: pid_t) throws {
         let process = Process()

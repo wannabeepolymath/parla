@@ -102,6 +102,15 @@ final class TerminationCoordinator {
         if !allowed { cancel(); reply(false) }
         else if allReady { intent = nil; reply(true) }
     }
+    /// For the post-update watchdog's log line: the owners a pending Quit still waits on.
+    var pendingOwners: String {
+        guard isPending else { return "no quit pending" }
+        let owners: [(String, Bool?)] = [("meeting", meetingReady), ("savedImports", savedImportsReady),
+            ("experimentalRetry", experimentalRetryReady), ("clipboard", clipboardReady), ("updater", updaterReady),
+            ("download", downloadReady), ("preparation", preparationReady), ("localCleanup", localCleanupReady),
+            ("appleSpeech", appleSpeechReady), ("parakeet", parakeetReady)]
+        return owners.filter { $0.1 != true }.map(\.0).joined(separator: ", ")
+    }
     private var allReady: Bool { meetingReady == true && savedImportsReady == true && experimentalRetryReady == true && clipboardReady == true && updaterReady == true && downloadReady == true && preparationReady == true && localCleanupReady == true && appleSpeechReady == true && parakeetReady == true }
     private func cancel() {
         intent = nil; cancelMeeting(); cancelSavedImports(); cancelExperimentalRetry(); cancelClipboard(); cancelUpdater(); cancelDownload(); cancelPreparation(); cancelLocalCleanup(); cancelAppleSpeech(); cancelParakeet(); failure()
