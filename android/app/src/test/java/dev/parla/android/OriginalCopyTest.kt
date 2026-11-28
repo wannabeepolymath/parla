@@ -6,7 +6,24 @@ import org.junit.Test
 
 class OriginalCopyTest {
     private var now = 1_000L
-    private val owner = OriginalCopyOwner { now }
+    private val timers = mutableListOf<Pair<Long,() -> Unit>>()
+    private var canceled = 0
+    private val owner = OriginalCopyOwner({ now }) { delay,action -> timers += delay to action; { canceled++ } }
+
+    @Test fun originalIsClearedAtThirtySecondsWithoutAnyScreenOrRefresh() {
+        val attempt = owner.dispatched(); now += 2_000
+        assertTrue(owner.completed(attempt,"raw words"))
+        val (delay,fire) = timers.single()
+        assertEquals(28_000L,delay) // dispatch + 30 s, not completion + 30 s
+        now = 31_000; fire()
+        assertNull(owner.offer.value) // no refresh() or copy() was called
+        // An older timer never clears a newer original; replacing or clearing cancels the pending timer.
+        assertTrue(owner.completed(owner.dispatched(),"first"))
+        val stale = timers.last().second; val before = canceled
+        assertTrue(owner.completed(owner.dispatched(),"second")); assertEquals(before+1,canceled)
+        stale(); assertNotNull(owner.offer.value)
+        owner.clear(); assertEquals(before+2,canceled)
+    }
 
     @Test fun originalExpiresThirtySecondsAfterDispatchAndReadingNeverRenewsIt() {
         val attempt = owner.dispatched()
