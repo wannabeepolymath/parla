@@ -45,7 +45,7 @@ internal object CleanupFailover {
      * before the request goes out, it re-checks backup admission (>= 3 s) and returns what remains then.
      * A result that arrives after the deadline is rejected. Cancellation always propagates.
      */
-    suspend fun run(chain: List<Endpoint>, clock: () -> Long, attempt: suspend (Int, Endpoint, () -> Long) -> String): String {
+    suspend fun <T> run(chain: List<Endpoint>, clock: () -> Long, attempt: suspend (Int, Endpoint, () -> Long) -> T): T {
         val deadline = clock() + BUDGET_MS
         fun late() = ApiFailure(PROVIDER_TIMEOUT, ApiFailure.Kind.timeout)
         var last: ApiFailure? = null

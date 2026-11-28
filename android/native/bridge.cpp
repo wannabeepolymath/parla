@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <cstdint>
 #include <thread>
 #include <stdexcept>
 
@@ -49,7 +50,31 @@ extern "C" JNIEXPORT void JNICALL Java_dev_parla_android_WhisperJni_release(JNIE
     try { std::lock_guard<std::mutex> lock(registryMutex); tokens.erase(id); }
     catch (...) { failure(env, "Could not release recognition token"); }
 }
-extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recognize(JNIEnv *env, jobject, jlong id, jbyteArray modelBytes, jfloatArray sampleArray, jbyteArray promptBytes, jbyteArray languageBytes) {
+namespace {
+void put(std::string &out, uint64_t value, int bytes) { for (int i = 0; i < bytes; ++i) out.push_back(char((value >> (8 * i)) & 0xff)); }
+// Timed payload (little-endian): u32 count, then per segment i64 t0, i64 t1, u32 length, raw UTF-8 bytes.
+// Mac copyTimedResult bounds: at most 10000 segments and 1 MiB of text; each C string is scanned within the budget.
+std::string timedPayload(whisper_context *ctx) {
+    const int count = whisper_full_n_segments(ctx);
+    if (count < 0 || count > 10000) throw std::runtime_error("The timed transcript is too large.");
+    std::string out; put(out, uint64_t(count), 4);
+    size_t total = 0;
+    for (int i = 0; i < count; ++i) {
+        const char *text = whisper_full_get_segment_text(ctx, i);
+        if (!text) throw std::runtime_error("On-device transcription failed");
+        const size_t remaining = 1048576 - total;
+        size_t length = 0;
+        while (length <= remaining && text[length] != 0) ++length;
+        if (length > remaining) throw std::runtime_error("The timed transcript is too large.");
+        total += length;
+        put(out, uint64_t(whisper_full_get_segment_t0(ctx, i)), 8);
+        put(out, uint64_t(whisper_full_get_segment_t1(ctx, i)), 8);
+        put(out, uint64_t(length), 4);
+        out.append(text, length);
+    }
+    return out;
+}
+jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray sampleArray, jbyteArray promptBytes, jbyteArray languageBytes, bool timed) {
     try {
         auto token = lookup(id);
         if (!token) throw std::runtime_error("Unknown recognition token");
@@ -76,6 +101,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         const int languages = parla::language_count(whisper_token_sot(ctx.get()), whisper_token_translate(ctx.get()));
         const int pinnedId = chosen == "auto" ? -1 : whisper_lang_id(chosen.c_str());
         const bool pinned = pinnedId >= 0 && pinnedId < languages;
+        if (timed) {
+            // Mac decodeTimed's exact pinned-implementation predicate, and a chosen language (one decode, no re-detection).
+            if (whisper_model_n_text_layer(ctx.get()) == 2 && whisper_model_n_vocab(ctx.get()) != 51866) throw std::runtime_error("Timestamps aren't available for this speech model.");
+            if (multi && !pinned) throw std::runtime_error("Choose a language to transcribe with timestamps.");
+        }
         std::string language = !multi ? "en" : pinned ? chosen : lastLanguage;
         // whisper keeps only the last n_text_ctx/2 - 1 prompt tokens; select whole terms in priority order.
         const int capacity = std::max(0, whisper_n_text_ctx(ctx.get()) / 2 - 1);
@@ -87,14 +117,19 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         auto decode = [&]() {
             auto p = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
             p.n_threads = std::max(4, std::min(8, int(std::thread::hardware_concurrency()) - 2));
-            p.no_timestamps = true; p.print_progress = false; p.print_realtime = false;
+            p.no_timestamps = !timed; p.print_progress = false; p.print_realtime = false;
             p.print_special = false; p.print_timestamps = false;
+            if (timed) {
+                p.offset_ms = 0; p.duration_ms = 0; p.single_segment = false; p.token_timestamps = false;
+                p.translate = false; p.detect_language = false; p.max_len = 0; p.max_tokens = 0; p.tdrz_enable = false;
+            }
             p.language = language.c_str(); p.initial_prompt = prompt.empty() ? nullptr : prompt.c_str();
             p.abort_callback = aborted; p.abort_callback_user_data = token.get();
             // Preserve native temperature fallback/audio-context defaults, as desktop does.
             const auto status = whisper_full(ctx.get(), p, samples.data(), count);
             if (token->canceled.load()) return std::string();
             if (status != 0) throw std::runtime_error("On-device transcription failed");
+            if (timed) return timedPayload(ctx.get());
             std::string text;
             for (int i = 0; i < whisper_full_n_segments(ctx.get()); ++i) {
                 const auto segment = whisper_full_get_segment_text(ctx.get(), i); if (segment) text += segment;
@@ -102,7 +137,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
             return text;
         };
         auto text = decode();
-        if (multi && !pinned && languages > 0 && !token->canceled.load() && !text.empty()) {
+        if (!timed && multi && !pinned && languages > 0 && !token->canceled.load() && !text.empty()) {
             whisper_token sot = whisper_token_sot(ctx.get());
             const char *actual = nullptr;
             if (whisper_decode(ctx.get(), &sot, 1, 0, std::max(4, std::min(8, int(std::thread::hardware_concurrency()) - 2))) == 0) {
@@ -123,4 +158,11 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         return result;
     } catch (const std::exception &e) { failure(env, e.what()); return nullptr; }
     catch (...) { failure(env, "Native recognition failed"); return nullptr; }
+}
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recognize(JNIEnv *env, jobject, jlong id, jbyteArray modelBytes, jfloatArray sampleArray, jbyteArray promptBytes, jbyteArray languageBytes) {
+    return recognize(env, id, modelBytes, sampleArray, promptBytes, languageBytes, false);
+}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recognizeTimed(JNIEnv *env, jobject, jlong id, jbyteArray modelBytes, jfloatArray sampleArray, jbyteArray promptBytes, jbyteArray languageBytes) {
+    return recognize(env, id, modelBytes, sampleArray, promptBytes, languageBytes, true);
 }

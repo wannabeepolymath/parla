@@ -42,10 +42,13 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
             val text = TextRules.shape(result.text,category,singleLine)
             // Persist a conservative outcome first: later disk failures must never leave a durable no-write claim.
             val entry = HistoryEntry(raw = raw,text = text,note = listOfNotNull(result.warning,"Text insertion is unconfirmed. Check the field before pasting.").joinToString(" · "),durationMs = duration,
-                app = app,model = frozen.settings.localModel,latencyMs = (clock()-begun)/1_000_000)
+                app = app,model = frozen.settings.localModel,latencyMs = (clock()-begun)/1_000_000,
+                cleanupModel = result.usage?.model.orEmpty(),inputTokens = result.usage?.input,outputTokens = result.usage?.output)
             prepared = entry; operation.prepared = entry
             val retained = RecoveryVault.retain(operation.id,raw,text,"Text ready. Nothing inserted yet.")
             saved = frozen.settings.noHistory || save(entry,false)
+            // Mac pendingHistory: an unsaved row stays in memory for an explicit, storage-only retry.
+            if(!saved) PendingHistory.put(entry)
             active()
             // Capture-time opt-in, like desktop permitsOriginalCopy: ordinary dictation only, not a preset transform.
             val keepOriginal = frozen.settings.keepLastOriginal && frozen.settings.outputMode != "selectedPreset"
@@ -66,6 +69,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
             val finished = entry.copy(note = note)
             RecoveryVault.outcome(operation.id,note)
             if(!frozen.settings.noHistory && saved) save(finished,true)
+            if(!saved) PendingHistory.put(entry.copy(note = listOfNotNull(result.warning,insertion).joinToString(" · ")))
             advance(PendingOperation.Stage.finished,note)
             return finished
         } catch(c: CancellationException) {
@@ -73,6 +77,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), privat
                 val note = cancellationMessage(operation.writeIssued)
                 RecoveryVault.outcome(operation.id,note)
                 if(!frozen.settings.noHistory && saved) save(entry.copy(note = note),true)
+                if(!saved) PendingHistory.put(entry.copy(note = note))
             }
             throw c
         }

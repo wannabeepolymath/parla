@@ -89,7 +89,7 @@ internal object LocalDataCodec {
         return JSONObject().put("version", 5).put("settings", settings)
             .put("dictionary", JSONArray(data.dictionary))
             .put("snippets", JSONArray(data.snippets.map { JSONObject().put("id",it.id).put("trigger",it.trigger).put("expansion",it.expansion) }))
-            .put("history", JSONArray(data.history.map { JSONObject().put("id",it.id).put("createdAt",it.createdAt).put("raw",it.raw).put("text",it.text).put("note",it.note).put("durationMs",it.durationMs).put("revision",it.revision).put("app",it.app).put("model",it.model).put("latencyMs",it.latencyMs) }))
+            .put("history", JSONArray(data.history.map { JSONObject().put("id",it.id).put("createdAt",it.createdAt).put("raw",it.raw).put("text",it.text).put("note",it.note).put("durationMs",it.durationMs).put("revision",it.revision).put("app",it.app).put("model",it.model).put("latencyMs",it.latencyMs).put("cleanupModel",it.cleanupModel).putOpt("inputTokens",it.inputTokens).putOpt("outputTokens",it.outputTokens) }))
             .put("replacements", JSONArray(data.replacements.map { JSONObject().put("source",it.source).put("replacement",it.replacement) }))
             .put("presets", JSONArray(data.presets.map { JSONObject().put("id",it.id).put("name",it.name).put("kind",it.kind).put("instruction",it.instruction).put("targetLanguage",it.targetLanguage) }))
             .put("profiles", JSONArray(data.profiles.map { JSONObject().put("id",it.id).put("name",it.name).put("target",it.target).put("enabled",it.enabled).put("cleanup",it.cleanup).put("style",it.style).put("language",it.language).put("localModel",it.localModel).put("cleanupModel",it.cleanupModel).put("vocabulary",JSONArray(it.vocabulary)) }))
@@ -170,7 +170,7 @@ internal object LocalDataCodec {
         require(settings.bubbleSize.isFinite() && settings.bubbleSize in .7f..1.5f && settings.bubbleOpacity.isFinite() && settings.bubbleOpacity in .2f..1f)
         val words = strings(root,"dictionary"); require(words.size <= 1000)
         val snippets = objects(root,"snippets").map { Snippet(it.getString("id"),it.getString("trigger"),it.getString("expansion")) }
-        val history = objects(root,"history").map { HistoryEntry(it.getString("id"),it.getLong("createdAt"),it.getString("raw"),it.getString("text"),it.optString("note"),it.optLong("durationMs"),it.optLong("revision"),it.optString("app"),it.optString("model"),it.optLong("latencyMs")) }
+        val history = objects(root,"history").map { HistoryEntry(it.getString("id"),it.getLong("createdAt"),it.getString("raw"),it.getString("text"),it.optString("note"),it.optLong("durationMs"),it.optLong("revision"),it.optString("app"),it.optString("model"),it.optLong("latencyMs"),it.optString("cleanupModel"),tokens(it,"inputTokens"),tokens(it,"outputTokens")) }
         val rules = objects(root,"replacements").map { LiteralReplacement(it.getString("source"),it.getString("replacement")) }
         val presets = objects(root,"presets").map { TransformPreset(it.getString("id"),it.getString("name"),it.getString("kind"),it.getString("instruction"),it.getString("targetLanguage")).also { p -> p.validate() } }
         val profiles = objects(root,"profiles").map { AppProfile(it.getString("id"),it.getString("name"),it.getString("target"),it.getBoolean("enabled"),it.getString("cleanup"),it.getString("style"),it.getString("language"),it.getString("localModel"),it.getString("cleanupModel"),strings(it,"vocabulary")).also { p -> p.validate() } }
@@ -178,6 +178,7 @@ internal object LocalDataCodec {
         // Legacy text remains even if history was disabled. Disable is non-destructive.
         return LocalData(settings,words,snippets,history,rules,presets,profiles)
     }
+    private fun tokens(o: JSONObject, key: String): Int? = if(o.has(key)) requireNotNull((o.get(key) as? Int)?.takeIf { it >= 0 }) { "Invalid token count" } else null
     private fun array(root: JSONObject, key: String): JSONArray = if(root.has(key)) root.getJSONArray(key) else JSONArray()
     private fun strings(root: JSONObject, key: String): List<String> = array(root,key).let { a -> (0 until a.length()).map { require(a.get(it) is String); a.getString(it) } }
     private fun objects(root: JSONObject, key: String): List<JSONObject> = array(root,key).let { a -> (0 until a.length()).map { a.getJSONObject(it) } }

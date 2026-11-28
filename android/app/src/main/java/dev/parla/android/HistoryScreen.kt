@@ -36,7 +36,28 @@ internal fun historyDetails(row: HistoryEntry, appLabel: (String) -> String): St
     row.app.takeIf { it.isNotEmpty() }?.let(appLabel),
     row.model.takeIf { it.isNotEmpty() }?.let(::speechModelLabel),
     row.latencyMs.takeIf { it > 0 }?.let { "Ready in %.1f s".format(it/1000.0) },
+    row.cleanupModel.takeIf { it.isNotEmpty() },
+    if(row.inputTokens != null || row.outputTokens != null) "${row.inputTokens ?: "?"} in / ${row.outputTokens ?: "?"} out tokens" else null,
 ).joinToString(" · ")
+
+/** Storage-only retry of a kept row; nothing is recognized or sent again. */
+internal fun savePendingEntry(store: Store, id: String): String = savePendingEntry(id, store.ready, { store.data.value }, store::update)
+
+/** The kept copy is dropped only once the committed history really holds that row; the history limit may trim an older one. */
+internal fun savePendingEntry(id: String, ready: Boolean, data: () -> LocalData, update: ((LocalData) -> LocalData) -> Boolean): String {
+    if(!ready) return "Repair saved data in Data recovery first. The text is kept until parla closes."
+    if(data().settings.noHistory) return "Text history is paused in Privacy. Turn it on to save, or copy the text."
+    var trimmed = false
+    val saved = PendingHistory.retry(id) { entry ->
+        update { local -> if(local.history.any { it.id == entry.id }) local else local.copy(history = (local.history + entry).sortedByDescending { it.createdAt }) } &&
+            data().history.any { it.id == entry.id }.also { trimmed = !it }
+    }
+    return when {
+        saved -> "Saved to history"
+        trimmed -> "History is full (limit ${data().settings.historyLimit}). Raise the limit in Privacy or delete older entries, then try again."
+        else -> "Still not saved. Free storage and try again."
+    }
+}
 
 /** Always composed by its host so the document pickers survive the dialog. */
 @Composable internal fun HistoryExportDialog(request: HistoryExportRequest?, dismiss: () -> Unit, message: (String) -> Unit) {
@@ -97,8 +118,10 @@ internal fun historyDetails(row: HistoryEntry, appLabel: (String) -> String): St
     }
 }
 
-@Composable internal fun HistoryScreen(rows: List<HistoryEntry>, onCopy: (String) -> Unit, onDelete: (String) -> Unit, onRetry: (HistoryEntry) -> Unit, message: (String) -> Unit) {
+@Composable internal fun HistoryScreen(rows: List<HistoryEntry>, onCopy: (String) -> Unit, onDelete: (String) -> Unit, onRetry: (HistoryEntry) -> Unit, message: (String) -> Unit, savePending: (String) -> String) {
     val appLabel = rememberAppLabel()
+    val pending by PendingHistory.value.collectAsState()
+    val cost = remember(rows) { CleanupCostEstimate.over(rows) }
     var query by rememberSaveable { mutableStateOf("") }
     var request by remember { mutableStateOf<HistoryExportRequest?>(null) }
     val filtered = remember(rows,query) { filterHistory(rows,query,appLabel) }
@@ -113,7 +136,27 @@ internal fun historyDetails(row: HistoryEntry, appLabel: (String) -> String): St
                 TextButton(onClick = { request = HistoryExportRequest(if(query.isEmpty()) "All saved dictations" else "Dictations matching your search",filtered) },enabled = filtered.isNotEmpty()) { Text("Export (${filtered.size})") }
             }
         }
-        if(filtered.isEmpty()) item { Text(if(rows.isEmpty()) "No dictations yet" else "No matches for “$query”") }
+        cost?.let { est -> item {
+            Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp),verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Estimated cleanup cost",style = MaterialTheme.typography.titleSmall)
+                Text("${CleanupCostEstimate.money(est.usd)} · ${est.dictations} ${if(est.dictations == 1) "dictation" else "dictations"} since ${DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(est.since))}" +
+                    if(est.unpriced > 0) " · ${est.unpriced} not priced" else "")
+                est.monthlyUsd?.let { Text("At this rate: ${CleanupCostEstimate.money(it)}/mo over 30 days") }
+                Text("Based on list prices checked ${CleanupPricing.CHECKED}, for dictations in History. Not a bill. Unknown and local models are not priced.",style = MaterialTheme.typography.bodySmall)
+            } }
+        } }
+        items(pending,key = { "pending-" + it.id }) { row ->
+            Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp),verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Not saved — kept until parla closes",style = MaterialTheme.typography.titleSmall)
+                Text(row.text)
+                Row {
+                    TextButton(onClick = { message(savePending(row.id)) }) { Text("Try saving again") }
+                    TextButton(onClick = { onCopy(row.text) }) { Text("Copy") }
+                    TextButton(onClick = { PendingHistory.discard(row.id) }) { Text("Discard",color = MaterialTheme.colorScheme.error) }
+                }
+            } }
+        }
+        if(filtered.isEmpty()) item { Text(if(rows.isEmpty()) (if(pending.isEmpty()) "No dictations yet" else "Nothing saved yet") else "No matches for “$query”") }
         items(filtered,key = { it.id }) { row ->
             var original by remember { mutableStateOf(false) }
             Card(Modifier.fillMaxWidth()) {

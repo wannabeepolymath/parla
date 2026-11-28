@@ -44,8 +44,11 @@ class Pipeline(private val api: ApiClient = ApiClient(), private val clock: () -
                 fun authorized(live: LocalData) = live.settings.backupReview == s.backupReview && CleanupFailover.isReviewed(live.settings)
                 fun revoked() = ApiFailure("Backup cleanup was turned off or changed.", ApiFailure.Kind.setup)
                 fun authorize() { if(!authorized(failover.value)) throw revoked() }
+                // Mac failover metrics: a chain result's model identity is unverified, so it stays unpriced.
+                fun unverified(index: Int, g: Generated) = g.copy(usage = g.usage.copy(model = if(index == 0) "Experimental primary; model identity unverified; unpriced"
+                    else if(chain[index].anthropic) "Anthropic backup; model identity unverified; unpriced" else "Compatible backup; model identity unverified; unpriced"))
                 CleanupFailover.run(chain, clock) { index, endpoint, sendTimeout ->
-                    if(index == 0) return@run api.generate(raw, data, category, singleLine, null, endpoint, keyFor(endpoint.scope), sendTimeout)
+                    if(index == 0) return@run unverified(0, api.generateWithUsage(raw, data, category, singleLine, null, endpoint, keyFor(endpoint.scope), sendTimeout))
                     val backup = s.backups[index - 1]
                     authorize()
                     val k = if(backup.keyless) "" else keyFor(endpoint.scope)
@@ -53,23 +56,15 @@ class Pipeline(private val api: ApiClient = ApiClient(), private val clock: () -
                     coroutineScope {
                         // Revocation while the backup is in flight cancels the call; coroutineScope drains it.
                         val watch = launch { failover.first { !authorized(it) }; throw revoked() }
-                        try { api.generate(raw, data, category, singleLine, null, endpoint, k) { authorize(); sendTimeout() } } finally { watch.cancel() }
-                    }.also { authorize() }
+                        try { api.generateWithUsage(raw, data, category, singleLine, null, endpoint, k) { authorize(); sendTimeout() } } finally { watch.cancel() }
+                    }.also { authorize() }.let { unverified(index, it) }
                 }
-            } else api.generate(raw, data, category, singleLine, instruction, primary, keyFor(primary.scope))
-            val result = if(transform) output.trim() else PromptBuilder.sanitize(output)
+            } else api.generateWithUsage(raw, data, category, singleLine, instruction, primary, keyFor(primary.scope))
+            val result = if(transform) output.text.trim() else PromptBuilder.sanitize(output.text)
             outputCheck(result.isNotEmpty(), "Cleanup returned no text")
             if(transform) outputCheck(result.countCharacters() <= maxOf(2000, 6 * raw.countCharacters()), "The preset returned too much text")
-            else {
-                fun folded(text: String) = java.text.Normalizer.normalize(text.lowercase(java.util.Locale.ROOT), java.text.Normalizer.Form.NFC)
-                val lower = folded(raw)
-                val allowance = 2 * raw.countCharacters() + 200 + data.snippets.sumOf { sn ->
-                    if(sn.trigger.isEmpty()) 0 else Regex(Regex.escape(folded(sn.trigger))).findAll(lower).count() * sn.expansion.countCharacters()
-                }
-                outputCheck(result.countCharacters() <= allowance, "Cleanup returned invalid text")
-                outputCheck(raw.countCharacters() < 80 || result.countCharacters() >= raw.countCharacters()/5, "Cleanup returned truncated text")
-            }
-            CleanupResult(if(transform) result else TextRules.replace(result, data.replacements))
+            else cleanupLengthFailure(raw, result, data.snippets)?.let { throw ApiFailure(it) }
+            CleanupResult(if(transform) result else TextRules.replace(result, data.replacements), usage = output.usage)
         } catch(c: CancellationException) { throw c }
         catch(e: Exception) {
             // Library exceptions can include entire header values. Only our bounded, safe failures reach UI/history.
@@ -80,4 +75,15 @@ class Pipeline(private val api: ApiClient = ApiClient(), private val clock: () -
     private fun outputCheck(valid: Boolean, message: String) {
         if (!valid) throw ApiFailure(message)
     }
+}
+
+/** Ordinary cleanup length bounds; null when [result] is acceptable for [raw]. */
+internal fun cleanupLengthFailure(raw: String, result: String, snippets: List<Snippet>): String? {
+    fun folded(text: String) = java.text.Normalizer.normalize(text.lowercase(java.util.Locale.ROOT), java.text.Normalizer.Form.NFC)
+    val lower = folded(raw)
+    val allowance = 2 * raw.countCharacters() + 200 + snippets.sumOf { sn ->
+        if(sn.trigger.isEmpty()) 0 else Regex(Regex.escape(folded(sn.trigger))).findAll(lower).count() * sn.expansion.countCharacters()
+    }
+    return if(result.countCharacters() > allowance) "Cleanup returned invalid text"
+        else if(raw.countCharacters() >= 80 && result.countCharacters() < raw.countCharacters()/5) "Cleanup returned truncated text" else null
 }
