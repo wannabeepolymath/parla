@@ -27,7 +27,7 @@ class Store private constructor(context: Context) {
         if (granted && saved) accessibilityConsentDeclined = false
         return saved
     }
-    fun update(transform: (LocalData) -> LocalData) = local.update(transform)
+    fun update(transform: (LocalData) -> LocalData) = local.update { NearbyText.prune(transform(it)) }
     fun reload() = local.reload()
     fun recoverySource() = local.original()
     fun repair(json: String) = local.repair(json)
@@ -84,6 +84,7 @@ internal object LocalDataCodec {
             .put("bubbleX", s.bubbleX)
             .put("bubbleY", s.bubbleY)
             .put("bubbleDocked", s.bubbleDocked)
+            .put("nearbyText", JSONObject(s.nearbyText))
         return JSONObject().put("version", 5).put("settings", settings)
             .put("dictionary", JSONArray(data.dictionary))
             .put("snippets", JSONArray(data.snippets.map { JSONObject().put("id",it.id).put("trigger",it.trigger).put("expansion",it.expansion) }))
@@ -122,6 +123,8 @@ internal object LocalDataCodec {
         require(!s.has("bubbleY") || s.get("bubbleY") is Number)
         require(!s.has("bubbleDocked") || s.get("bubbleDocked") is Boolean)
         require(!s.has("backupReview") || s.get("backupReview") is String)
+        val nearby = if(s.has("nearbyText")) s.getJSONObject("nearbyText").let { o -> o.keys().asSequence().associateWith { o.get(it) as? String ?: error("Bad nearby text grant") } } else emptyMap()
+        require(nearby.all { (pkg, sig) -> pkg.length <= 255 && Regex("[0-9a-f]{64}").matches(sig) })
         // Schema 5 keeps one configuration per provider. Older schemas had one wire format + base + model.
         val savedProvider = if(version == 1) "openai-compatible" else if(s.has("provider")) s.getString("provider") else d.provider
         val legacyBase = if(s.has("baseUrl")) s.getString("baseUrl") else if(version == 1) "https://api.openai.com/v1" else "https://api.anthropic.com/v1"
@@ -156,6 +159,7 @@ internal object LocalDataCodec {
             bubbleX = if(s.has("bubbleX")) s.getInt("bubbleX") else d.bubbleX,
             bubbleY = if(s.has("bubbleY")) s.getInt("bubbleY") else d.bubbleY,
             bubbleDocked = if(s.has("bubbleDocked")) s.getBoolean("bubbleDocked") else d.bubbleDocked,
+            nearbyText = nearby,
         )
         require(settings.language == "auto" || settings.language in SpeechLanguages.codes)
         require(settings.recoveryAudioDays in 1..30)

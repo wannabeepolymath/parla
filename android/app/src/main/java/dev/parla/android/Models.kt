@@ -26,6 +26,8 @@ data class Settings(
     val bubbleX: Int = 16,
     val bubbleY: Int = 280,
     val bubbleDocked: Boolean = true,
+    /** Per-app nearby-text grants: package → reviewed NearbyText.signature. Empty = off everywhere. */
+    val nearbyText: Map<String, String> = emptyMap(),
 )
 data class Snippet(val id: String = UUID.randomUUID().toString(), val trigger: String, val expansion: String)
 data class LiteralReplacement(val source: String, val replacement: String)
@@ -54,6 +56,7 @@ data class LocalData(val settings: Settings = Settings(), val dictionary: List<S
         return copy(settings = settings.copy(cleanupEnabled = when(p.cleanup) { "on" -> true; "off" -> false; else -> settings.cleanupEnabled }, style = p.style.ifEmpty { settings.style }, language = p.language.ifEmpty { settings.language }, localModel = p.localModel.ifEmpty { settings.localModel }, providers = if(p.cleanupModel.isEmpty()) settings.providers else settings.providers + (settings.provider to settings.active.copy(model = p.cleanupModel))), dictionary = p.vocabulary + dictionary)
     }
 }
-data class CleanupResult(val text: String, val warning: String? = null)
+/** [contextual]: nearby text was sent, so the result is for this insertion only (history keeps the original). */
+data class CleanupResult(val text: String, val warning: String? = null, val contextual: Boolean = false)
 enum class Phase { IDLE, RECORDING, PROCESSING, ERROR }
 data class DictationStatus(val phase: Phase = Phase.IDLE, val message: String = "Ready when you are", val level: Float = 0f)

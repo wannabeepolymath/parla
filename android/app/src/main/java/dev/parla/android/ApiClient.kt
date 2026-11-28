@@ -85,10 +85,10 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
         transport.dns.lookup(hostname).also { if (it.isEmpty() || !it.all(::isPrivateAddress)) throw ApiFailure(PUBLIC_CLEARTEXT, ApiFailure.Kind.setup) } }).build()
 
     internal suspend fun generate(source: String, data: LocalData, category: AppCategory, singleLine: Boolean, instruction: String?,
-                                  endpoint: Endpoint, key: String, sendTimeoutMs: () -> Long = { TIMEOUT_MS }): String {
+                                  endpoint: Endpoint, key: String, sendTimeoutMs: () -> Long = { TIMEOUT_MS }, preceding: String? = null): String {
         requireKey(endpoint, key)
-        val system = PromptBuilder.system(data, category, singleLine, instruction != null)
-        val user = PromptBuilder.user(source, instruction)
+        val system = PromptBuilder.system(data, category, singleLine, instruction != null, preceding != null)
+        val user = PromptBuilder.user(source, instruction, preceding)
         // Mac OpenAICompatClient: a blank custom model uses the server's first chat model.
         val model = endpoint.model.ifEmpty { if (endpoint.custom) listModels(endpoint, key).firstOrNull() ?: throw ApiFailure("The server listed no chat model. Enter a model ID in API connection.", ApiFailure.Kind.setup) else throw ApiFailure("Choose a text cleanup model in API connection.", ApiFailure.Kind.setup) }
         val json = complete(endpoint, model, key, system, user, if (endpoint.anthropic && instruction != null) 8192 else 4096, sendTimeoutMs)

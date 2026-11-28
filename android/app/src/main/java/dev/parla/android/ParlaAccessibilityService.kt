@@ -6,6 +6,9 @@ import android.content.Intent
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -33,6 +36,9 @@ class EditorAnchor internal constructor(
     internal val valid: Boolean get() = lease.valid
 }
 
+/** What the control may offer right now. Selection comes from IME positions only; no text is read for it. */
+data class EditActions(val selection: Boolean = false, val undo: Boolean = false, val restore: Boolean = false)
+
 /** Only the node captured at recording start may be mutated. Never search for a replacement. */
 class ParlaAccessibilityService : AccessibilityService() {
     companion object {
@@ -42,13 +48,34 @@ class ParlaAccessibilityService : AccessibilityService() {
         val connected = mutableConnected.asStateFlow()
         private val mutableKeyboardBounds = MutableStateFlow<ScreenRect?>(null)
         internal val keyboardBounds = mutableKeyboardBounds.asStateFlow()
+        private val mutableEditActions = MutableStateFlow(EditActions())
+        val editActions = mutableEditActions.asStateFlow()
+        private const val SETTLE_MS = 600L
+        private const val WATCH_MS = 60_000L
     }
+
+    /** RAM-only receipt for the node parla last wrote. Refreshed in place, never replaced by a search. */
+    private class HeldReceipt(val node: AccessibilityNodeInfo, val receipt: EditReceipt)
+    /** Mac CorrectionWatcher: one field, one minute, one proposal. Holds no text beyond that field's own. */
+    private class CorrectionWatch(val node: AccessibilityNodeInfo, val baseline: EditorSnapshot, val inserted: String, val dictionary: List<String>, val deadline: Long)
 
     private val session = UUID.randomUUID().toString()
     private val insertionMutex = Mutex()
     private var inputGeneration = 0L
     private var activeAnchor: EditorAnchor? = null
+    private var receipt: HeldReceipt? = null
+    private var watch: CorrectionWatch? = null
+    private var selection = false
+    private val handler = Handler(Looper.getMainLooper())
+    private val expireReceipt = Runnable { clearReceipt() }
+    private val evaluate = Runnable { evaluateCorrection() }
+    private val giveUp = Runnable { disarmCorrection() }
     private fun hasConsent(): Boolean = Store.get(this).accessibilityConsentGranted
+    private fun publish() {
+        mutableEditActions.value = if (!hasConsent()) EditActions()
+            else EditActions(selection, receipt != null, receipt?.let { GuardedEdits.canRestore(it.receipt) } == true)
+    }
+    private fun revokeEdits() { invalidateAnchor(); clearReceipt(); disarmCorrection(); selection = false; publish() }
 
     override fun onServiceConnected() {
         // A decline can happen before binding finishes, including when saving it fails.
@@ -64,22 +91,27 @@ class ParlaAccessibilityService : AccessibilityService() {
 
     override fun onCreateInputMethod(): InputMethod = object : InputMethod(this) {
         override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
-            if (!hasConsent()) { invalidateAnchor(); return }
+            if (!hasConsent()) { revokeEdits(); return }
             super.onStartInput(attribute, restarting)
             inputGeneration++
             invalidateAnchor()
+            selection = !InsertionPolicy.sensitiveType(attribute.inputType) && attribute.initialSelStart >= 0 && attribute.initialSelStart != attribute.initialSelEnd
+            publish()
         }
 
         override fun onFinishInput() {
-            if (!hasConsent()) { invalidateAnchor(); return }
+            if (!hasConsent()) { revokeEdits(); return }
             super.onFinishInput()
             inputGeneration++
             invalidateAnchor()
+            selection = false; publish()
         }
 
         override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
-            if (!hasConsent()) { invalidateAnchor(); return }
+            if (!hasConsent()) { revokeEdits(); return }
             super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+            selection = newSelStart != newSelEnd && currentInputEditorInfo?.inputType?.let { !InsertionPolicy.sensitiveType(it) } == true
+            publish()
             val anchor = activeAnchor ?: return
             if (newSelStart != anchor.snapshot.selectionStart || newSelEnd != anchor.snapshot.selectionEnd ||
                 candidatesStart >= 0 || candidatesEnd >= 0) invalidateAnchor()
@@ -87,10 +119,11 @@ class ParlaAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (!hasConsent()) { invalidateAnchor(); mutableKeyboardBounds.value = null; return }
+        if (!hasConsent()) { revokeEdits(); mutableKeyboardBounds.value = null; return }
         if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             updateKeyboardBounds()
         }
+        observeEdits(event)
         val anchor = activeAnchor ?: return
         if (!anchor.valid) return
         when (event.eventType) {
@@ -116,10 +149,14 @@ class ParlaAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun captureAnchor(contextEnabled: Boolean, onInvalidated: () -> Unit): EditorAnchor? {
+    /**
+     * [nearby] decides, per app, whether a reviewed grant allows the bounded prefix. [requireSelection] freezes a
+     * non-empty selection for a selected-text change; any later selection or text change invalidates it.
+     */
+    fun captureAnchor(nearby: (String) -> Boolean, requireSelection: Boolean = false, onInvalidated: () -> Unit): EditorAnchor? {
         val log = CaptureLog("captureAnchor")
         log.consent = hasConsent()
-        if (log.consent != true) { log.reject("consent"); invalidateAnchor(); return null }
+        if (log.consent != true) { log.reject("consent"); revokeEdits(); return null }
         activeAnchor?.let(::release)
         return runCatching {
             val node = captureFocusedEditor() ?: run {
@@ -135,17 +172,28 @@ class ParlaAccessibilityService : AccessibilityService() {
                 log.reject("unsafe")
                 return null
             }
+            if (requireSelection && editor.selectionStart == editor.selectionEnd) {
+                log.reject("noSelection")
+                return null
+            }
             val info = inputMethod?.currentInputEditorInfo
             // When privacy metadata cannot be tied to this editor, suppress history and outgoing context.
             val privateEditor = info == null || info.packageName != editor.packageName || info.inputType != editor.inputType ||
                 info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0
-            EditorAnchor(node, editor, session, inputGeneration, InsertionPolicy.context(editor, contextEnabled && !privateEditor),
-                privateEditor, InsertionLease(onInvalidated))
-                .also { activeAnchor = it; log.accept("privateEditor=$privateEditor") }
+            val context = if (!requireSelection && !privateEditor && nearby(editor.packageName)) NearbyText.prefix(editor) else ""
+            // A new capture ends the previous dictation's undo and correction watch (Mac captureAccepted).
+            clearReceipt(); disarmCorrection()
+            EditorAnchor(node, editor, session, inputGeneration, context, privateEditor, InsertionLease(onInvalidated))
+                .also { activeAnchor = it; log.accept("privateEditor=$privateEditor nearbyLength=${context.length}") }
         }.onFailure { log.failure(it) }.getOrNull()
     }
 
-    suspend fun insert(anchor: EditorAnchor?, text: String, authorizeWrite: () -> Boolean = { true }): String = withContext(Dispatchers.Main.immediate) {
+    /**
+     * [original]: the words before cleanup; a verified write then keeps an undo/restore receipt.
+     * [learn]: the dictionary for a short correction watch (never for private editors or nearby-text results).
+     */
+    suspend fun insert(anchor: EditorAnchor?, text: String, authorizeWrite: () -> Boolean = { true },
+                       original: String? = null, learn: List<String>? = null): String = withContext(Dispatchers.Main.immediate) {
         insertionMutex.withLock {
             val log = CaptureLog("insert")
             if (text.isBlank()) {
@@ -214,6 +262,7 @@ class ParlaAccessibilityService : AccessibilityService() {
                         })
                         if (!selected) log.reject("setSelection", "accepted=false cursor=$cursor")
                     }
+                    if (original != null || learn != null) keepReceipt(anchor, text, original, learn)
                     DictationFlow.INSERTED
                 } else recovery(text, "Text insertion is unconfirmed. Check the field before pasting.")
             } catch (cancelled: CancellationException) {
@@ -226,6 +275,110 @@ class ParlaAccessibilityService : AccessibilityService() {
                 if (anchor != null) release(anchor)
             }
         }
+    }
+
+    /** Reads only, bounded: a receipt needs the exact post-write field, including the caret right after our text. */
+    private suspend fun keepReceipt(anchor: EditorAnchor, text: String, original: String?, learn: List<String>?) {
+        repeat(5) { attempt ->
+            if (attempt > 0) delay(50)
+            val after = refreshNode(anchor.node, anchor.snapshot) ?: return@repeat
+            val proof = GuardedEdits.receipt(anchor.snapshot, text, original.orEmpty(), after, SystemClock.elapsedRealtime()) ?: return@repeat
+            if (original != null) {
+                receipt = HeldReceipt(anchor.node, proof)
+                handler.removeCallbacks(expireReceipt); handler.postDelayed(expireReceipt, GuardedEdits.LIFETIME_MS)
+                publish()
+            }
+            if (learn != null && !anchor.privateEditor) {
+                watch = CorrectionWatch(anchor.node, after, text, learn, SystemClock.elapsedRealtime() + WATCH_MS)
+                handler.postDelayed(giveUp, WATCH_MS)
+            }
+            return
+        }
+        CaptureLog("receipt").reject("unconfirmed")
+    }
+
+    /** Mac GuardedDictationEdits.perform: consume, one exact fresh read, one write, then read back. Never retried. */
+    internal suspend fun edit(action: GuardedEdits.Action): String = withContext(Dispatchers.Main.immediate) {
+        insertionMutex.withLock {
+            val held = receipt
+            clearReceipt(); disarmCorrection()
+            val log = CaptureLog("edit")
+            if (held == null) return@withLock GuardedEdits.REFUSED
+            val plan = GuardedEdits.plan(held.receipt, action) ?: return@withLock GuardedEdits.REFUSED
+            try {
+                val current = refreshNode(held.node, held.receipt.after, log)
+                if (current == null || !GuardedEdits.matches(held.receipt, current, SystemClock.elapsedRealtime()) || !hasConsent()) {
+                    log.reject("receiptMismatch")
+                    return@withLock GuardedEdits.REFUSED
+                }
+                val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, plan.text) }
+                // ponytail: ACTION_SET_TEXT only. IME range edits depend on index alignment we can't prove; add if apps reject SET_TEXT.
+                if (!held.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) { log.reject("setText", "accepted=false"); return@withLock GuardedEdits.UNVERIFIED }
+                held.node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, plan.caret)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, plan.caret)
+                })
+                repeat(5) {
+                    delay(50)
+                    val now = refreshNode(held.node, held.receipt.after, log)
+                    if (now != null && now.text == plan.text && now.selectionStart == plan.caret && now.selectionEnd == plan.caret)
+                        return@withLock if (action == GuardedEdits.Action.undo) "Last dictation undone." else "Original text restored."
+                }
+                log.reject("readback")
+                GuardedEdits.UNVERIFIED
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                log.failure(error); GuardedEdits.UNVERIFIED
+            }
+        }
+    }
+
+    private fun observeEdits(event: AccessibilityEvent) {
+        val held = receipt; val watching = watch
+        if (held == null && watching == null) return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> if (held != null && event.getSource(0) != held.node) clearReceipt()
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> if (held != null && event.windowId == held.receipt.after.windowId &&
+                event.windowChanges and AccessibilityEvent.WINDOWS_CHANGE_REMOVED != 0) clearReceipt()
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED, AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> {
+                val source = event.getSource(0) ?: return
+                if (held != null && source == held.node) {
+                    // Offer undo only while the field is exactly as parla left it.
+                    val current = refreshNode(held.node, held.receipt.after)
+                    if (current == null || !GuardedEdits.matches(held.receipt, current, SystemClock.elapsedRealtime())) clearReceipt()
+                }
+                if (watching != null && source == watching.node && event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
+                    handler.removeCallbacks(evaluate); handler.postDelayed(evaluate, SETTLE_MS)
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun evaluateCorrection() {
+        val w = watch ?: return
+        if (SystemClock.elapsedRealtime() > w.deadline) { disarmCorrection(); return }
+        val current = refreshNode(w.node, w.baseline) ?: return
+        // Keep watching while the user may still be mid-correction; one proposal per insertion.
+        val proposal = DictionaryLearner.propose(w.inserted, w.baseline.text, current.text, w.dictionary) ?: return
+        disarmCorrection()
+        val book = ProposalBook.get(this)
+        Thread { if (book.add(proposal)) Log.i("ParlaCapture", "learn proposed=true") }.start() // The words stay out of logs.
+    }
+
+    private fun refreshNode(node: AccessibilityNodeInfo, original: EditorSnapshot, log: CaptureLog = CaptureLog("edit")): EditorSnapshot? = runCatching {
+        log.consent = hasConsent()
+        if (log.consent != true || !node.refresh()) null else snapshot(node, log, original)
+    }.onFailure { log.failure(it) }.getOrNull()
+
+    private fun clearReceipt() {
+        if (receipt == null) return
+        receipt = null; handler.removeCallbacks(expireReceipt); publish()
+    }
+
+    private fun disarmCorrection() {
+        watch = null; handler.removeCallbacks(evaluate); handler.removeCallbacks(giveUp)
     }
 
     private suspend fun verify(anchor: EditorAnchor, expected: String): Boolean {
@@ -371,7 +524,7 @@ class ParlaAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        invalidateAnchor()
+        revokeEdits()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -385,11 +538,13 @@ class ParlaAccessibilityService : AccessibilityService() {
     }
 
     private fun detach() {
-        invalidateAnchor()
+        invalidateAnchor(); clearReceipt(); disarmCorrection(); selection = false
+        handler.removeCallbacksAndMessages(null)
         if (instance === this) {
             instance = null
             mutableConnected.value = false
             mutableKeyboardBounds.value = null
+            mutableEditActions.value = EditActions()
         }
     }
 }

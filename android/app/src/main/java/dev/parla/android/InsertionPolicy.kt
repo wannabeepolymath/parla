@@ -29,14 +29,10 @@ data class EditorSnapshot(
 
 object InsertionPolicy {
     const val MAX_EDITOR_CHARS = 100_000
-    const val MAX_CONTEXT_CHARS = 1_500
 
-    fun sensitive(editor: EditorSnapshot): Boolean {
-        val inputClass = editor.inputType and 0x0f
-        val variation = editor.inputType and 0x0ff0
-        return editor.password || editor.dataSensitive || inputClass != 1 ||
-            (inputClass == 1 && variation in setOf(0x80, 0x90, 0xe0))
-    }
+    /** Non-text classes and password variations, from input type alone. */
+    fun sensitiveType(inputType: Int): Boolean = inputType and 0x0f != 1 || inputType and 0x0ff0 in setOf(0x80, 0x90, 0xe0)
+    fun sensitive(editor: EditorSnapshot): Boolean = editor.password || editor.dataSensitive || sensitiveType(editor.inputType)
 
     fun safe(editor: EditorSnapshot): Boolean = editor.packageName.isNotBlank() &&
         editor.windowId >= 0 && editor.editable && editor.enabled && editor.focused &&
@@ -60,15 +56,5 @@ object InsertionPolicy {
         val length = editor.text.length - (end - start) + dictated.length
         if (length > MAX_EDITOR_CHARS || (editor.maxTextLength > 0 && length > editor.maxTextLength)) return null
         return editor.text.substring(0, start) + dictated + editor.text.substring(end)
-    }
-
-    fun context(editor: EditorSnapshot, enabled: Boolean): String {
-        // URL and email fields can be valid dictation targets but are never context sources.
-        val variation = editor.inputType and 0x0ff0
-        if (!enabled || !safe(editor) || (editor.inputType and 0x0f == 1 && variation in setOf(0x10, 0x20, 0xd0))) return ""
-        val cursor = minOf(editor.selectionStart, editor.selectionEnd)
-        val start = (cursor - MAX_CONTEXT_CHARS / 2).coerceAtLeast(0)
-            .coerceAtMost((editor.text.length - MAX_CONTEXT_CHARS).coerceAtLeast(0))
-        return editor.text.substring(start, (start + MAX_CONTEXT_CHARS).coerceAtMost(editor.text.length))
     }
 }

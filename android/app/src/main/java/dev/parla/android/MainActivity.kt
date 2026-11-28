@@ -267,8 +267,11 @@ private fun ParlaApp() {
                 "parla uses Android’s Accessibility service to insert dictated words into the text field where you started.\n\n" +
                     "It reads that field’s text and cursor or selection to place your words safely. It also checks the app and field type. Password fields and fields marked as sensitive are skipped.\n\n" +
                     "It checks whether your keyboard is open and where it is on screen, so the voice control appears above your keyboard whenever you're typing.\n\n" +
-                    "parla does not take screenshots, and it doesn't use or keep text from other fields or the rest of your screen. The field’s text and cursor or selection stay on your phone and are not shared.\n\n" +
+                    "For up to 10 minutes after inserting, parla keeps that field’s text in memory so you can undo or restore your original words. For one minute it also watches whether you correct a word it wrote, and may suggest adding the correction to your dictionary. Suggestions stay on your phone until you add or dismiss them. Private (incognito) fields are never watched.\n\n" +
+                    "parla does not take screenshots, and it doesn't use or keep text from other fields or the rest of your screen. The field’s text and cursor or selection stay on your phone and are not shared, except as described below.\n\n" +
                     "If you enable AI cleanup, your chosen provider may also receive the type of app (such as chat or email) and whether the field is single-line, to format your dictated words.\n\n" +
+                    "If you tap Command or Preset on text you’ve selected, that selected text is sent to your chosen provider to be changed.\n\n" +
+                    "Nearby text is off. Only if you turn it on for an app in Profiles, after reviewing what’s sent, does parla send about 256 characters before the cursor with each dictation in that app to your provider.\n\n" +
                     "You can turn this service off at any time in Android’s Accessibility settings.",
                 modifier = Modifier.verticalScroll(rememberScrollState()), style = BodyStyle,
             )
@@ -424,7 +427,7 @@ private fun HistoryCard(entry: HistoryEntry, onCopy: (String) -> Unit, onDelete:
 }
 
 @Composable
-private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Unit) {
+private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Boolean) {
     var edit by remember { mutableStateOf<String?>(null) }
     var value by remember { mutableStateOf("") }
     var dialog by remember { mutableStateOf(false) }
@@ -434,6 +437,7 @@ private fun DictionaryScreen(words: List<String>, onChange: (List<String>) -> Un
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             ListSearch(search) { search = it }
+            CorrectionProposalsSection(words) { onChange(words + it) }
             Text("Add names and words you use often. Words at the top have priority; some later words may be skipped.",Modifier.padding(horizontal = 16.dp),fontSize = 12.sp,color = Muted)
             if (filtered.isEmpty()) CenteredListMessage(if (words.isEmpty()) "Your dictionary words show up here." else "No words match your search")
             else LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp)) {
