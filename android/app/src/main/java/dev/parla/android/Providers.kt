@@ -76,3 +76,8 @@ internal fun isPrivateAddress(address: InetAddress): Boolean {
         (b.size == 16 && (b[0].toInt() and 0xfe) == 0xfc) ||
         (b.size == 4 && (b[0].toInt() and 0xff) == 100 && (b[1].toInt() and 0xc0) == 64)
 }
+
+/** The selected provider and its saved configuration both come from one captured endpoint. */
+internal fun Settings.withConnection(e: Endpoint) = copy(provider = e.provider, providers = providers + (e.provider to ProviderConfig(e.baseUrl, e.model)))
+/** Unsaved key drafts belong to a destination, not a row: changing or reordering a row never moves a draft. */
+internal fun Map<String, String>.draftFor(e: Endpoint?) = e?.let { this[it.scope] }.orEmpty()

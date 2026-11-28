@@ -2,6 +2,7 @@ package dev.parla.android
 
 import java.io.IOException
 import java.io.InterruptedIOException
+import java.net.Proxy
 import java.net.SocketException
 import java.net.UnknownHostException
 import java.net.UnknownServiceException
@@ -48,7 +49,7 @@ internal fun httpFailure(status: Int, rawCode: String?, rawType: String?): ApiFa
         status == 401 || has("invalid_api_key", "authentication_error") -> ApiFailure.Kind.invalidKey to "The provider didn't accept your API key. Check it and save it again in API connection."
         status == 403 || has("permission_error") -> ApiFailure.Kind.noAccess to "Your API key doesn't have access to this model. Check your provider account or choose another model."
         status == 404 || has("model_not_found", "not_found_error") -> ApiFailure.Kind.modelNotFound to "The provider couldn't find this model or address. Check the model ID and API address."
-        status == 408 -> ApiFailure.Kind.timeout to TIMEOUT
+        status == 408 -> ApiFailure.Kind.timeout to PROVIDER_TIMEOUT
         status == 413 || has("request_too_large", "context_length_exceeded") -> ApiFailure.Kind.tooLarge to "Text is too long for the provider. Try a shorter dictation."
         status == 402 || has("insufficient_quota") -> ApiFailure.Kind.quota to "Your provider account is out of credits or quota. Check billing with your provider."
         status == 429 -> ApiFailure.Kind.rateLimited to "The provider is limiting requests right now. Wait a moment and try again."
@@ -60,12 +61,12 @@ internal fun httpFailure(status: Int, rawCode: String?, rawType: String?): ApiFa
     }
     return ApiFailure(message, kind, status, code, type)
 }
-private const val TIMEOUT = "The provider took too long to respond. Try again."
+internal const val PROVIDER_TIMEOUT = "The provider took too long to respond. Try again."
 private val MALFORMED get() = ApiFailure("The provider sent a response Parla couldn't read. Try again or check the model.", ApiFailure.Kind.malformed)
 
 internal fun transportFailure(e: IOException): ApiFailure = when (e) {
     is ApiFailure -> e
-    is InterruptedIOException -> ApiFailure(TIMEOUT, ApiFailure.Kind.timeout) // socket and OkHttp call timeouts
+    is InterruptedIOException -> ApiFailure(PROVIDER_TIMEOUT, ApiFailure.Kind.timeout) // socket and OkHttp call timeouts
     is UnknownHostException, is SocketException -> ApiFailure("Couldn't reach the provider. Check your internet connection, or that your local server is running.", ApiFailure.Kind.offline)
     is UnknownServiceException -> ApiFailure(PUBLIC_CLEARTEXT, ApiFailure.Kind.setup)
     is SSLException -> ApiFailure("A secure connection to the provider couldn't be made. Check the API address.")
@@ -79,17 +80,18 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
         .callTimeout(15, TimeUnit.SECONDS).connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS).writeTimeout(15, TimeUnit.SECONDS).build()
     // http:// is allowed only when every resolved address is on a private network (no DNS rebinding to the internet).
-    private val cleartext = transport.newBuilder().dns(object : Dns { override fun lookup(hostname: String) =
+    // Never via a proxy: a proxy would receive the request for any host, bypassing the private-address check.
+    internal val cleartext = transport.newBuilder().proxy(Proxy.NO_PROXY).dns(object : Dns { override fun lookup(hostname: String) =
         transport.dns.lookup(hostname).also { if (it.isEmpty() || !it.all(::isPrivateAddress)) throw ApiFailure(PUBLIC_CLEARTEXT, ApiFailure.Kind.setup) } }).build()
 
     internal suspend fun generate(source: String, data: LocalData, category: AppCategory, singleLine: Boolean, instruction: String?,
-                                  endpoint: Endpoint, key: String, timeoutMs: Long = TIMEOUT_MS): String {
+                                  endpoint: Endpoint, key: String, sendTimeoutMs: () -> Long = { TIMEOUT_MS }): String {
         requireKey(endpoint, key)
         val system = PromptBuilder.system(data, category, singleLine, instruction != null)
         val user = PromptBuilder.user(source, instruction)
         // Mac OpenAICompatClient: a blank custom model uses the server's first chat model.
         val model = endpoint.model.ifEmpty { if (endpoint.custom) listModels(endpoint, key).firstOrNull() ?: throw ApiFailure("The server listed no chat model. Enter a model ID in API connection.", ApiFailure.Kind.setup) else throw ApiFailure("Choose a text cleanup model in API connection.", ApiFailure.Kind.setup) }
-        val json = complete(endpoint, model, key, system, user, if (endpoint.anthropic && instruction != null) 8192 else 4096, timeoutMs)
+        val json = complete(endpoint, model, key, system, user, if (endpoint.anthropic && instruction != null) 8192 else 4096, sendTimeoutMs)
         return try {
             if (endpoint.anthropic) {
                 if (json.optString("stop_reason") in setOf("max_tokens", "model_context_window_exceeded", "refusal")) throw ApiFailure("Cleanup was truncated or refused.", ApiFailure.Kind.refused)
@@ -112,7 +114,7 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
     internal suspend fun testConnection(endpoint: Endpoint, key: String) {
         requireKey(endpoint, key)
         val model = endpoint.model.ifEmpty { if (endpoint.custom) listModels(endpoint, key).firstOrNull() ?: throw ApiFailure("The server listed no chat model.", ApiFailure.Kind.setup) else throw ApiFailure("Choose a model first.", ApiFailure.Kind.setup) }
-        val json = complete(endpoint, model, key, "Reply with OK.", "OK", 16, TIMEOUT_MS)
+        val json = complete(endpoint, model, key, "Reply with OK.", "OK", 16) { TIMEOUT_MS }
         if (!json.has(if (endpoint.anthropic) "content" else "choices")) throw MALFORMED
     }
 
@@ -134,7 +136,7 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
     }
     private fun url(endpoint: Endpoint, path: String) = (endpoint.baseUrl + "/" + path).toHttpUrlOrNull() ?: throw ApiFailure("Enter a valid API address.", ApiFailure.Kind.setup)
 
-    private suspend fun complete(endpoint: Endpoint, model: String, key: String, system: String, user: String, maxTokens: Int, timeoutMs: Long): JSONObject {
+    private suspend fun complete(endpoint: Endpoint, model: String, key: String, system: String, user: String, maxTokens: Int, sendTimeoutMs: () -> Long): JSONObject {
         val body = JSONObject().put("model", model)
         val messages = JSONArray()
         if (endpoint.anthropic) body.put("max_tokens", maxTokens).put("system", system)
@@ -144,7 +146,8 @@ class ApiClient(client: OkHttpClient = OkHttpClient()) {
             .post(body.toString().toRequestBody("application/json".toMediaType()))
         if (endpoint.anthropic) request.header("x-api-key", key).header("anthropic-version", "2023-06-01")
         else if (key.isNotBlank()) request.header("Authorization", "Bearer $key")
-        return parse(execute(request.build(), timeoutMs, MAX_RESPONSE_BYTES))
+        // Evaluated at the moment of sending: it may refuse a late backup, and it bounds the call by what remains.
+        return parse(execute(request.build(), sendTimeoutMs(), MAX_RESPONSE_BYTES))
     }
     private fun parse(text: String): JSONObject = try { JSONObject(text) } catch (_: org.json.JSONException) { throw MALFORMED }
 

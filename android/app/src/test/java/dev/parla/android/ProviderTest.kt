@@ -2,12 +2,16 @@ package dev.parla.android
 
 import java.io.File
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.UnknownHostException
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -77,7 +81,7 @@ class ProviderTest {
             server.enqueue(MockResponse().setBody("""{"choices":[]}"""))
             assertEquals(ApiFailure.Kind.malformed, failure { api.generate("hi", LocalData(), AppCategory.unknown, false, null, e, "k") }.kind)
             server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
-            val timeout = failure { api.generate("hi", LocalData(), AppCategory.unknown, false, null, e, "k", timeoutMs = 300) }
+            val timeout = failure { api.generate("hi", LocalData(), AppCategory.unknown, false, null, e, "k", sendTimeoutMs = { 300 }) }
             assertEquals(ApiFailure.Kind.timeout, timeout.kind); assertTrue(timeout.transient)
             server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
             val job = launch(Dispatchers.Default) { api.listModels(e, "k") }
@@ -276,7 +280,7 @@ class ProviderTest {
     private fun chain(respond: (String) -> MockResponse, block: suspend (Chain) -> Unit) = runBlocking { MockWebServer().use { block(Chain(it, respond)) } }
 
     @Test fun transientPrimaryFailureAdvancesToReviewedBackups() = chain({ p -> if (p == "c") MockResponse().setBody(chat("Hello there.")) else MockResponse().setResponseCode(if (p == "a") 503 else 429) }) { c ->
-        val result = Pipeline(api).clean("hello there", LocalData(c.settings()), failover = true) { "" }
+        val result = Pipeline(api).dictate("hello there", LocalData(c.settings())) { "" }
         assertNull(result.warning); assertEquals("Hello there.", result.text); assertEquals(listOf("a", "b", "c"), c.hits)
     }
 
@@ -286,7 +290,7 @@ class ProviderTest {
             MockResponse().setResponseCode(500).setBody("""{"error":{"type":"invalid_request_error"}}"""),
             MockResponse().setBody(chat("partial", "content_filter")), MockResponse().setBody("{broken"))) {
             chain({ p -> if (p == "a") response else MockResponse().setBody(chat("backup")) }) { c ->
-                val result = Pipeline(api).clean("hello", LocalData(c.settings()), failover = true) { "" }
+                val result = Pipeline(api).dictate("hello", LocalData(c.settings())) { "" }
                 assertEquals("hello", result.text); assertNotNull(result.warning); assertEquals(listOf("a"), c.hits)
             }
         }
@@ -297,14 +301,14 @@ class ProviderTest {
         assertTrue(CleanupFailover.isReviewed(reviewed))
         for (data in listOf(reviewed.copy(backupReview = ""), reviewed.copy(providers = mapOf("custom" to reviewed.active.copy(model = "edited"))),
                 reviewed.copy(backups = reviewed.backups.reversed()))) assertFalse(CleanupFailover.isReviewed(data))
-        Pipeline(api).clean("hello", LocalData(reviewed.copy(backupReview = "")), failover = true) { "" }
+        Pipeline(api).dictate("hello", LocalData(reviewed.copy(backupReview = ""))) { "" }
         Pipeline(api).clean("hello", LocalData(reviewed)) { "" } // history retry: failover off
         val preset = TransformPreset(name = "Rewrite", instruction = "Be brief")
-        Pipeline(api).clean("hello", LocalData(reviewed.copy(outputMode = "selectedPreset", selectedPresetID = preset.id), presets = listOf(preset)), failover = true) { "" }
+        Pipeline(api).dictate("hello", LocalData(reviewed.copy(outputMode = "selectedPreset", selectedPresetID = preset.id), presets = listOf(preset))) { "" }
         assertEquals(listOf("a", "a", "a"), c.hits)
         // The first returned text is final: invalid backup output keeps the original, the next backup is not tried.
         c.hits.clear()
-        val result = Pipeline(api).clean("hello", LocalData(reviewed), failover = true) { "" }
+        val result = Pipeline(api).dictate("hello", LocalData(reviewed)) { "" }
         assertEquals("hello", result.text); assertTrue(result.warning!!.contains("invalid")); assertEquals(listOf("a", "b"), c.hits)
         assertTrue(runCatching { CleanupFailover.chain(reviewed.copy(backups = reviewed.backups + CleanupBackup("openai", "", "m"))) }.isFailure)
         assertTrue(runCatching { CleanupFailover.chain(reviewed.copy(backups = listOf(CleanupBackup("openai", "", "m", keyless = true)))) }.isFailure)
@@ -315,14 +319,14 @@ class ProviderTest {
         val e = compatible("https://example.test/v1").endpoint(); val chain = listOf(e, e.copy(model = "b"), e.copy(model = "c"))
         val now = AtomicLong(0); val seen = mutableListOf<Long>()
         suspend fun run(costs: List<Long>, failure: ApiFailure = httpFailure(503, null, null)) = runCatching {
-            CleanupFailover.run(chain, now::get) { i, _, remaining -> seen += remaining; now.addAndGet(costs[i]); throw failure }
+            CleanupFailover.run(chain, now::get) { i, _, timeout -> seen += timeout(); now.addAndGet(costs[i]); throw failure }
         }.exceptionOrNull()
         assertSame(httpFailure(503, null, null).kind, (run(listOf(4000, 8000, 0)) as ApiFailure).kind)
         assertEquals(listOf(15000L, 11000L, 3000L), seen) // exactly 3 s left still starts
         seen.clear(); now.set(0); run(listOf(12001, 0, 0)); assertEquals(listOf(15000L), seen)
         seen.clear(); now.set(0); run(listOf(0, 0, 0), httpFailure(401, null, null)); assertEquals(listOf(15000L), seen)
         seen.clear(); now.set(0)
-        val canceled = runCatching { CleanupFailover.run(chain, now::get) { _, _, r -> seen += r; throw CancellationException("stop") } }.exceptionOrNull()
+        val canceled = runCatching { CleanupFailover.run(chain, now::get) { _, _, r -> seen += r(); throw CancellationException("stop") } }.exceptionOrNull()
         assertTrue(canceled is CancellationException); assertEquals(1, seen.size)
         // Each attempt's HTTP timeout is the remaining shared budget.
         MockWebServer().use { server ->
@@ -331,9 +335,84 @@ class ProviderTest {
             val clock = AtomicLong(0)
             val started = System.nanoTime()
             // The fake clock says 14.8 s are gone, so the primary gets 200 ms and no backup may start.
-            val result = Pipeline(api) { clock.getAndSet(14_800) }.clean("hello", LocalData(s.copy(backupReview = CleanupFailover.digest(s))), failover = true) { "" }
+            val result = Pipeline(api) { clock.getAndSet(14_800) }.dictate("hello", LocalData(s.copy(backupReview = CleanupFailover.digest(s)))) { "" }
             assertTrue(result.warning!!.contains("too long")); assertEquals(1, server.requestCount)
             assertTrue(System.nanoTime() - started < 5_000_000_000)
+        }
+    }
+
+    // Review round 1 (B1-B5).
+    private suspend fun Pipeline.dictate(raw: String, data: LocalData, live: StateFlow<LocalData> = MutableStateFlow(data), key: (String) -> String) =
+        clean(raw, data, failover = live, key = key)
+
+    @Test fun backupKeyDraftFollowsTheDestinationNotTheRow() { // B1
+        val openai = CleanupBackup("openai", "", "gpt-4.1-mini").endpoint(); val groq = CleanupBackup("groq", "", "openai/gpt-oss-120b").endpoint()
+        val drafts = mapOf(openai.scope to "sk-openai-draft")
+        assertEquals("sk-openai-draft", drafts.draftFor(openai))
+        assertEquals("", drafts.draftFor(groq)) // the row now points at Groq: nothing to save there
+        assertEquals("", drafts.draftFor(null))
+    }
+
+    @Test fun savingUsesTheCapturedEndpointForProviderAndConfiguration() { // B2
+        val current = Settings(provider = "anthropic", providers = mapOf("groq" to ProviderConfig("https://api.groq.com/openai/v1", "g")))
+        val captured = Settings(provider = "openai", providers = mapOf("openai" to ProviderConfig("", "gpt-5-mini"))).endpoint()
+        val saved = current.withConnection(captured)
+        assertEquals("openai", saved.provider); assertEquals("gpt-5-mini", saved.endpoint().model)
+        assertEquals(captured.scope, saved.endpoint().scope); assertEquals("g", saved.providers.getValue("groq").model)
+    }
+
+    @Test fun revokingBackupsMidFlightStopsAndCancelsThem() { // B3
+        val live = MutableStateFlow(LocalData())
+        fun revoke() { live.value = live.value.copy(settings = live.value.settings.copy(backupReview = "")) }
+        // Turned off while the primary is pending: the later transient failure must not reach a backup.
+        chain({ p -> if (p == "a") { revoke(); MockResponse().setResponseCode(503) } else MockResponse().setBody(chat("backup")) }) { c ->
+            live.value = LocalData(c.settings())
+            val result = Pipeline(api).dictate("hello", live.value, live) { "" }
+            assertEquals("hello", result.text); assertTrue(result.warning!!.contains("turned off")); assertEquals(listOf("a"), c.hits)
+        }
+        // Turned off while a backup is in flight: the call is canceled, not awaited.
+        chain({ p -> if (p == "a") MockResponse().setResponseCode(503) else { revoke(); MockResponse().setHeadersDelay(2, TimeUnit.SECONDS).setBody(chat("late backup")) } }) { c ->
+            live.value = LocalData(c.settings())
+            val started = System.nanoTime()
+            val result = Pipeline(api).dictate("late backup", live.value, live) { "" }
+            assertEquals("late backup", result.text); assertTrue(result.warning!!.contains("turned off")); assertEquals(listOf("a", "b"), c.hits)
+            assertTrue(System.nanoTime() - started < 1_500_000_000)
+        }
+    }
+
+    @Test fun lateBackupAdmissionAndLateSuccessAreRefused() = runBlocking { // B4
+        val now = AtomicLong(0); val sent = CopyOnWriteArrayList<Pair<String, Long>>()
+        var backupCost = 0L
+        val client = ApiClient(OkHttpClient.Builder().addInterceptor { chain ->
+            val host = chain.request().url.host
+            sent += host to chain.call().timeout().timeoutNanos() / 1_000_000
+            now.addAndGet(if (host == "a.test") 11_900 else backupCost)
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(if (host == "a.test") 503 else 200).message("x")
+                .body(chat("Hello there.").toResponseBody("application/json".toMediaType())).build()
+        }.build())
+        val unreviewed = compatible("https://a.test/v1", "primary").copy(backups = listOf(CleanupBackup("custom", "https://b.test/v1", "mb")))
+        val s = unreviewed.copy(backupReview = CleanupFailover.digest(unreviewed))
+        suspend fun dictate(keyCost: Long): CleanupResult {
+            now.set(0); sent.clear()
+            return Pipeline(client, now::get).dictate("hello there", LocalData(s)) { scope -> if (scope.contains("b.test")) now.addAndGet(keyCost); "k" }
+        }
+        // Admitted with 3.1 s left, 0.2 s spent reading the key: under 3 s at send, so nothing is sent.
+        assertNotNull(dictate(200).warning); assertEquals(listOf("a.test" to 15_000L), sent)
+        // 0.1 s preparing: sent, and its timeout is the 3.0 s left at send, not 3.1 s.
+        assertEquals("Hello there.", dictate(100).text); assertEquals(listOf("a.test" to 15_000L, "b.test" to 3_000L), sent)
+        // A backup result arriving after the shared deadline is rejected.
+        backupCost = 3_500
+        val late = dictate(0); assertEquals("hello there", late.text); assertTrue(late.warning!!.contains("too long"))
+    }
+
+    @Test fun localCleartextClientNeverUsesAProxy() = runBlocking { // B5
+        MockWebServer().use { proxy ->
+            proxy.enqueue(MockResponse().setBody(chat("via proxy")))
+            val closed = MockWebServer().apply { start() }; val port = closed.port; closed.shutdown()
+            val proxied = ApiClient(OkHttpClient.Builder().proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(proxy.hostName, proxy.port))).build())
+            assertEquals(Proxy.NO_PROXY, proxied.cleartext.proxy)
+            val f = failure { proxied.generate("hi", LocalData(), AppCategory.unknown, false, null, compatible("http://127.0.0.1:$port/v1").endpoint(), "k") }
+            assertEquals(ApiFailure.Kind.offline, f.kind); assertEquals(0, proxy.requestCount)
         }
     }
 }

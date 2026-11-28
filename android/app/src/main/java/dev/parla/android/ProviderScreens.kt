@@ -86,7 +86,7 @@ private fun failureText(e: Exception) = when (e) {
             launch {
                 withContext(Dispatchers.IO) {
                     val current = store.data.value.settings
-                    store.saveConnection(current.copy(provider = provider, providers = current.providers + (provider to ProviderConfig(e.baseUrl, e.model))), entered)
+                    store.saveConnection(current.withConnection(e), entered)
                 }
                 key = ""; revision++; message("API settings saved. No test request was sent.")
             }
@@ -126,7 +126,7 @@ private fun failureText(e: Exception) = when (e) {
 @Composable private fun BackupSection(store: Store, data: LocalData, message: (String) -> Unit) {
     val settings = data.settings
     var drafts by remember(settings.backups) { mutableStateOf(settings.backups) }
-    var keys by remember { mutableStateOf(mapOf<Int, String>()) }
+    var keys by remember { mutableStateOf(mapOf<String, String>()) } // by credential scope
     var revision by remember { mutableIntStateOf(0) }
     var review by remember { mutableStateOf<Pair<String, List<CleanupFailover.Identity>>?>(null) }
     var note by remember { mutableStateOf<String?>(null) }
@@ -149,19 +149,19 @@ private fun failureText(e: Exception) = when (e) {
         }
         if (!backup.keyless && endpoint != null) {
             Text(if (hasKey) "Uses the key saved for this address." else "No key saved for this address yet.", style = MaterialTheme.typography.bodySmall)
-            OutlinedTextField(keys[index].orEmpty(), { keys = keys + (index to it.take(8192)) }, label = { Text("New key for this backup") },
+            OutlinedTextField(keys.draftFor(endpoint), { keys = keys + (endpoint.scope to it.take(8192)) }, label = { Text("New key for this backup") },
                 visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
             TextButton(onClick = {
-                val value = keys[index].orEmpty()
+                val target = endpoint.scope; val value = keys.draftFor(endpoint)
                 scope.launch {
-                    try { withContext(Dispatchers.IO) { store.saveKey(endpoint.scope, value) }; keys = keys - index; revision++; message("Backup key saved") }
+                    try { withContext(Dispatchers.IO) { store.saveKey(target, value) }; keys = keys - target; revision++; message("Backup key saved") }
                     catch (c: CancellationException) { throw c } catch (e: Exception) { note = failureText(e) }
                 }
-            }, enabled = keys[index].orEmpty().isNotBlank()) { Text("Save key") }
+            }, enabled = keys.draftFor(endpoint).isNotBlank()) { Text("Save key") }
         }
         Row {
             if (index > 0) TextButton(onClick = { drafts = drafts.reversed(); review = null }) { Text("Move up") }
-            TextButton(onClick = { drafts = drafts.filterIndexed { i, _ -> i != index }; keys = emptyMap(); review = null }) { Text("Remove backup") }
+            TextButton(onClick = { drafts = drafts.filterIndexed { i, _ -> i != index }; review = null }) { Text("Remove backup") }
         }
     }
     if (drafts.size < CleanupFailover.MAX_BACKUPS) TextButton(onClick = { drafts = drafts + CleanupBackup(); review = null }) { Text("Add backup") }

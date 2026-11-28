@@ -17,6 +17,8 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         save: (HistoryEntry, Boolean) -> Boolean,
         deliver: suspend (String, () -> Boolean) -> String,
         stage: (PendingOperation.Stage, String) -> Unit,
+        /** Live saved data: enables reviewed backup cleanup for this ordinary dictation. */
+        failover: kotlinx.coroutines.flow.StateFlow<LocalData>? = null,
     ): HistoryEntry {
         suspend fun active() { currentCoroutineContext().ensureActive(); if(operation.revoked) throw CancellationException("Operation revoked") }
         fun advance(next: PendingOperation.Stage, message: String) { operation.advance(next); stage(next,message) }
@@ -26,7 +28,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
             active(); advance(PendingOperation.Stage.recognizing,"Transcribing on device…")
             val raw = transcribe()
             active(); advance(PendingOperation.Stage.cleaning,"Preparing your text…")
-            val result = pipeline.clean(raw,frozen,category,singleLine,failover = true,key = key)
+            val result = pipeline.clean(raw,frozen,category,singleLine,failover = failover,key = key)
             active(); advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)
             // Persist a conservative outcome first: later disk failures must never leave a durable no-write claim.

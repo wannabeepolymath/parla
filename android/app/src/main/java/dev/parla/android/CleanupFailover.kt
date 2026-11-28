@@ -40,14 +40,23 @@ internal object CleanupFailover {
     }
     fun isReviewed(settings: Settings) = settings.backupReview.isNotEmpty() && runCatching { digest(settings) }.getOrNull() == settings.backupReview
 
-    /** [attempt] receives the remaining shared budget. Cancellation always propagates. */
-    suspend fun run(chain: List<Endpoint>, clock: () -> Long, attempt: suspend (Int, Endpoint, Long) -> String): String {
+    /**
+     * One absolute deadline for the whole chain. [attempt] gets a send-time timeout: called immediately
+     * before the request goes out, it re-checks backup admission (>= 3 s) and returns what remains then.
+     * A result that arrives after the deadline is rejected. Cancellation always propagates.
+     */
+    suspend fun run(chain: List<Endpoint>, clock: () -> Long, attempt: suspend (Int, Endpoint, () -> Long) -> String): String {
         val deadline = clock() + BUDGET_MS
+        fun late() = ApiFailure(PROVIDER_TIMEOUT, ApiFailure.Kind.timeout)
         var last: ApiFailure? = null
         for ((index, endpoint) in chain.withIndex()) {
-            val remaining = deadline - clock()
-            last?.let { if (remaining < MIN_BACKUP_MS || !it.transient) throw it }
-            try { return attempt(index, endpoint, remaining) } catch (failure: ApiFailure) { last = failure }
+            last?.let { if (deadline - clock() < MIN_BACKUP_MS || !it.transient) throw it }
+            val sendTimeout = { (deadline - clock()).also { if (it <= 0 || (index > 0 && it < MIN_BACKUP_MS)) throw late() } }
+            try {
+                val text = attempt(index, endpoint, sendTimeout)
+                if (clock() >= deadline) throw late()
+                return text
+            } catch (failure: ApiFailure) { last = failure }
         }
         throw last!!
     }

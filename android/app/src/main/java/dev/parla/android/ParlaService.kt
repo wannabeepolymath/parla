@@ -142,7 +142,7 @@ class ParlaService : Service() {
                     transcribe = {
                         LocalSpeech().transcribe(file,manager.file(model),model,frozen.dictionary,settings.language).also(recovery::recognized)
                     },
-                    key = store::readKey,
+                    key = store::readKey, failover = store.data,
                     save = { entry, existing -> store.update { local ->
                         if(existing) local.copy(history = local.history.map { if(it.id == entry.id) entry else it })
                         else if(local.settings.noHistory) local else local.copy(history = listOf(entry)+local.history)
