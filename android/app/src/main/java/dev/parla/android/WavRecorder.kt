@@ -112,7 +112,7 @@ class WavRecorder(context: Context) {
 
     companion object {
         const val SAMPLE_RATE = 16_000
-        const val MAX_SECONDS = 300
+        const val MAX_SECONDS = WavInput.MAX_SECONDS
         const val MAX_DATA_BYTES = SAMPLE_RATE.toLong() * 2 * MAX_SECONDS
     }
 }

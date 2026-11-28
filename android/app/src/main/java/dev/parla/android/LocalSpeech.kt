@@ -24,7 +24,12 @@ internal object WhisperJni : SpeechNative {
     external override fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray?
 }
 internal class LocalSpeech(private val native: SpeechNative = WhisperJni) {
-    suspend fun transcribe(wav: File, model: File, catalog: SpeechModel, words: List<String>, language: String, validate: () -> Unit = {}): String = suspendCancellableCoroutine { c ->
+    suspend fun transcribe(wav: File, model: File, catalog: SpeechModel, words: List<String>, language: String, validate: () -> Unit = {}): String =
+        recognize(model, catalog, words, language, validate) { WavInput.read(wav) }
+    /** Already-decoded 16 kHz mono PCM (file import). Same admission and ceiling as recorded WAV. */
+    suspend fun transcribe(samples: FloatArray, model: File, catalog: SpeechModel, words: List<String>, language: String, validate: () -> Unit = {}): String =
+        recognize(model, catalog, words, language, validate) { WavInput.admit(samples, "This file is too short or silent. Use at least half a second of speech."); samples }
+    private suspend fun recognize(model: File, catalog: SpeechModel, words: List<String>, language: String, validate: () -> Unit, load: () -> FloatArray): String = suspendCancellableCoroutine { c ->
         val revoked = AtomicBoolean(false)
         val token = native.createToken()
         c.invokeOnCancellation { revoked.set(true); native.cancel(token) }
@@ -34,7 +39,7 @@ internal class LocalSpeech(private val native: SpeechNative = WhisperJni) {
                 if(revoked.get()) return@nativeSubmit
                 validate()
                 ModelCatalog.verify(model, catalog)
-                val samples = WavInput.read(wav)
+                val samples = load()
                 if(revoked.get()) return@nativeSubmit
                 validate()
                 val bytes = native.recognize(token, model.absolutePath.toByteArray(Charsets.UTF_8), samples,
@@ -57,11 +62,26 @@ internal object NativeTasks {
         submit { try { val result = work(); if(c.isActive) c.resume(result) } catch(t: Throwable) { if(c.isActive) c.resumeWithException(t) } }
     }
 }
+/**
+ * Phone dictation/import ceiling: 10 minutes, matching desktop. Kept equal across WavRecorder, this parser,
+ * RecordingStore (via MAX_BYTES) and bridge.cpp's sample-count check (AudioLimitsTest asserts all of them).
+ * Peak JVM heap at full length is about 58 MB: 19.2 MB WAV bytes plus 38.4 MB float samples while parsing.
+ */
 internal object WavInput {
-    const val MAX_BYTES = 16000 * 300 * 2 + 65536
+    const val MAX_SECONDS = 600
+    const val MAX_SAMPLES = 16000 * MAX_SECONDS
+    const val MAX_DATA_BYTES = MAX_SAMPLES * 2
+    const val MAX_BYTES = MAX_DATA_BYTES + 65536
     fun read(file: File, admitSpeech: Boolean = true): FloatArray {
         require(file.length() in 44L..MAX_BYTES.toLong()) { "Recording has an invalid size." }
-        return parse(file.inputStream().use { it.readNBytes(MAX_BYTES+1) },admitSpeech)
+        // readBytes allocates the file length once; readNBytes would buffer a second copy.
+        return parse(file.readBytes(),admitSpeech)
+    }
+    fun admit(samples: FloatArray, message: String = "Recording is too short or silent. Speak for at least half a second.") {
+        require(samples.size <= MAX_SAMPLES) { "Recording is longer than ${MAX_SECONDS/60} minutes." }
+        var squares = 0.0; for(sample in samples) squares += sample.toDouble()*sample
+        val rms = if(samples.isEmpty()) 0.0 else sqrt(squares/samples.size)
+        require(samples.size >= 6400 && rms >= 1e-4) { message }
     }
     fun parse(bytes: ByteArray, admitSpeech: Boolean = true): FloatArray {
         require(bytes.size in 44..MAX_BYTES) { "This recording cannot be read" }
@@ -78,16 +98,14 @@ internal object WavInput {
                     require(!format && size >= 16 && b.getShort(start).toInt() == 1 && b.getShort(start+2).toInt() == 1 && u32(start+4) == 16000L && u32(start+8) == 32000L && b.getShort(start+12).toInt() == 2 && b.getShort(start+14).toInt() == 16) { "This recording uses an unsupported audio format" }
                     format = true
                 }
-                "data" -> { require(data == null && size % 2 == 0L && size <= 16000*300*2) { "This recording contains invalid audio" }; data = start until end.toInt() }
+                "data" -> { require(data == null && size % 2 == 0L && size <= MAX_DATA_BYTES) { "This recording contains invalid audio" }; data = start until end.toInt() }
             }
             i = (end + (size and 1)).toInt()
         }
         require(i == bytes.size && format && data != null) { "This recording is incomplete" }
         val range = data; val samples = FloatArray(range.count()/2) { index -> b.getShort(range.first+2*index)/32768f }
-        var squares = 0.0; for(sample in samples) squares += sample.toDouble()*sample
-        val rms = if(samples.isEmpty()) 0.0 else sqrt(squares/samples.size)
         require(samples.isNotEmpty()) { "Empty recording" }
-        require(!admitSpeech || samples.size >= 6400 && rms >= 1e-4) { "Recording is too short or silent. Speak for at least half a second." }
+        if(admitSpeech) admit(samples)
         return samples
     }
 }

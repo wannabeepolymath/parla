@@ -62,7 +62,7 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
         const auto chosen = bytes(env, languageBytes, 32);
         if (!sampleArray) throw std::runtime_error("No samples");
         const auto count = env->GetArrayLength(sampleArray);
-        if (count < 6400 || count > 16000 * 300) throw std::runtime_error("Invalid sample count");
+        if (count < 6400 || count > 16000 * 600) throw std::runtime_error("Invalid sample count");
         std::vector<float> samples(count);
         env->GetFloatArrayRegion(sampleArray, 0, count, samples.data());
         if (env->ExceptionCheck()) return nullptr;
