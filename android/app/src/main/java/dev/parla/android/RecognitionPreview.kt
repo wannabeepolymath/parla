@@ -8,7 +8,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -39,6 +41,12 @@ internal object PreviewPolicy {
         else -> null
     }
     fun active(s: Settings, d: Device, modelInstalled: Boolean) = s.previewEnabled && blocked(s,d,modelInstalled) == null
+}
+
+/** Runs [record] with [draft] alongside it. The draft is canceled when [record] returns or throws. */
+internal suspend fun <T> recordWithDraft(draft: (suspend () -> Unit)?, record: suspend () -> T): T = coroutineScope {
+    val drafting = draft?.let { launch { it() } }
+    try { record() } finally { drafting?.cancel() }
 }
 
 /** One pass at a time, awaited, so the queue never holds more than one draft ahead of the final recognition. */

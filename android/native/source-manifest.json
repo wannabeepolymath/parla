@@ -145,5 +145,8 @@
     "src/parakeet.cpp": "3b836039bdd09e50d265f27b0fc6bb25405d9abf3aabb3bd2bffbc4230674eb6",
     "src/whisper-arch.h": "f35cf51d54c4df7e1c504ba8ef3f06012ba483459ddf2a5cba533deb7b85c239",
     "src/whisper.cpp": "a884ff3eb3bbf7558958c4d06a299cd8d97d87a7d5c7aac9138b8ff6a2ef04d7"
+  },
+  "patched": {
+    "src/whisper.cpp": "eb56127470525772615731eea47dc4635f2334b38cc606f4e905d28ee66f6c0f"
   }
 }

@@ -56,6 +56,31 @@ class SafeStartTest {
         val forget = relaunch(j); assertTrue(forget.paused(base))
         assertTrue(forget.reset()); assertFalse(forget.paused(base)); assertEquals(0,relaunch(j).crashes(base))
     }
+    @Test fun previewDraftsBetweenFinalCrashesDoNotEraseThem() = withJournal { j,dir ->
+        runBlocking {
+            val bytes = "model".toByteArray()
+            val m = SpeechModel("base.en","Fake",bytes.size.toLong(),java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
+            val file = File(dir,"model.bin").apply { writeBytes(bytes) }
+            val native = object : SpeechNative {
+                override fun createToken() = 1L
+                override fun cancel(token: Long) {}
+                override fun release(token: Long) {}
+                override fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray) = "draft".toByteArray()
+            }
+            assertTrue(SafeStart(j).setEnabled(true))
+            repeat(2) { launch ->
+                val s = relaunch(j)
+                assertEquals(launch,s.crashes(m))
+                // Preview on the same model returns successfully while recording...
+                assertEquals("draft",LocalSpeech(native,s).draft(FloatArray(16000) { .1f },file,m,emptyList(),"en",verify = true))
+                assertEquals("a returning draft keeps the final path's history",launch,s.crashes(m))
+                s.begin(m) // ...then the final recognition takes the process down.
+            }
+            val s = relaunch(j)
+            assertTrue(s.paused(m))
+            assertEquals(SafeStart.PAUSED,runCatching { LocalSpeech(native,s).draft(FloatArray(16000),file,m,emptyList(),"en",verify = true) }.exceptionOrNull()?.message)
+        }
+    }
     @Test fun recordsAreBoundToTheModelIdentityNotItsName() = withJournal { j,_ ->
         assertTrue(SafeStart(j).setEnabled(true))
         val a = SpeechModel(SpeechModel.IMPORTED_ID,"Mine",1,"",java.util.UUID.randomUUID().toString())

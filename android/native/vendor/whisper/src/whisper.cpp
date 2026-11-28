@@ -1518,6 +1518,15 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
         read_safe(loader, hparams.n_mels);
         read_safe(loader, hparams.ftype);
 
+        // parla: fail cleanly on hparams that size later allocations and graph shapes (the assert below is compiled out).
+        // n_vocab is every real whisper vocabulary: others derive a language count whisper_lang_str() can't name (nullptr).
+        if (loader->eof(loader->context) || hparams.n_vocab < 51864 || hparams.n_vocab > 51866 ||
+            hparams.n_text_state != hparams.n_audio_state || hparams.n_audio_layer <= 0 || hparams.n_audio_layer > 64 ||
+            hparams.n_text_layer <= 0 || hparams.n_text_layer > 64) {
+            WHISPER_LOG_ERROR("%s: invalid model data (bad hparams)\n", __func__);
+            return false;
+        }
+
         assert(hparams.n_text_state == hparams.n_audio_state);
 
         std::string mver = "";
@@ -1580,8 +1589,18 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
         read_safe(loader, filters.n_mel);
         read_safe(loader, filters.n_fft);
 
+        // parla: the mel pass indexes filters as n_mel x (1 + WHISPER_N_FFT/2) and feeds n_mels rows to the encoder.
+        if ((filters.n_mel != 80 && filters.n_mel != 128) || filters.n_mel != model.hparams.n_mels || filters.n_fft != 1 + WHISPER_N_FFT/2) {
+            WHISPER_LOG_ERROR("%s: invalid model data (bad mel filters %d x %d)\n", __func__, filters.n_mel, filters.n_fft);
+            return false;
+        }
+
         filters.data.resize(filters.n_mel * filters.n_fft);
         loader->read(loader->context, filters.data.data(), filters.data.size() * sizeof(float));
+        if (loader->eof(loader->context)) { // parla: truncated file
+            WHISPER_LOG_ERROR("%s: invalid model data (truncated mel filters)\n", __func__);
+            return false;
+        }
         BYTESWAP_FILTERS(filters);
     }
 
@@ -1595,6 +1614,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
         //            __func__, fname.c_str(), n_vocab, model.hparams.n_vocab);
         //    return false;
         //}
+        // parla: bounded vocabulary; extra tokens below are only ever added up to hparams.n_vocab.
+        if (n_vocab <= 0 || n_vocab > model.hparams.n_vocab) {
+            WHISPER_LOG_ERROR("%s: invalid model data (bad vocab size %d)\n", __func__, n_vocab);
+            return false;
+        }
 
         std::string word;
         std::vector<char> tmp;
@@ -1605,9 +1629,18 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
             uint32_t len;
             read_safe(loader, len);
 
+            if (len > 1024) { // parla: no whisper token is anywhere near this long
+                WHISPER_LOG_ERROR("%s: invalid model data (vocab word %d is %u bytes)\n", __func__, i, len);
+                return false;
+            }
+
             if (len > 0) {
                 tmp.resize(len);
                 loader->read(loader->context, &tmp[0], tmp.size()); // read to buffer
+                if (loader->eof(loader->context)) { // parla: truncated file
+                    WHISPER_LOG_ERROR("%s: invalid model data (truncated vocab)\n", __func__);
+                    return false;
+                }
                 word.assign(&tmp[0], tmp.size());
             } else {
                 // seems like we have an empty-string token in multi-language models (i = 50256)
@@ -1879,10 +1912,20 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
                 break;
             }
 
+            // parla: bound what a crafted header controls before it indexes ne[], sizes a buffer or indexes a type table.
+            if (n_dims < 1 || n_dims > 4 || length < 1 || length > 128 || ttype < 0 || ttype >= GGML_TYPE_COUNT) {
+                WHISPER_LOG_ERROR("%s: invalid tensor header (dims %d, name length %d, type %d)\n", __func__, n_dims, length, ttype);
+                return false;
+            }
+
             int32_t nelements = 1;
             int32_t ne[4] = { 1, 1, 1, 1 };
             for (int i = 0; i < n_dims; ++i) {
                 read_safe(loader, ne[i]);
+                if (ne[i] <= 0 || nelements > INT32_MAX / ne[i]) { // parla: positive dims, no overflow
+                    WHISPER_LOG_ERROR("%s: invalid tensor dimension %d\n", __func__, ne[i]);
+                    return false;
+                }
                 nelements *= ne[i];
             }
 
@@ -1890,6 +1933,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
             std::vector<char> tmp(length); // create a buffer
             loader->read(loader->context, &tmp[0], tmp.size()); // read to buffer
             name.assign(&tmp[0], tmp.size());
+
+            if (loader->eof(loader->context)) { // parla: truncated file
+                WHISPER_LOG_ERROR("%s: truncated tensor header\n", __func__);
+                return false;
+            }
 
             if (model.tensors.find(name) == model.tensors.end()) {
                 WHISPER_LOG_ERROR("%s: unknown tensor '%s' in model file\n", __func__, name.data());
@@ -1930,6 +1978,11 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
                 loader->read(loader->context, read_buf.data(), read_buf.size());
 
                 ggml_backend_tensor_set(tensor, read_buf.data(), 0, ggml_nbytes(tensor));
+            }
+
+            if (loader->eof(loader->context)) { // parla: tensor data must lie within the file
+                WHISPER_LOG_ERROR("%s: tensor '%s' data is truncated\n", __func__, name.data());
+                return false;
             }
 
             total_size += ggml_nbytes(tensor);
@@ -4797,6 +4850,10 @@ struct whisper_vad_context * whisper_vad_init_with_params(
     {
         int32_t str_len;
         read_safe(loader, str_len);
+        if (str_len < 0 || str_len > 128) { // parla: bounded model-type string
+            WHISPER_LOG_ERROR("%s: invalid model data (type length %d)\n", __func__, str_len);
+            return nullptr;
+        }
         std::vector<char> buffer(str_len + 1, 0);
         loader->read(loader->context, buffer.data(), str_len);
         std::string model_type(buffer.data(), str_len);
@@ -5021,10 +5078,20 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                 break;
             }
 
+            // parla: same tensor-header bounds as whisper_model_load (Parla never loads a VAD model).
+            if (n_dims < 1 || n_dims > 4 || length < 1 || length > 128 || ttype < 0 || ttype >= GGML_TYPE_COUNT) {
+                WHISPER_LOG_ERROR("%s: invalid tensor header (dims %d, name length %d, type %d)\n", __func__, n_dims, length, ttype);
+                return nullptr;
+            }
+
             int32_t nelements = 1;
             int32_t ne[4] = { 1, 1, 1, 1 };
             for (int i = 0; i < n_dims; ++i) {
                 read_safe(loader, ne[i]);
+                if (ne[i] <= 0 || nelements > INT32_MAX / ne[i]) { // parla: positive dims, no overflow
+                    WHISPER_LOG_ERROR("%s: invalid tensor dimension %d\n", __func__, ne[i]);
+                    return nullptr;
+                }
                 nelements *= ne[i];
             }
 
@@ -5032,6 +5099,11 @@ struct whisper_vad_context * whisper_vad_init_with_params(
             std::vector<char> tmp(length);
             loader->read(loader->context, &tmp[0], tmp.size());
             name.assign(&tmp[0], tmp.size());
+
+            if (loader->eof(loader->context)) { // parla: truncated file
+                WHISPER_LOG_ERROR("%s: truncated tensor header\n", __func__);
+                return nullptr;
+            }
 
             if (model.tensors.find(name) == model.tensors.end()) {
                 WHISPER_LOG_ERROR("%s: unknown tensor '%s' in model file\n", __func__, name.data());
@@ -5072,6 +5144,11 @@ struct whisper_vad_context * whisper_vad_init_with_params(
                 loader->read(loader->context, read_buf.data(), read_buf.size());
 
                 ggml_backend_tensor_set(tensor, read_buf.data(), 0, ggml_nbytes(tensor));
+            }
+
+            if (loader->eof(loader->context)) { // parla: tensor data must lie within the file
+                WHISPER_LOG_ERROR("%s: tensor '%s' data is truncated\n", __func__, name.data());
+                return nullptr;
             }
 
             total_size += ggml_nbytes(tensor);

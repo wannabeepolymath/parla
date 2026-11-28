@@ -33,6 +33,23 @@ class RecognitionPreviewTest {
         assertFalse("the draft model is English only",PreviewPolicy.active(s.copy(language = "hi"),capable,true))
         assertEquals("base.en",PreviewPolicy.model.id)
     }
+    @Test fun draftIsCanceledWhenRecordingFailsOrFinishes() = runBlocking {
+        for(fails in listOf(true,false)) {
+            var draft: kotlinx.coroutines.Job? = null
+            val result = withTimeout(5000) {
+                runCatching {
+                    // A draft that never ends on its own, like the preview retrying a deleted recording.
+                    recordWithDraft({ draft = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]; kotlinx.coroutines.awaitCancellation() }) {
+                        kotlinx.coroutines.yield()
+                        if(fails) throw IllegalStateException("The microphone disconnected.") else "recorded"
+                    }
+                }
+            }
+            assertEquals(if(fails) "The microphone disconnected." else "recorded",result.exceptionOrNull()?.message ?: result.getOrNull())
+            assertTrue(draft!!.isCancelled && draft!!.isCompleted)
+        }
+        assertEquals("no draft",recordWithDraft(null) { "no draft" })
+    }
     @Test fun draftsComeFromTheRecordingTailAndStopOnAModelFailure() = runBlocking {
         val dir = Files.createTempDirectory("parla-preview").toFile()
         try {

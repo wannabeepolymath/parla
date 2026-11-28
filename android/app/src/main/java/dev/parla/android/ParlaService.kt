@@ -147,22 +147,23 @@ class ParlaService : Service() {
             entered.set(true)
             try {
                 check(MicrophoneOwner.acquire(coroutineContext.job)) { "Finish the microphone test in parla, then try again." }
-                // Child of this session: canceled with it, and before the final recognition is queued behind it.
-                val drafting = if (preview) launch {
-                    RecognitionPreview().run(file, manager.file(previewModel), previewModel, frozen.dictionary) { draft ->
-                        if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) mutableStatus.value = mutableStatus.value.copy(draft = draft.takeLast(200))
+                // The draft ends with the recording on every path, before the final recognition is queued behind it.
+                val draft: (suspend () -> Unit)? = if (preview) ({
+                    RecognitionPreview().run(file, manager.file(previewModel), previewModel, frozen.dictionary) { text ->
+                        if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) mutableStatus.value = mutableStatus.value.copy(draft = text.takeLast(200))
                     }
-                } else null
-                timing.span(TimingStage.record_start, TimingStage.record_stop) {
-                    capture.record(file) { level ->
-                        scope.launch {
-                            if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) {
-                                mutableStatus.value = mutableStatus.value.copy(level = level)
+                }) else null
+                recordWithDraft(draft) {
+                    timing.span(TimingStage.record_start, TimingStage.record_stop) {
+                        capture.record(file) { level ->
+                            scope.launch {
+                                if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) {
+                                    mutableStatus.value = mutableStatus.value.copy(level = level)
+                                }
                             }
                         }
                     }
                 }
-                drafting?.cancel()
                 ensureActive()
                 recovery.prepare(file,anchor.privateEditor) { op.revoked }
                 ensureActive()

@@ -53,12 +53,16 @@ internal class SafeStart(private val journal: DurableFile, private val launch: S
         pending = model.key
         return model.key
     }
-    /** Native work returned (completed, failed or canceled): this model did not take the process down. */
-    @Synchronized fun end(mark: String?) {
+    /**
+     * Native work returned (completed, failed or canceled): this attempt did not take the process down.
+     * [resolve] false (a preview draft) only clears the marker: a draft returning proves nothing about the
+     * final recognition, so it must not erase that path's crash history.
+     */
+    @Synchronized fun end(mark: String?, resolve: Boolean = true) {
         if(mark == null || pending != mark) return
         pending = null
         val s = value.value
-        val next = s.crashes - mark
+        val next = if(resolve) s.crashes - mark else s.crashes
         value.value = try { write(next,null); s.copy(crashes = next) } catch(_: Exception) { s.copy(fault = true) }
     }
     /** Refused while native work is in flight, like desktop; turning off forgets every record. */
