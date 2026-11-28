@@ -34,21 +34,33 @@ class ModelVerifyCacheTest {
         try {
             val bytes = "real model bytes".toByteArray(); val m = model(bytes)
             val f = File(dir, "ggml-fake.bin").apply { writeBytes(bytes); setLastModified(1_000_000) }
-            var fail = false
+            var fail = false; var prepared = true
             val native = object : SpeechNative {
                 override fun createToken() = 1L
                 override fun cancel(token: Long) {}
                 override fun release(token: Long) {}
                 override fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray =
                     if(fail) throw IllegalStateException("Model could not be loaded.") else "hello".toByteArray()
-                override fun lastTimings() = longArrayOf(12, 34)
+                override fun lastTimings() = if(fail) longArrayOf(7, -1, 1) else longArrayOf(12, 34, 0) // init returned null
+                override fun prepare(model: ByteArray) = prepared
             }
             val events = mutableListOf<TimingEvent>()
-            assertEquals("hello", LocalSpeech(native, null).transcribe(FloatArray(8000) { 0.1f }, f, m, emptyList(), "en", timing = TimingSession(sink = { events += it })))
-            assertEquals(listOf(TimingStage.model_verify, TimingStage.model_load, TimingStage.whisper_decode), events.map { it.stage })
-            assertEquals(listOf(12L, 34L), events.drop(1).map { it.durationMs })
+            fun run() = runCatching { runBlocking { LocalSpeech(native, null).transcribe(FloatArray(8000) { 0.1f }, f, m, emptyList(), "en", timing = TimingSession(sink = { events += it })) } }
+            fun log() = events.map { "${it.stage} ${it.durationMs} ${it.outcome}" }.also { events.clear() }
+            assertEquals("hello", run().getOrThrow())
+            assertEquals(listOf("model_verify", "model_load 12 ok", "whisper_decode 34 ok"), log().map { it.replace(Regex("^model_verify .*"), "model_verify") })
             fail = true
-            assertTrue(runCatching { LocalSpeech(native, null).transcribe(FloatArray(8000) { 0.1f }, f, m, emptyList(), "en") }.isFailure)
+            assertTrue(run().isFailure)
+            assertEquals(listOf("model_load 7 failed"), log().drop(1))
+            tamper(f) // the failed load forgot the trust record: the next verify hashes and refuses
+            assertTrue(run().isFailure)
+            assertEquals(listOf(TimingOutcome.failed), log().map { TimingOutcome.valueOf(it.substringAfterLast(' ')) })
+
+            // Safe Start's explicit load: a refused prepare forgets trust too.
+            f.writeBytes(bytes); f.setLastModified(4_000_000); ModelCatalog.verifyOnce(f, m)
+            val safe = SafeStart(DurableFile(File(dir, "safe-start.json")))
+            prepared = false
+            assertFalse(safe.tryOnce(m, f, native))
             tamper(f)
             assertTrue(runCatching { ModelCatalog.verifyOnce(f, m) }.isFailure)
         } finally { ModelCatalog.forget(); dir.deleteRecursively() }

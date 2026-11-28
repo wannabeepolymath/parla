@@ -84,7 +84,9 @@ internal class SafeStart(private val journal: DurableFile, private val launch: S
     suspend fun tryOnce(model: SpeechModel, file: File, native: SpeechNative = WhisperJni): Boolean = NativeTasks.run {
         ModelCatalog.verify(file,model)
         val mark = begin(model,retry = true)
-        try { native.prepare(file.absolutePath.toByteArray(Charsets.UTF_8)) } finally { end(mark) }
+        try { native.prepare(file.absolutePath.toByteArray(Charsets.UTF_8)).also { if(!it) ModelCatalog.forget(file) } }
+        catch(t: Throwable) { ModelCatalog.forget(file); throw t } // like recognition: a failed load re-verifies next time
+        finally { end(mark) }
     }
     private fun write(crashes: Map<String,Int>, pendingKey: String?) {
         val j = JSONObject().put("version",1).put("crashes",JSONObject(crashes))

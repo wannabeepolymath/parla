@@ -19,7 +19,7 @@ internal interface SpeechNative {
     fun recognizeTimed(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray? = throw IllegalStateException("Timestamps aren't available.")
     /** Load and free the model with no audio (Safe Start's "Try loading once"). False: whisper refused the file. */
     fun prepare(model: ByteArray): Boolean = error("Loading without audio is unavailable.")
-    /** The last recognize's native init and whisper_full milliseconds (-1: not reached). Same serial executor. */
+    /** The last recognize's native init ms, whisper_full ms (-1: not reached) and the stage that threw (1 init, 2 decode, 0 none). Same serial executor. */
     fun lastTimings(): LongArray? = null
 }
 internal object WhisperJni : SpeechNative {
@@ -98,21 +98,28 @@ internal class LocalSpeech(private val native: SpeechNative = WhisperJni, privat
             try {
                 if(revoked.get()) return@nativeSubmit
                 validate()
-                if(verify) { val begun = timing?.now(); ModelCatalog.verifyOnce(model, catalog); begun?.let { timing?.mark(TimingStage.model_verify, it) } }
+                if(verify) {
+                    val begun = timing?.now()
+                    try { ModelCatalog.verifyOnce(model, catalog) }
+                    catch(t: Throwable) { timing?.mark(TimingStage.model_verify, begun, TimingOutcome.failed); throw t }
+                    timing?.mark(TimingStage.model_verify, begun)
+                }
                 val samples = load()
                 if(revoked.get()) return@nativeSubmit
                 validate()
                 // Durable marker before native code, cleared only by an actual native return.
                 val mark = safeStart?.begin(catalog)
+                var threw = false
                 val bytes = try {
                     run(token, model.absolutePath.toByteArray(Charsets.UTF_8), samples,
                         VocabularyHints.asrTerms(words).toByteArray(Charsets.UTF_8), SpeechLanguagePolicy.language(catalog,language).toByteArray(Charsets.UTF_8))
-                } catch(t: Throwable) { ModelCatalog.forget(model); throw t } // a failed load re-verifies next time
+                } catch(t: Throwable) { threw = true; ModelCatalog.forget(model); throw t } // a failed load re-verifies next time
                 finally {
                     safeStart?.end(mark, resolve = !draft)
-                    timing?.let { t -> native.lastTimings()?.takeIf { it.size == 2 }?.let { (load, decode) ->
-                        if(load >= 0) t.duration(TimingStage.model_load, load)
-                        if(decode >= 0) t.duration(TimingStage.whisper_decode, decode)
+                    timing?.let { t -> native.lastTimings()?.takeIf { it.size == 3 }?.let { (load, decode, failed) ->
+                        fun outcome(stage: Long) = when { threw && failed == stage -> TimingOutcome.failed; revoked.get() -> TimingOutcome.canceled; else -> TimingOutcome.ok }
+                        if(load >= 0) t.duration(TimingStage.model_load, load, outcome(1))
+                        if(decode >= 0) t.duration(TimingStage.whisper_decode, decode, outcome(2))
                     } }
                 }
                 val text = bytes?.takeIf { !revoked.get() }?.let(raw)?.toString(Charsets.UTF_8)?.let(TextRules::stripNonSpeech).orEmpty().trim()

@@ -77,7 +77,7 @@ internal class TimingSession(
     }
     fun now(): Long = clock()
     /** A duration measured elsewhere (native code). */
-    fun duration(stage: TimingStage, ms: Long) { sink(TimingEvent(wall(), id, stage, clock() - origin, ms)) }
+    fun duration(stage: TimingStage, ms: Long, outcome: TimingOutcome = TimingOutcome.ok) { sink(TimingEvent(wall(), id, stage, clock() - origin, ms, outcome)) }
 }
 
 /** Kept in memory until parla closes, bounded, and mirrored to logcat under [TAG]. Nothing is uploaded. */
