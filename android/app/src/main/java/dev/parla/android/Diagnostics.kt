@@ -21,7 +21,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 // Privacy: every field is an enum or a number, so dictated text, field text, keys and app names cannot be recorded.
-internal enum class TimingStage { record_start, record_stop, transcription_start, transcription_end, cleanup_start, cleanup_end, insertion }
+// Inside transcription: model_verify (Kotlin SHA/header check, ~0 when trusted), model_load (native init), whisper_decode
+// (native whisper_full). import_start opens a file-import session; file_decode is its audio decoding.
+internal enum class TimingStage { record_start, record_stop, transcription_start, transcription_end, cleanup_start, cleanup_end, insertion,
+    model_verify, model_load, whisper_decode, import_start, file_decode }
 internal enum class TimingOutcome { ok, failed, canceled, mic_silenced, fallback, unconfirmed }
 internal enum class ProviderCategory {
     local, anthropic, openai, groq, gemini, openrouter, custom, openai_compatible, other;
@@ -73,6 +76,8 @@ internal class TimingSession(
         return value
     }
     fun now(): Long = clock()
+    /** A duration measured elsewhere (native code). */
+    fun duration(stage: TimingStage, ms: Long, outcome: TimingOutcome = TimingOutcome.ok) { sink(TimingEvent(wall(), id, stage, clock() - origin, ms, outcome)) }
 }
 
 /** Kept in memory until parla closes, bounded, and mirrored to logcat under [TAG]. Nothing is uploaded. */

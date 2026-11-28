@@ -12,7 +12,7 @@ android {
         versionCode = 6
         versionName = "1.3.2"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        externalNativeBuild { cmake { arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON" } }
+        externalNativeBuild { cmake { arguments += listOf("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON", "-DANDROID_STL=c++_shared") } } // several native libs: one shared C++ runtime
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     ndkVersion = "27.1.12297006"

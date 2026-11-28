@@ -1,8 +1,10 @@
 #include <jni.h>
 #include <whisper.h>
+#include <ggml-backend.h>
 #include "bridge_policy.h"
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -18,6 +20,15 @@ std::mutex registryMutex, inferenceMutex;
 std::unordered_map<jlong, std::shared_ptr<Token>> tokens;
 jlong nextID = 1;
 std::string lastLanguage = "en", lastModel;
+// Diagnostics only: the last recognize's native init and decode milliseconds (-1: not reached), and the stage
+// that threw (1 init, 2 decode, 0 none).
+std::atomic<long long> lastLoadMs{-1}, lastDecodeMs{-1};
+std::atomic<int> lastFailedStage{0};
+struct StageTimer {  // records on every exit, including a throw
+    std::atomic<long long> &out;
+    std::chrono::steady_clock::time_point begun = std::chrono::steady_clock::now();
+    ~StageTimer() { out = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begun).count(); }
+};
 std::shared_ptr<Token> lookup(jlong id) {
     std::lock_guard<std::mutex> lock(registryMutex);
     auto i = tokens.find(id); return i == tokens.end() ? nullptr : i->second;
@@ -37,6 +48,22 @@ std::string bytes(JNIEnv *env, jbyteArray a, size_t limit) {
     return s;
 }
 bool aborted(void *data) { return static_cast<Token *>(data)->canceled.load(std::memory_order_relaxed); }
+// CPU only; flash attention is whisper's own default and the faster CPU encoder.
+whisper_context *load(const std::string &model) {
+#ifdef PARLA_CPU_VARIANTS
+    // arm64 ships every ggml Android CPU variant. Best first: ggml refuses (score 0) one this CPU can't run,
+    // so fp16/dotprod phones get those kernels and armv8.0 phones still get the baseline.
+    static const bool cpu = [] {
+        for (const char *v : {"android_armv9.2_2", "android_armv9.2_1", "android_armv9.0_1", "android_armv8.6_1",
+                              "android_armv8.2_2", "android_armv8.2_1", "android_armv8.0_1"})
+            if (ggml_backend_load((std::string("libggml-cpu-") + v + ".so").c_str())) return true;
+        return false;
+    }();
+    if (!cpu) throw std::runtime_error("On-device speech isn't available on this processor.");
+#endif
+    auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = true;
+    return whisper_init_from_file_with_params(model.c_str(), cp);
+}
 }
 extern "C" JNIEXPORT jlong JNICALL Java_dev_parla_android_WhisperJni_createToken(JNIEnv *env, jobject) {
     try { std::lock_guard<std::mutex> lock(registryMutex); const auto id = nextID++; tokens.emplace(id, std::make_shared<Token>()); return id; }
@@ -80,6 +107,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         if (!token) throw std::runtime_error("Unknown recognition token");
         // Native init, decode and free are one serial lifecycle. Cancellation never takes this lock.
         std::lock_guard<std::mutex> lock(inferenceMutex);
+        lastLoadMs = -1; lastDecodeMs = -1; lastFailedStage = 0;
         if (token->canceled.load()) return nullptr;
         const auto model = bytes(env, modelBytes, 8192);
         if (model != lastModel) { lastLanguage = "en"; lastModel = model; }
@@ -91,9 +119,11 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         std::vector<float> samples(count);
         env->GetFloatArrayRegion(sampleArray, 0, count, samples.data());
         if (env->ExceptionCheck()) return nullptr;
-        auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = false;
-        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(whisper_init_from_file_with_params(model.c_str(), cp), whisper_free);
+        lastFailedStage = 1;
+        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(nullptr, whisper_free);
+        { StageTimer timer{lastLoadMs}; ctx.reset(load(model)); }
         if (!ctx) throw std::runtime_error("Model could not be loaded. Verify the model or choose a smaller one.");
+        lastFailedStage = 0;
         // Init cannot abort; token still invalidates delivery immediately and owns state until return.
         if (token->canceled.load()) return nullptr;
         const bool multi = whisper_is_multilingual(ctx.get());
@@ -117,7 +147,7 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
         auto decode = [&]() {
             auto p = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
             p.n_threads = std::max(4, std::min(8, int(std::thread::hardware_concurrency()) - 2));
-            p.no_timestamps = !timed; p.print_progress = false; p.print_realtime = false;
+            p.no_timestamps = !parla::decode_timestamps(timed, count); p.print_progress = false; p.print_realtime = false;
             p.print_special = false; p.print_timestamps = false;
             if (timed) {
                 p.offset_ms = 0; p.duration_ms = 0; p.single_segment = false; p.token_timestamps = false;
@@ -136,7 +166,11 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
             }
             return text;
         };
-        auto text = decode();
+        lastFailedStage = 2;
+        std::string text;
+        {  // both passes when the language is re-detected
+        StageTimer timer{lastDecodeMs};
+        text = decode();
         if (!timed && multi && !pinned && languages > 0 && !token->canceled.load() && !text.empty()) {
             whisper_token sot = whisper_token_sot(ctx.get());
             const char *actual = nullptr;
@@ -151,6 +185,8 @@ jbyteArray recognize(JNIEnv *env, jlong id, jbyteArray modelBytes, jfloatArray s
             }
             if (actual && language != actual) { language = actual; lastLanguage = language; text = decode(); }
         }
+        }
+        lastFailedStage = 0;
         if (token->canceled.load()) return nullptr;
         // Standard UTF-8 bytes, never JNI Modified UTF-8: emoji and Indic text survive unchanged.
         auto result = env->NewByteArray(static_cast<jsize>(text.size()));
@@ -166,13 +202,18 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recogn
 extern "C" JNIEXPORT jbyteArray JNICALL Java_dev_parla_android_WhisperJni_recognizeTimed(JNIEnv *env, jobject, jlong id, jbyteArray modelBytes, jfloatArray sampleArray, jbyteArray promptBytes, jbyteArray languageBytes) {
     return recognize(env, id, modelBytes, sampleArray, promptBytes, languageBytes, true);
 }
+extern "C" JNIEXPORT jlongArray JNICALL Java_dev_parla_android_WhisperJni_lastTimings(JNIEnv *env, jobject) {
+    const jlong values[3] = {jlong(lastLoadMs.load()), jlong(lastDecodeMs.load()), jlong(lastFailedStage.load())};
+    auto result = env->NewLongArray(3);
+    if (result) env->SetLongArrayRegion(result, 0, 3, values);
+    return result;
+}
 // Safe Start's explicit "Try loading once": init and free only, no audio. Same serial lifecycle lock as recognize.
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_parla_android_WhisperJni_prepare(JNIEnv *env, jobject, jbyteArray modelBytes) {
     try {
         std::lock_guard<std::mutex> lock(inferenceMutex);
         const auto model = bytes(env, modelBytes, 8192);
-        auto cp = whisper_context_default_params(); cp.use_gpu = false; cp.flash_attn = false;
-        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(whisper_init_from_file_with_params(model.c_str(), cp), whisper_free);
+        std::unique_ptr<whisper_context, decltype(&whisper_free)> ctx(load(model), whisper_free);
         return ctx ? JNI_TRUE : JNI_FALSE;
     } catch (const std::exception &e) { failure(env, e.what()); return JNI_FALSE; }
     catch (...) { failure(env, "Native model load failed"); return JNI_FALSE; }

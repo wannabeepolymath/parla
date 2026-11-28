@@ -188,7 +188,7 @@ class ModelManager internal constructor(
     private val catalog: List<SpeechModel> = ModelCatalog.all,
     private val chunkBytes: Long = 8L*1024*1024,
     private val install: suspend (File,File,SpeechModel,TransferPermit) -> Unit = { part,dest,m,p ->
-        withContext(NonCancellable) { NativeTasks.run { ModelCatalog.verify(part,m); p.commit { PrivateFiles(dest.parentFile!!).publish(part,dest) } } }
+        withContext(NonCancellable) { NativeTasks.run { ModelCatalog.verify(part,m); p.commit { PrivateFiles(dest.parentFile!!).publish(part,dest) }; ModelCatalog.forget() } }
     },
     private val importDirectory: File = File(directory.parentFile,"imported-speech-model"),
 ) {
@@ -242,7 +242,7 @@ class ModelManager internal constructor(
             val model = SpeechModel(SpeechModel.IMPORTED_ID,label,bytes,"",UUID.randomUUID().toString())
             // Serial with recognition: no native load reads a file while it is replaced or removed.
             withContext(NonCancellable) { NativeTasks.run {
-                imports.publish(staged,imports.file(model.filename))
+                imports.publish(staged,imports.file(model.filename)); ModelCatalog.forget()
                 imports.atomic(imports.file(IMPORT_META),JSONObject().put("version",1).put("name",model.name).put("bytes",model.bytes).put("importID",model.importID).toString().toByteArray())
                 importedState.value = model
                 sweepImports(keep = model.filename)
@@ -256,7 +256,7 @@ class ModelManager internal constructor(
     suspend fun deleteImported() {
         check(!importing) { "Wait for the import to finish." }
         withContext(NonCancellable) { NativeTasks.run {
-            imports.remove(imports.file(IMPORT_META)); importedState.value = null
+            imports.remove(imports.file(IMPORT_META)); importedState.value = null; ModelCatalog.forget()
             for(n in imports.names(16)) if(n.startsWith("model-")) imports.remove(imports.file(n))
         } }
     }
@@ -356,7 +356,7 @@ class ModelManager internal constructor(
         }
         var removed = false
         try {
-            withContext(NonCancellable) { NativeTasks.run { storage.files.remove(file(model)); removed = true } }
+            withContext(NonCancellable) { NativeTasks.run { ModelCatalog.forget(); storage.files.remove(file(model)); removed = true } }
         } finally {
             synchronized(this) {
                 val c = runCatching { storage.read(model) }.getOrNull()

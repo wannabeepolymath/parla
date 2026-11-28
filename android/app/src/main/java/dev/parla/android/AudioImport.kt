@@ -272,10 +272,13 @@ internal class AudioImport(private val context: Context, private val store: Stor
         value.value = ImportState(source,busy = true,message = "Decoding on device…")
         job = scope.launch {
             value.value = try {
-                val samples = decode(source.file,timed)
+                val timing = TimingSession().apply { mark(TimingStage.import_start) }
+                val samples = timing.span(null,TimingStage.file_decode) { decode(source.file,timed) }
                 value.update { it.copy(message = "Transcribing on device…") }
-                val recognition = if(timed) LocalSpeech().transcribeTimed(samples,file,model,frozen.dictionary,frozen.settings.language)
-                    else TimedTranscript(LocalSpeech().transcribe(samples,file,model,frozen.dictionary,frozen.settings.language),samples.size,null)
+                val recognition = timing.span(TimingStage.transcription_start,TimingStage.transcription_end) {
+                    if(timed) LocalSpeech().transcribeTimed(samples,file,model,frozen.dictionary,frozen.settings.language,timing)
+                    else TimedTranscript(LocalSpeech().transcribe(samples,file,model,frozen.dictionary,frozen.settings.language,timing = timing),samples.size,null)
+                }
                 ImportState(source,preview = recognition.text,model = model.id,recognition = recognition,language = frozen.settings.language,
                     message = if(timed && recognition.cues == null) "Transcript ready, but timestamps weren’t available for it. Nothing was uploaded or inserted." else "Transcript ready. Nothing was uploaded or inserted.")
             } catch(c: CancellationException) { throw c } // cancel()/discard() publish their own state
@@ -332,8 +335,11 @@ internal class AudioImport(private val context: Context, private val store: Stor
                 val t = withContext(Dispatchers.IO) { admit().also { token = it; saved.running(it) } }
                 savedMessage("Transcribing on device…")
                 val file = withContext(Dispatchers.IO) { saved.source(t) }
-                val samples = decode(file, false)
-                val text = LocalSpeech().transcribe(samples, ModelManager.get(context).file(model), model, frozen.dictionary, frozen.settings.language)
+                val timing = TimingSession().apply { mark(TimingStage.import_start) }
+                val samples = timing.span(null, TimingStage.file_decode) { decode(file, false) }
+                val text = timing.span(TimingStage.transcription_start, TimingStage.transcription_end) {
+                    LocalSpeech().transcribe(samples, ModelManager.get(context).file(model), model, frozen.dictionary, frozen.settings.language, timing = timing)
+                }
                 val review = SavedReview(t.job, UUID.randomUUID().toString(), t, text, System.currentTimeMillis(), model.id, frozen.settings.language, null)
                 savedValue.value = SavedState(review = review, message = "Transcript ready.")
                 writeResult(review)

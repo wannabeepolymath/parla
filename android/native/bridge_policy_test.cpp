@@ -63,5 +63,10 @@ int main() {
     assert(parla::language_count(50258, 50359) == 100);  // 51866 vocabulary
     assert(parla::language_count(50258, 50258) == 0);    // degenerate
     assert(parla::language_count(50258, 50000) == 0);
+    // Live dictation and file import share this: only a single 30 s window may decode without timestamps.
+    assert(!parla::decode_timestamps(false, 16000L * 30));
+    assert(parla::decode_timestamps(false, 16000L * 30 + 1));
+    assert(parla::decode_timestamps(false, 1821352));  // F3's 113.8 s file
+    assert(parla::decode_timestamps(true, 6400));
     std::puts("bridge_policy_test: PASS");
 }
