@@ -1,5 +1,7 @@
 package dev.parla.android
 
+import java.lang.Character.UnicodeScript
+
 /** A captured editor is an insertion capability, never a query for a new target. */
 data class EditorSnapshot(
     val packageName: String,
@@ -60,6 +62,23 @@ object InsertionPolicy {
         return dictated.isNotEmpty() && safe(before) && safe(after) && sameIdentity(before, after) &&
             after.text == replacement(before, dictated) && after.selectionStart == caret && after.selectionEnd == caret
     }
+
+    /**
+     * [dictated] plus a space when the caret sits right before a word, so "alpha |omega" doesn't become
+     * "alpha middleomega". Nothing before punctuation, whitespace or the end, nor in scripts written without
+     * spaces. The Mac app pastes verbatim (no caret-context spacing or casing), so the left side stays as dictated.
+     */
+    fun separated(editor: EditorSnapshot, dictated: String): String {
+        val end = maxOf(editor.selectionStart, editor.selectionEnd)
+        if (dictated.isEmpty() || end !in editor.text.indices) return dictated
+        val next = editor.text.codePointAt(end); val last = dictated.codePointBefore(dictated.length)
+        val joins = Character.isLetterOrDigit(next) && !Character.isWhitespace(last) && !Character.isSpaceChar(last) &&
+            UnicodeScript.of(next) !in unspaced && UnicodeScript.of(last) !in unspaced
+        return if (joins) "$dictated " else dictated
+    }
+    // ponytail: common scripts written without spaces; add one here if it shows up.
+    private val unspaced = setOf(UnicodeScript.HAN, UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA, UnicodeScript.THAI,
+        UnicodeScript.LAO, UnicodeScript.KHMER, UnicodeScript.MYANMAR)
 
     fun replacement(editor: EditorSnapshot, dictated: String): String? {
         if (!safe(editor) || dictated.isBlank() || dictated.length > MAX_EDITOR_CHARS) return null

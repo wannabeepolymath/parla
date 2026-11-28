@@ -118,4 +118,29 @@ class InsertionPolicyTest {
         assertFalse(InsertionPolicy.inserted(editor, "", editor))
         assertFalse(InsertionPolicy.inserted(editor.copy(inputType = 0x81), "friend", after.copy(inputType = 0x81)))
     }
+
+    @Test fun aSpaceSeparatesDictationFromAWordRightAfterTheCaret() {
+        fun at(text: String, start: Int, end: Int = start, dictated: String = "Middle.") =
+            editor.copy(text = text, selectionStart = start, selectionEnd = end).let { e -> InsertionPolicy.replacement(e, InsertionPolicy.separated(e, dictated)) }
+        assertEquals("alpha Middle. omega", at("alpha omega", 6))                // device F2: was "alpha Middle.omega"
+        assertEquals("Middle.", at("", 0))                                       // empty field
+        assertEquals("alpha Middle.", at("alpha ", 6))                           // end of text
+        assertEquals("alpha Middle. 42", at("alpha 42", 6))                      // before a digit
+        assertEquals("alpha Middle. éclair", at("alpha éclair", 6))              // before a non-ASCII letter
+        assertEquals("alpha Middle, omega", at("alpha , omega", 6, dictated = "Middle"))  // before punctuation: no space
+        assertEquals("alpha Middle.. omega", at("alpha . omega", 6))
+        assertEquals("alpha Middle. omega", at("alpha  omega", 6))               // before whitespace: no double space
+        assertEquals("alpha Middle.\nomega", at("alpha \nomega", 6))
+        assertEquals("alpha Middle. omega", at("alpha  omega", 6))
+        assertEquals("alpha middle omega", at("alpha omega", 6, dictated = "middle "))  // dictation already ends in a space
+        assertEquals("on my favorite kitchen", at("on the kitchen", 3, 6, "my favorite"))       // selection: existing space kept
+        assertEquals("on my favorite kitchen", at("on the kitchen", 6, 3, "my favorite"))       // reversed selection
+        assertEquals("on my favorite kitchen", at("on thekitchen", 3, 6, "my favorite"))        // selection ending before a letter
+        // Scripts written without spaces never get one.
+        assertEquals("我喜欢你好世界", at("我喜欢世界", 3, dictated = "你好"))
+        assertEquals("Hello世界", at("世界", 0, dictated = "Hello"))
+        assertEquals("你好world", at("world", 0, dictated = "你好"))
+        assertEquals("こんにちはカタカナ", at("カタカナ", 0, dictated = "こんにちは"))
+        assertEquals("Hiสวัสดี", at("สวัสดี", 0, dictated = "Hi"))
+    }
 }

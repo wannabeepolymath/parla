@@ -27,7 +27,8 @@ internal object DictionaryLearner {
     private val LENGTH = 3..24
     private const val MAX_DISTANCE_RATIO = 0.65
     private val clusters = Regex("\\X")
-    private val whitespace = Regex("(?U)\\s+")
+    // Unicode whitespace on both the JVM and Android's ICU. ICU rejects the JVM-only inline Unicode flag (1.3.2 crash).
+    private val whitespace = Regex("[\\p{Z}\\s\\u0085]+")
     private class Token(val word: String, val canon: String)
 
     private fun tokens(s: String) = s.split(whitespace).mapNotNull { chunk ->

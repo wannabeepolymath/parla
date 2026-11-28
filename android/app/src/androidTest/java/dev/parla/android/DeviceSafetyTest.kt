@@ -49,4 +49,19 @@ class DeviceSafetyTest {
         assertFalse(file.exists())
     }
 
+    /** Android's ICU regex engine, not the JVM's: 1.3.2 crashed at DictionaryLearner init on a pattern JVM tests accepted. */
+    @Test fun textRegexesCompileAndMatchOnIcu() {
+        assertEquals("Sinead", DictionaryLearner.propose("Meet Shunade now", "Meet Shunade now", "Meet Sinead now", emptyList())?.to)
+        assertEquals(listOf("New York"), VocabularyHints.select(listOf(" New　York "), 2048))
+        assertEquals(3, TextRules.wordCount("one two three"))
+        assertEquals("hi there", TextRules.stripNonSpeech("hi [music] there"))
+        assertEquals("1250 pound", WER.normalize("1,250 pounds"))
+        assertEquals("420 dollar", WER.normalize("$420"))
+        assertEquals("the 21", WER.normalize("the twenty first"))
+        assertEquals(1, "é".countCharacters())
+        val editor = EditorSnapshot("dev.test", 1, "e", "1", "EditText", "alpha omega", 6, 6,
+            editable = true, enabled = true, focused = true, visible = true, inputType = 1, password = false)
+        assertEquals("middle ", InsertionPolicy.separated(editor, "middle"))
+    }
+
 }
