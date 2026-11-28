@@ -26,6 +26,8 @@ internal class OriginalCopyOwner(private val now: () -> Long, private val schedu
     private val mutable = MutableStateFlow<Offer?>(null)
     val offer = mutable.asStateFlow()
     private var cancelExpiry: (() -> Unit)? = null
+    /** False while the screen is off: nothing is retained then, since the uptime timer can't count deep sleep. */
+    @Volatile var interactive = true
 
     @Synchronized fun clear() { epoch++; original = null; mutable.value = null; cancelExpiry?.invoke(); cancelExpiry = null }
     /** At the moment the write is authorized. Also invalidates any earlier original. */
@@ -33,7 +35,7 @@ internal class OriginalCopyOwner(private val now: () -> Long, private val schedu
     /** After the write returned. Keeps [raw] until dispatch + 30 s unless something cleared since dispatch. */
     @Synchronized fun completed(attempt: Attempt, raw: String): Boolean {
         val expires = attempt.dispatchedAt+LIFETIME_MS
-        if(attempt.epoch != epoch || raw.isEmpty() || now() !in attempt.dispatchedAt until expires) return false
+        if(!interactive || attempt.epoch != epoch || raw.isEmpty() || now() !in attempt.dispatchedAt until expires) return false
         original = raw; mutable.value = Offer(epoch,expires)
         // Expiry must not depend on a screen being composed. The epoch keeps an older timer off a newer original.
         val kept = epoch
@@ -48,7 +50,7 @@ internal class OriginalCopyOwner(private val now: () -> Long, private val schedu
      * The timer runs on uptime, which stops in deep sleep while the deadline (elapsedRealtime) doesn't. Deep sleep
      * only follows screen-off, so screen-off clears; screen-on/unlock re-checks the deadline as a backstop.
      */
-    fun screenChanged(off: Boolean) { if(off) clear() else refresh() }
+    fun screenChanged(off: Boolean) { interactive = !off; if(off) clear() else refresh() }
     /** Explicit Copy original. Repeated copies are allowed until the original deadline. */
     @Synchronized fun copy(token: Long): String? = if(refresh()?.token == token) original else null
     companion object { const val LIFETIME_MS = 30_000L }

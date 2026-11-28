@@ -15,6 +15,9 @@ class OriginalCopyTest {
         assertTrue(owner.completed(owner.dispatched(),"raw words"))
         owner.screenChanged(off = true)
         assertNull(owner.offer.value); assertNull(owner.copy(0))
+        // A dispatch that completes while the screen stays off retains nothing, even with no screen-on afterwards.
+        assertFalse(owner.completed(owner.dispatched(),"raw words")); now += 60_000; assertNull(owner.offer.value)
+        owner.screenChanged(off = false)
         assertTrue(owner.completed(owner.dispatched(),"raw words"))
         now += 29_999; owner.screenChanged(off = false); assertNotNull(owner.offer.value) // still inside 30 s
         now += 1; owner.screenChanged(off = false) // screen on / unlock after the deadline passed while asleep

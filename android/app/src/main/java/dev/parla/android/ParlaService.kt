@@ -42,6 +42,7 @@ class ParlaService : Service() {
             NotificationChannel(CHANNEL, "parla dictation controls", NotificationManager.IMPORTANCE_LOW)
         )
         registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_USER_PRESENT) }, RECEIVER_NOT_EXPORTED)
+        OriginalCopy.interactive = getSystemService(android.os.PowerManager::class.java).isInteractive
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
