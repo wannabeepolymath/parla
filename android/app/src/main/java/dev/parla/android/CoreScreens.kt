@@ -58,6 +58,90 @@ import kotlinx.coroutines.*
             }
         }
         Text("Downloads use storage and may use mobile data. Models need extra memory while running. Interrupted downloads stay paused until you resume them. Discard removes an unfinished download, keeping any installed model. After downloading, tap Select to use it.",style = MaterialTheme.typography.bodySmall)
+        ImportedModelSection(store,manager,data.settings) { error = it }
+        PreviewSection(store,manager,data.settings)
+        SafeStartSection(manager,data.settings)
+    }
+}
+
+@Composable private fun ImportedModelSection(store: Store, manager: ModelManager, settings: Settings, report: (String) -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val imported by manager.imported.collectAsState()
+    var job by remember { mutableStateOf<Job?>(null) }
+    val pick = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        if(uri == null) return@rememberLauncherForActivityResult
+        job = scope.launch {
+            report("Checking and copying the model file…")
+            report(try {
+                val resolver = context.contentResolver
+                val name = resolver.query(uri,arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),null,null,null)?.use { if(it.moveToFirst()) it.getString(0) else null }.orEmpty()
+                manager.importModel(name) { resolver.openInputStream(uri) ?: error("Couldn’t open the file. Choose it again.") }
+                if(store.update { it.copy(settings = it.settings.copy(localModel = SpeechModel.IMPORTED_ID)) }) "Model imported and selected. Parla checked its format, not its source." else "Model imported. Selection was not saved."
+            } catch(c: CancellationException) { "Import canceled. Any earlier model is kept." }
+            catch(e: Exception) { e.message?.take(200) ?: "Could not import this file. Any earlier model is kept." }
+            finally { job = null })
+        }
+    }
+    HorizontalDivider(); Text("Your own model",style = MaterialTheme.typography.titleMedium)
+    Text("Advanced: import a whisper.cpp model file (ggml .bin, up to 2 GB). Parla checks the file format and size, but can’t verify where an imported model came from, unlike the models above. Large models may not run on your phone.")
+    imported?.let { m ->
+        Text("${m.name} · ${fileSizeLabel(m.bytes)} · ${if(settings.localModel == SpeechModel.IMPORTED_ID) "Selected" else "Not selected"} · Not verified")
+        Row {
+            TextButton(onClick = { report(if(store.update { it.copy(settings = it.settings.copy(localModel = SpeechModel.IMPORTED_ID)) }) "Imported model selected" else "Selection was not saved") },enabled = job == null) { Text("Select") }
+            TextButton(onClick = { scope.launch { report(try { manager.deleteImported(); "Imported model deleted. Select another model to dictate." } catch(e: Exception) { e.message ?: "Could not delete the imported model." }) } },enabled = job == null) { Text("Delete") }
+        }
+    }
+    if(job == null) Button(onClick = { pick.launch(arrayOf("application/octet-stream","*/*")) }) { Text(if(imported == null) "Import model file" else "Replace imported model") }
+    else { LinearProgressIndicator(Modifier.fillMaxWidth()); TextButton(onClick = { job?.cancel() }) { Text("Cancel import") } }
+}
+
+@Composable private fun PreviewSection(store: Store, manager: ModelManager, settings: Settings) {
+    val context = LocalContext.current
+    val device = remember { PreviewPolicy.device(context) }
+    val unsupported = PreviewPolicy.unsupported(device)
+    val blocked = PreviewPolicy.blocked(settings,device,manager.file(PreviewPolicy.model).isFile)
+    HorizontalDivider(); Text("Draft preview",style = MaterialTheme.typography.titleMedium)
+    Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+        Text("Show a draft while recording",Modifier.weight(1f))
+        Switch(settings.previewEnabled,{ on -> store.update { it.copy(settings = it.settings.copy(previewEnabled = on)) } },enabled = unsupported == null || settings.previewEnabled)
+    }
+    Text("Shows rough text in the voice control while you speak, using Base (English) on this device every few seconds. The draft is never typed or saved: only the final text is inserted. Uses more battery and can add a moment before the final text.",style = MaterialTheme.typography.bodySmall)
+    if(settings.previewEnabled || unsupported != null) blocked?.let { Text(it,color = MaterialTheme.colorScheme.error) }
+}
+
+@Composable private fun SafeStartSection(manager: ModelManager, settings: Settings) {
+    val context = LocalContext.current
+    val safe = remember { SafeStart.get(context) }
+    val state by safe.state.collectAsState()
+    val imported by manager.imported.collectAsState()
+    val model = if(settings.localModel == SpeechModel.IMPORTED_ID) imported else manager.selected(settings)
+    val scope = rememberCoroutineScope()
+    var note by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    val crashes = model?.let { state.crashes[it.key] } ?: 0
+    HorizontalDivider(); Text("Safe Start",style = MaterialTheme.typography.titleMedium)
+    Text("If a speech model stops Parla twice while loading or transcribing, Safe Start pauses it so Parla stays usable.")
+    Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+        Text("Turn on Safe Start",Modifier.weight(1f))
+        Switch(state.enabled,{ note = if(safe.setEnabled(it)) "" else "Wait for the speech model to finish loading." },enabled = !busy)
+    }
+    Text(when {
+        !state.enabled -> "Safe Start is off."
+        state.fault -> SafeStart.UNAVAILABLE.substringBefore(" Open")
+        crashes >= SafeStart.PAUSE_AFTER -> SafeStart.PAUSED.substringBefore(" Open")
+        crashes > 0 -> "Parla closed while using this speech model last time. If it happens again, Safe Start pauses it."
+        else -> "Safe Start is on."
+    },style = MaterialTheme.typography.bodySmall)
+    if(note.isNotEmpty()) Text(note)
+    if(state.enabled) Row {
+        TextButton(onClick = { val m = model ?: return@TextButton; busy = true; note = "Loading the speech model…"
+            scope.launch {
+                note = try { if(safe.tryOnce(m,manager.file(m))) "The speech model loaded. You can dictate again." else "The speech model couldn’t load. Download it again or choose another." }
+                    catch(e: Exception) { e.message?.take(200) ?: "The speech model couldn’t load." }
+                busy = false
+            } },enabled = !busy && model != null && manager.file(model).isFile) { Text("Try loading once") }
+        TextButton(onClick = { note = if(safe.reset()) "Safe Start records cleared." else "Wait for the speech model to finish loading." },enabled = !busy) { Text("Reset") }
     }
 }
 
@@ -174,7 +258,7 @@ internal fun profileWarnings(profiles: List<AppProfile>): List<String> {
     val playback = remember { RecoveryPlayback(recordings) }
     val recovery = remember {
         AudioRecovery(recordings,{ store.data.value.takeIf { store.ready && store.persistenceError.value == null } },manager::file,
-            { entry -> store.update { if(it.settings.noHistory) error("History is off") else it.copy(history = listOf(entry)+it.history) } })
+            { entry -> store.update { if(it.settings.noHistory) error("History is off") else it.copy(history = listOf(entry)+it.history) } },selected = manager::selected)
     }
     val state by recovery.state.collectAsState()
     val revision by recordings.revision.collectAsState()

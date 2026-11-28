@@ -63,6 +63,7 @@ internal class AudioRecovery(
     dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val drain: suspend () -> Unit = { withContext(NonCancellable) { NativeTasks.run { } } },
     private val catalog: List<SpeechModel> = ModelCatalog.all,
+    private val selected: (Settings) -> SpeechModel? = { s -> catalog.firstOrNull { it.id == s.localModel } },
 ) {
     private val scope = CoroutineScope(SupervisorJob()+dispatcher)
     private val value = MutableStateFlow(AudioRecoveryState())
@@ -72,7 +73,7 @@ internal class AudioRecovery(
     fun transcribe(id: String) {
         if(job?.isCompleted == false) return
         val frozen = current() ?: run { value.value = value.value.copy(message = "Repair settings in Data recovery before transcribing. Nothing was sent."); return }
-        val model = catalog.firstOrNull { it.id == frozen.settings.localModel }
+        val model = selected(frozen.settings)
             ?: run { value.value = value.value.copy(message = "Select a downloaded speech model in Models."); return }
         val owned = try { recordings.acquire(id) } catch(_: Exception) { value.value = value.value.copy(message = "Recording is busy, expired or unavailable. Refresh and check settings."); return }
         lease = owned

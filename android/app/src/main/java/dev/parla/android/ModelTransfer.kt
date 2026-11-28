@@ -9,6 +9,7 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -189,6 +190,7 @@ class ModelManager internal constructor(
     private val install: suspend (File,File,SpeechModel,TransferPermit) -> Unit = { part,dest,m,p ->
         withContext(NonCancellable) { NativeTasks.run { ModelCatalog.verify(part,m); p.commit { PrivateFiles(dest.parentFile!!).publish(part,dest) } } }
     },
+    private val importDirectory: File = File(directory.parentFile,"imported-speech-model"),
 ) {
     internal val storage = TransferStorage(directory,catalog)
     private val scope = CoroutineScope(SupervisorJob()+dispatcher)
@@ -208,8 +210,60 @@ class ModelManager internal constructor(
         catch(_: Exception) { publish(ModelTransfer(m.id,message = "Saved download could not be read. Any installed model is safe. Check device storage.")) }
     }
     @Synchronized private fun publish(row: ModelTransfer) { state.value = row; rowState.value = rowState.value + (row.id to row) }
-    fun file(model: SpeechModel): File { require(model in catalog); return File(directory,model.filename) }
-    fun selected(settings: Settings) = catalog.firstOrNull { it.id == settings.localModel }
+    fun file(model: SpeechModel): File {
+        if(model.imported) return imports.file(model.filename)
+        require(model in catalog); return File(directory,model.filename)
+    }
+    fun selected(settings: Settings) = if(settings.localModel == SpeechModel.IMPORTED_ID) imported.value else catalog.firstOrNull { it.id == settings.localModel }
+
+    // The user's own model lives apart from catalog transfers, so their scratch cleanup never sees it.
+    // Its file is named by import, so a model frozen before a replacement fails verification instead of loading the new bytes.
+    private val imports by lazy { PrivateFiles(importDirectory) }
+    private val importedState by lazy { MutableStateFlow(readImported()) }
+    val imported: StateFlow<SpeechModel?> by lazy { importedState.asStateFlow() }
+    @Volatile private var importing = false
+    private fun readImported(): SpeechModel? = runCatching {
+        val meta = imports.file(IMPORT_META)
+        if(!imports.exists(meta)) return null
+        val j = JSONObject(imports.read(meta,4096).toString(Charsets.UTF_8))
+        require(j.getInt("version") == 1)
+        SpeechModel(SpeechModel.IMPORTED_ID,j.getString("name"),j.getLong("bytes"),"",UUID.fromString(j.getString("importID")).toString())
+            .takeIf { it.bytes in ImportedModelFile.MIN_BYTES..ImportedModelFile.MAX_BYTES }
+    }.getOrNull()
+    /** Copies a user-chosen ggml file privately after header and size checks, then replaces any earlier import. */
+    suspend fun importModel(name: String, open: () -> java.io.InputStream): SpeechModel = withContext(Dispatchers.IO) {
+        synchronized(this@ModelManager) { check(!importing) { "An import is already running." }; importing = true }
+        val work = coroutineContext
+        var part: File? = null
+        try {
+            val staged = imports.create("import-${UUID.randomUUID()}.part").also { part = it }
+            val bytes = open().use { ImportedModelFile.copy(it,staged,{ !work.isActive }) }
+            val label = name.filterNot(Char::isISOControl).trim().take(80).ifEmpty { "Imported model" }
+            val model = SpeechModel(SpeechModel.IMPORTED_ID,label,bytes,"",UUID.randomUUID().toString())
+            // Serial with recognition: no native load reads a file while it is replaced or removed.
+            withContext(NonCancellable) { NativeTasks.run {
+                imports.publish(staged,imports.file(model.filename))
+                imports.atomic(imports.file(IMPORT_META),JSONObject().put("version",1).put("name",model.name).put("bytes",model.bytes).put("importID",model.importID).toString().toByteArray())
+                importedState.value = model
+                sweepImports(keep = model.filename)
+            } }
+            model
+        } finally {
+            part?.let { if(imports.exists(it)) imports.remove(it) }
+            importing = false
+        }
+    }
+    suspend fun deleteImported() {
+        check(!importing) { "Wait for the import to finish." }
+        withContext(NonCancellable) { NativeTasks.run {
+            imports.remove(imports.file(IMPORT_META)); importedState.value = null
+            for(n in imports.names(16)) if(n.startsWith("model-")) imports.remove(imports.file(n))
+        } }
+    }
+    /** Only while this process's single import holds [importing], so no other part is being written. */
+    private fun sweepImports(keep: String) {
+        for(n in imports.names(16)) if(n != keep && (n.startsWith("model-") || n.startsWith("import-"))) imports.remove(imports.file(n))
+    }
     @Synchronized fun download(model: SpeechModel) {
         if(deleting || generation != null || task?.isCompleted == false || model !in catalog) return
         val p = TransferPermit(); val g = UUID.randomUUID().toString()
@@ -312,6 +366,7 @@ class ModelManager internal constructor(
         }
     }
     companion object {
+        private const val IMPORT_META = "imported.json"
         @Volatile private var instance: ModelManager? = null
         fun get(context: Context) = instance ?: synchronized(this) { instance ?: ModelManager(File(context.noBackupFilesDir,"speech-models")).also { instance = it } }
     }

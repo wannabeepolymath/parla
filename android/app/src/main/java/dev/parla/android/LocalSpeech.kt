@@ -17,6 +17,8 @@ internal interface SpeechNative {
     fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray?
     /** [NativeSegments] payload: raw native segments with whisper 10 ms ticks. */
     fun recognizeTimed(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray? = throw IllegalStateException("Timestamps aren't available.")
+    /** Load and free the model with no audio (Safe Start's "Try loading once"). False: whisper refused the file. */
+    fun prepare(model: ByteArray): Boolean = error("Loading without audio is unavailable.")
 }
 internal object WhisperJni : SpeechNative {
     init { System.loadLibrary("parla-whisper") }
@@ -25,6 +27,7 @@ internal object WhisperJni : SpeechNative {
     external override fun release(token: Long)
     external override fun recognize(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray?
     external override fun recognizeTimed(token: Long, model: ByteArray, samples: FloatArray, prompt: ByteArray, language: ByteArray): ByteArray?
+    external override fun prepare(model: ByteArray): Boolean
 }
 /** Mac RecognitionSegments.Cue: literal native segment text and whisper 1.9.1 PCM ticks (10 ms from sample zero). */
 internal data class Cue(val text: String, val start: Long, val end: Long)
@@ -64,7 +67,7 @@ internal object NativeSegments {
         }
     }
 }
-internal class LocalSpeech(private val native: SpeechNative = WhisperJni) {
+internal class LocalSpeech(private val native: SpeechNative = WhisperJni, private val safeStart: SafeStart? = SafeStart.current) {
     suspend fun transcribe(wav: File, model: File, catalog: SpeechModel, words: List<String>, language: String, validate: () -> Unit = {}): String =
         recognize(model, catalog, words, language, validate) { WavInput.read(wav) }
     /** Already-decoded 16 kHz mono PCM (file import). Same admission and ceiling as recorded WAV. */
@@ -73,11 +76,15 @@ internal class LocalSpeech(private val native: SpeechNative = WhisperJni) {
     /** Explicit timed import: same admission and serial native owner; the text is the joined raw segments. */
     suspend fun transcribeTimed(samples: FloatArray, model: File, catalog: SpeechModel, words: List<String>, language: String): TimedTranscript {
         var cues: List<Cue>? = null
-        val text = recognize(model, catalog, words, language, {}, native::recognizeTimed,
-            { payload -> NativeSegments.parse(payload, samples.size).also { cues = it.cues }.raw }) { WavInput.admit(samples, "This file is too short or silent. Use at least 0.4 seconds of speech."); samples }
+        val text = recognize(model, catalog, words, language, {}, run = native::recognizeTimed,
+            raw = { payload -> NativeSegments.parse(payload, samples.size).also { cues = it.cues }.raw }) { WavInput.admit(samples, "This file is too short or silent. Use at least 0.4 seconds of speech."); samples }
         return TimedTranscript(text, samples.size, cues)
     }
+    /** Recording preview: may be empty. [verify] once per session; the private model cannot change mid-recording without failing to load. */
+    suspend fun draft(samples: FloatArray, model: File, catalog: SpeechModel, words: List<String>, language: String, verify: Boolean): String =
+        recognize(model, catalog, words, language, {}, verify, draft = true) { samples }
     private suspend fun recognize(model: File, catalog: SpeechModel, words: List<String>, language: String, validate: () -> Unit,
+                                  verify: Boolean = true, draft: Boolean = false,
                                   run: (Long, ByteArray, FloatArray, ByteArray, ByteArray) -> ByteArray? = native::recognize,
                                   raw: (ByteArray) -> ByteArray = { it }, load: () -> FloatArray): String = suspendCancellableCoroutine { c ->
         val revoked = AtomicBoolean(false)
@@ -88,15 +95,19 @@ internal class LocalSpeech(private val native: SpeechNative = WhisperJni) {
             try {
                 if(revoked.get()) return@nativeSubmit
                 validate()
-                ModelCatalog.verify(model, catalog)
+                if(verify) ModelCatalog.verify(model, catalog)
                 val samples = load()
                 if(revoked.get()) return@nativeSubmit
                 validate()
-                val bytes = run(token, model.absolutePath.toByteArray(Charsets.UTF_8), samples,
-                    VocabularyHints.asrTerms(words).toByteArray(Charsets.UTF_8), SpeechLanguagePolicy.language(catalog,language).toByteArray(Charsets.UTF_8))
+                // Durable marker before native code, cleared only by an actual native return.
+                val mark = safeStart?.begin(catalog)
+                val bytes = try {
+                    run(token, model.absolutePath.toByteArray(Charsets.UTF_8), samples,
+                        VocabularyHints.asrTerms(words).toByteArray(Charsets.UTF_8), SpeechLanguagePolicy.language(catalog,language).toByteArray(Charsets.UTF_8))
+                } finally { safeStart?.end(mark, resolve = !draft) }
                 val text = bytes?.takeIf { !revoked.get() }?.let(raw)?.toString(Charsets.UTF_8)?.let(TextRules::stripNonSpeech).orEmpty().trim()
                 if(c.isActive && !revoked.get()) {
-                    if(text.isEmpty()) c.resumeWithException(IllegalStateException("No speech recognized. Try a longer recording closer to the microphone.")) else c.resume(text)
+                    if(text.isEmpty() && !draft) c.resumeWithException(IllegalStateException("No speech recognized. Try a longer recording closer to the microphone.")) else c.resume(text)
                 }
             } catch(t: Throwable) { if(c.isActive && !revoked.get()) c.resumeWithException(t) }
             finally { native.release(token) }

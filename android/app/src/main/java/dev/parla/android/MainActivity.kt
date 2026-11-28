@@ -59,6 +59,7 @@ private val ParlaColors = lightColorScheme(primary = Primary800, onPrimary = Col
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SafeStart.get(this) // Before any native work this process can start.
         requestedRoute.value = intent?.getStringExtra("route")
         enableEdgeToEdge()
         if (BuildConfig.DEBUG) android.util.Log.i("ParlaVisualEvidence", "pixels=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}; densityDpi=${resources.displayMetrics.densityDpi}; density=${resources.displayMetrics.density}; fontScale=${resources.configuration.fontScale}; uiMode=${resources.configuration.uiMode}; locale=${resources.configuration.locales[0]}")
@@ -102,6 +103,10 @@ private fun ParlaApp() {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     fun message(text: String) { scope.launch { snackbar.showSnackbar(text) } }
+    LaunchedEffect(Unit) {
+        // Safe Start found a native attempt the previous process never finished: offer, never retry.
+        if(SafeStart.get(context).takeNotice() && snackbar.showSnackbar("Parla closed while using a speech model. Review it in Safe Start.","Open",duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed) { route = "Models"; setup = false }
+    }
     var refresh by remember { mutableIntStateOf(0) }
     val lifecycle = LocalLifecycleOwner.current
     DisposableEffect(lifecycle) {

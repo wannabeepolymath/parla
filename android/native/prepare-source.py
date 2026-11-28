@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Reproduce vendored source without models. Python standard library only."""
-import hashlib, io, pathlib, tarfile, urllib.request
+import hashlib, io, json, pathlib, subprocess, tarfile, urllib.request
 revision = 'f049fff95a089aa9969deb009cdd4892b3e74916'
 sha256 = '279af4ce60dbf397362868f3bacc75b56a4332ac2541cae155070093f6aaf0e3'
 root = pathlib.Path(__file__).resolve().parent
@@ -22,4 +22,9 @@ with tarfile.open(fileobj=io.BytesIO(archive.read_bytes())) as tar:
         elif entry.isfile():
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(tar.extractfile(entry).read())
-print('Verified whisper.cpp v1.9.1', revision, sha256)
+# Parla's model-loader bounds ("parla:" comments), applied over the verified upstream source.
+subprocess.run(['patch', '-p1', '-N', '-s', '-d', str(root / 'vendor' / 'whisper'), '-i', str(root / 'whisper-loader-bounds.patch')], check=True)
+patched = json.loads((root / 'source-manifest.json').read_text())['patched']
+for name, digest in patched.items():
+    assert hashlib.sha256((root / 'vendor' / 'whisper' / name).read_bytes()).hexdigest() == digest, name
+print('Verified whisper.cpp v1.9.1', revision, sha256, '+ loader bounds patch')
