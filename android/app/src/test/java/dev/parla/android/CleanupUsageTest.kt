@@ -56,6 +56,25 @@ class CleanupUsageTest {
         for(bad in listOf("\"5\"", "-1", "1.5")) assertTrue(bad, runCatching { LocalDataCodec.decode(json.replace("\"inputTokens\":10", "\"inputTokens\":$bad")) }.isFailure)
     }
 
+    @Test fun pendingRetryKeepsTheRowWhenTheHistoryLimitWouldTrimIt() {
+        PendingHistory.value.value.forEach { PendingHistory.discard(it.id) }
+        var disk: String? = null
+        val state = LocalState(object : StateStorage { override fun read() = disk; override fun write(value: String) { disk = value }; override fun preserveOriginal() {} })
+        val newer = (1..50).map { HistoryEntry(createdAt = 10_000L + it, raw = "n$it", text = "n$it") }
+        assertTrue(state.update { it.copy(history = newer) })
+        val old = HistoryEntry(createdAt = 1, raw = "old", text = "old")
+        PendingHistory.put(old)
+        val message = savePendingEntry(old.id, true, { state.data.value }, state::update)
+        assertEquals("History is full (limit 50). Raise the limit in Privacy or delete older entries, then try again.", message)
+        assertEquals(listOf(old), PendingHistory.value.value) // the RAM copy is not discarded
+        assertFalse(state.data.value.history.any { it.id == old.id })
+        // After the limit is raised, the same retry commits and only then drops the kept copy.
+        assertTrue(state.update { it.copy(settings = it.settings.copy(historyLimit = 51)) })
+        assertEquals("Saved to history", savePendingEntry(old.id, true, { state.data.value }, state::update))
+        assertTrue(state.data.value.history.any { it.id == old.id }); assertTrue(PendingHistory.value.value.isEmpty())
+        assertTrue(LocalDataCodec.decode(disk!!).history.any { it.id == old.id })
+    }
+
     @Test fun costIsAnEstimateOverHistoryWithUnknownModelsUnpriced() {
         val now = 10_000_000L
         val rows = listOf(

@@ -41,12 +41,22 @@ internal fun historyDetails(row: HistoryEntry, appLabel: (String) -> String): St
 ).joinToString(" · ")
 
 /** Storage-only retry of a kept row; nothing is recognized or sent again. */
-internal fun savePendingEntry(store: Store, id: String): String {
-    if(!store.ready) return "Repair saved data in Data recovery first. The text is kept until parla closes."
-    if(store.data.value.settings.noHistory) return "Text history is paused in Privacy. Turn it on to save, or copy the text."
-    return if(PendingHistory.retry(id) { entry -> store.update { local ->
-        if(local.history.any { it.id == entry.id }) local else local.copy(history = (local.history + entry).sortedByDescending { it.createdAt })
-    } }) "Saved to history" else "Still not saved. Free storage and try again."
+internal fun savePendingEntry(store: Store, id: String): String = savePendingEntry(id, store.ready, { store.data.value }, store::update)
+
+/** The kept copy is dropped only once the committed history really holds that row; the history limit may trim an older one. */
+internal fun savePendingEntry(id: String, ready: Boolean, data: () -> LocalData, update: ((LocalData) -> LocalData) -> Boolean): String {
+    if(!ready) return "Repair saved data in Data recovery first. The text is kept until parla closes."
+    if(data().settings.noHistory) return "Text history is paused in Privacy. Turn it on to save, or copy the text."
+    var trimmed = false
+    val saved = PendingHistory.retry(id) { entry ->
+        update { local -> if(local.history.any { it.id == entry.id }) local else local.copy(history = (local.history + entry).sortedByDescending { it.createdAt }) } &&
+            data().history.any { it.id == entry.id }.also { trimmed = !it }
+    }
+    return when {
+        saved -> "Saved to history"
+        trimmed -> "History is full (limit ${data().settings.historyLimit}). Raise the limit in Privacy or delete older entries, then try again."
+        else -> "Still not saved. Free storage and try again."
+    }
 }
 
 /** Always composed by its host so the document pickers survive the dialog. */
