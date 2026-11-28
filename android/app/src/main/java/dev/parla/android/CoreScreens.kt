@@ -104,6 +104,24 @@ import kotlinx.coroutines.*
     }) { Text("Save") } },dismissButton = { TextButton(onClick = { adding = false }) { Text("Cancel") } })
 }
 
+/** Desktop ProfileResolver.warnings for Android's exact-package targets. Every profile counts, enabled or not. */
+internal fun profileWarnings(profiles: List<AppProfile>): List<String> {
+    val targets = mutableSetOf<String>()
+    return profiles.mapNotNull { if(!targets.add(it.target)) "Two profiles target ${it.target}. The first enabled one is used." else null }
+}
+
+@Composable private fun ProfileTester(data: LocalData) {
+    var sample by remember { mutableStateOf("") }
+    val target = sample.trim()
+    // The same resolver dictation uses, so the preview can't drift from what applies.
+    val profile = data.profileFor(target); val s = data.forApp(target).settings
+    Text("Test your profiles",style = MaterialTheme.typography.titleMedium)
+    Field(sample,{ sample = it.take(255) },"App package name, e.g. com.whatsapp")
+    Text("Profile: ${profile?.name ?: "Global settings"}")
+    Text("Cleanup: ${if(s.cleanupEnabled) "on" else "off"} · Style: ${styleLabel(s.style)} · Language: ${if(s.language == "auto") "auto-detect" else s.language}",style = MaterialTheme.typography.bodySmall)
+    Text("Speech model: ${speechModelLabel(s.localModel)} · AI model: ${s.active.model.ifEmpty { "provider default" }}",style = MaterialTheme.typography.bodySmall)
+}
+
 @Composable internal fun ProfilesScreen(data: LocalData, store: Store, message: (String) -> Unit) {
     var editing by remember { mutableStateOf<AppProfile?>(null) }; var adding by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }; var target by remember { mutableStateOf("") }; var cleanup by remember { mutableStateOf("inherit") }; var style by remember { mutableStateOf("") }; var language by remember { mutableStateOf("") }; var model by remember { mutableStateOf("") }; var cleanupModel by remember { mutableStateOf("") }; var words by remember { mutableStateOf("") }
@@ -111,11 +129,14 @@ import kotlinx.coroutines.*
     CorePage {
         Text("App profiles",style = MaterialTheme.typography.headlineMedium)
         Text("Customize dictation for an app. Blank fields use your defaults. If profiles overlap, the first enabled match is used. Profile vocabulary has priority over your dictionary. Website profiles are not available on Android.")
+        profileWarnings(data.profiles).forEach { Text(it,color = MaterialTheme.colorScheme.error) }
         data.profiles.forEach { p ->
             Text("${p.name} · ${p.target}")
             Row { Switch(p.enabled,{ enabled -> store.update { it.copy(profiles = it.profiles.map { row -> if(row.id == p.id) row.copy(enabled = enabled) else row }) } }); TextButton(onClick = { edit(p) }) { Text("Edit") }; TextButton(onClick = { store.update { it.copy(profiles = it.profiles.filterNot { row -> row.id == p.id }) } }) { Text("Delete") } }
         }
         Button(onClick = { edit(null) }) { Text("Add app profile") }
+        HorizontalDivider()
+        ProfileTester(data)
     }
     if(adding) AlertDialog(onDismissRequest = { adding = false },title = { Text("App profile") },text = { Column(Modifier.verticalScroll(rememberScrollState())) {
         Field(name,{ name = it },"Name"); Field(target,{ target = it },"App package name (e.g. com.whatsapp)")
