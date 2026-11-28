@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import java.io.File
 
 /** One foreground service owns the overlay and one cancellable session at a time. */
@@ -60,15 +61,25 @@ class ParlaService : Service() {
             return false
         }
         return try {
-            // Armed while the activity is visible. AudioRecord exists only during an explicit session.
+            // Armed by the visible activity after setup. AudioRecord exists only during an explicit session.
             val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
                 (if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0)
             startForeground(NOTIFICATION, notification(), types)
             bubble = BubbleWindow(this, ::toggle, ::beginRecording, ::stopRecording, ::cancelSession)
-            bubble?.show()
-            mutableVisible.value = true
+            mutableArmed.value = true
             scope.launch { store.data.collect { bubble?.configure(it.settings) } }
-            scope.launch { ParlaAccessibilityService.keyboardBounds.collect { bubble?.placeNearKeyboard(it) } }
+            scope.launch {
+                // Armed is service readiness; attached is whether the control is on screen right now.
+                combine(ParlaAccessibilityService.keyboardBounds, ParlaAccessibilityService.connected, ::Pair).collect { (keyboard, connected) ->
+                    bubble?.placeNearKeyboard(keyboard)
+                    val attach = BubbleVisibility.attached(keyboard, store.accessibilityConsentGranted, connected,
+                        AndroidSettings.canDrawOverlays(this@ParlaService),
+                        checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+                    // No keyboard means no target: cancel capture. Processing keeps its captured field and never retargets.
+                    if (!attach && status.value.phase == Phase.RECORDING) cancelSession()
+                    bubble?.setVisible(attach)
+                }
+            }
             scope.launch { status.collect { bubble?.render(it); updateNotification() } }
             true
         } catch (_: Exception) {
@@ -123,13 +134,16 @@ class ParlaService : Service() {
         startedAt = SystemClock.elapsedRealtime()
         mutableStatus.value = DictationStatus(Phase.RECORDING, "Listening · tap to finish")
         val entered = java.util.concurrent.atomic.AtomicBoolean(false)
+        val timing = TimingSession()
         session = scope.launch {
             entered.set(true)
             try {
-                capture.record(file) { level ->
-                    scope.launch {
-                        if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) {
-                            mutableStatus.value = mutableStatus.value.copy(level = level)
+                timing.span(TimingStage.record_start, TimingStage.record_stop) {
+                    capture.record(file) { level ->
+                        scope.launch {
+                            if (recorder === capture && mutableStatus.value.phase == Phase.RECORDING) {
+                                mutableStatus.value = mutableStatus.value.copy(level = level)
+                            }
                         }
                     }
                 }
@@ -148,7 +162,8 @@ class ParlaService : Service() {
                         else if(local.settings.noHistory) local else local.copy(history = listOf(entry)+local.history)
                     } },
                     deliver = { text, authorize -> owner.insert(anchor,text,authorize) },
-                    stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) })
+                    stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) },
+                    timing = timing)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -228,7 +243,7 @@ class ParlaService : Service() {
         scope.cancel()
         bubble?.close()
         bubble = null
-        mutableVisible.value = false
+        mutableArmed.value = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -248,8 +263,9 @@ class ParlaService : Service() {
         private const val NOTIFICATION = 10
         private val mutableStatus = MutableStateFlow(DictationStatus())
         val status = mutableStatus.asStateFlow()
-        private val mutableVisible = MutableStateFlow(false)
-        val visible = mutableVisible.asStateFlow()
+        private val mutableArmed = MutableStateFlow(false)
+        /** The service is running and ready; the control itself appears only while a keyboard is open. */
+        val armed = mutableArmed.asStateFlow()
         fun command(context: Context, action: String) {
             if ((action == SHOW || action == TOGGLE) && !Store.get(context).accessibilityConsentGranted) {
                 context.startActivity(Intent(context, MainActivity::class.java).putExtra("route", "Setup")

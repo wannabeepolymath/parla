@@ -17,6 +17,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         save: (HistoryEntry, Boolean) -> Boolean,
         deliver: suspend (String, () -> Boolean) -> String,
         stage: (PendingOperation.Stage, String) -> Unit,
+        timing: TimingSession = TimingSession(sink = {}),
     ): HistoryEntry {
         suspend fun active() { currentCoroutineContext().ensureActive(); if(operation.revoked) throw CancellationException("Operation revoked") }
         fun advance(next: PendingOperation.Stage, message: String) { operation.advance(next); stage(next,message) }
@@ -24,9 +25,15 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         var saved = false
         try {
             active(); advance(PendingOperation.Stage.recognizing,"Transcribing on device…")
-            val raw = transcribe()
+            val raw = timing.span(TimingStage.transcription_start,TimingStage.transcription_end) { transcribe() }
             active(); advance(PendingOperation.Stage.cleaning,"Preparing your text…")
-            val result = pipeline.clean(raw,frozen,category,singleLine,key)
+            // The pipeline reads the key only when it calls the provider, so that marks a network cleanup.
+            var networked = false
+            val result = timing.span(TimingStage.cleanup_start,TimingStage.cleanup_end,
+                provider = { if(networked) ProviderCategory.of(frozen.settings.provider) else ProviderCategory.local },
+                finish = { if(it.warning != null) TimingOutcome.fallback else TimingOutcome.ok }) {
+                pipeline.clean(raw,frozen,category,singleLine) { networked = true; key() }
+            }
             active(); advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)
             // Persist a conservative outcome first: later disk failures must never leave a durable no-write claim.
@@ -35,7 +42,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
             val retained = RecoveryVault.retain(operation.id,raw,text,"Text ready. Nothing inserted yet.")
             saved = frozen.settings.noHistory || save(entry,false)
             active()
-            val insertion = deliver(text) {
+            val insertion = timing.span(null,TimingStage.insertion,finish = { if(it == INSERTED) TimingOutcome.ok else TimingOutcome.unconfirmed }) { deliver(text) {
                 if(!operation.authorizeDispatch()) false else {
                     val uncertain = "Text may have been inserted. Check the field before pasting."
                     RecoveryVault.outcome(operation.id,uncertain)
@@ -43,7 +50,7 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
                     stage(PendingOperation.Stage.delivering,"Inserting your text…")
                     true
                 }
-            }
+            } }
             active()
             val note = listOfNotNull(result.warning,insertion,if(!saved) "History was not saved" else null,if(!retained) "Text is too long for temporary recovery" else null).joinToString(" · ")
             val finished = entry.copy(note = note)
@@ -61,6 +68,8 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         }
     }
     companion object {
+        /** The only outcome ParlaAccessibilityService.insert returns after a verified write. */
+        const val INSERTED = "Text inserted."
         fun cancellationMessage(attempted: Boolean) = if(attempted) "Canceled. Text may have been inserted; check the field before pasting. Result kept."
             else "Canceled before inserting text. Any ready result is available in recovery."
     }

@@ -82,7 +82,7 @@ private fun ParlaApp() {
     val data by store.data.collectAsStateWithLifecycle()
     val error by store.persistenceError.collectAsStateWithLifecycle()
     val status by ParlaService.status.collectAsStateWithLifecycle()
-    val visible by ParlaService.visible.collectAsStateWithLifecycle()
+    val armed by ParlaService.armed.collectAsStateWithLifecycle()
     val recovery by RecoveryVault.value.collectAsStateWithLifecycle()
     val retry = remember { HistoryRetry() }
     var retrySource by remember { mutableStateOf<HistoryEntry?>(null) }
@@ -129,11 +129,12 @@ private fun ParlaApp() {
             finally { retryBusy = false }
         }
     }
-    fun startBubble() {
-        if (!store.accessibilityConsentGranted) { setup = true; showAccessibilityDisclosure = true; return }
-        if (!microphone || !overlay || !accessibility) { setup = true; return }
-        try { ParlaService.command(context, ParlaService.SHOW) }
-        catch (_: Exception) { message("Could not start parla. Check microphone and overlay permissions.") }
+    // No on/off switch: once setup is done, arm the service whenever this activity is in the foreground.
+    // The control itself appears only while a keyboard is open; notification "Stop parla" disarms until next open.
+    val ready = data.settings.onboarded && store.accessibilityConsentGranted && microphone && overlay && accessibility
+    LaunchedEffect(ready, refresh) {
+        if (ready && !ParlaService.armed.value) runCatching { ParlaService.command(context, ParlaService.SHOW) }
+            .onFailure { message("Could not start parla. Check microphone and overlay permissions.") }
     }
     val tabs = listOf("Home", "Dictionary", "Style", "Snippets")
     val dashboard = route in tabs && !setup
@@ -212,8 +213,8 @@ private fun ParlaApp() {
                     onKeyboard = { context.getSystemService(InputMethodManager::class.java).showInputMethodPicker() },
                     onDone = { store.update { it.copy(settings = it.settings.copy(onboarded = true)) }; setup = false; route = "Models" })
             } else when (route) {
-                "Home" -> HomeScreen(data, status, visible, recovery, onBubble = { if (visible) ParlaService.command(context, ParlaService.HIDE) else startBubble() },
-                    onRecord = { if (!store.accessibilityConsentGranted || !visible) { startBubble() } else ParlaService.command(context, ParlaService.TOGGLE) },
+                "Home" -> HomeScreen(data, status, armed, ready, recovery, onSetup = { setup = true },
+                    onRecord = { ParlaService.command(context, ParlaService.STOP) },
                     onCancel = { ParlaService.command(context, ParlaService.CANCEL) },
                     onPractice = { route = "Practice" },
                     onApi = { route = "Models" },
@@ -235,7 +236,8 @@ private fun ParlaApp() {
                 "Account" -> AccountScreen(onApi = { route = "API connection" }, onPrivacy = { route = "Privacy" })
                 "Report an issue", "Share feedback" -> FeedbackScreen(route, onCopy = { copyPrivate(context, it); message("Copied to clipboard") })
                 "Privacy" -> PrivacyScreen(data, onSettings = { settings -> store.update { it.copy(settings = settings) } }, onClear = { retry.clear(); if(store.update { it.copy(history = emptyList()) }) message("History cleared") })
-                "Practice" -> PracticeScreen(visible, ::startBubble)
+                "Practice" -> PracticeScreen(ready, onSetup = { setup = true })
+                "Diagnostics" -> DiagnosticsScreen()
             }
             if (error != null) Column(Modifier.align(Alignment.BottomCenter).background(Cream).padding(12.dp)) {
                 Text(error!!, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
@@ -248,7 +250,7 @@ private fun ParlaApp() {
         store.setAccessibilityConsent(false)
         // Android's enabled-service setting must also be revoked if saving consent failed.
         ParlaAccessibilityService.instance?.disableSelf()
-        if (visible) ParlaService.command(context, ParlaService.HIDE)
+        if (armed) ParlaService.command(context, ParlaService.HIDE)
         showAccessibilityDisclosure = false
     }
     if (showAccessibilityDisclosure) AlertDialog(
@@ -259,7 +261,7 @@ private fun ParlaApp() {
             Text(
                 "parla uses Android’s Accessibility service to insert dictated words into the text field where you started.\n\n" +
                     "It reads that field’s text and cursor or selection to place your words safely. It also checks the app and field type. Password fields and fields marked as sensitive are skipped.\n\n" +
-                    "It checks the keyboard’s position on your screen to place the floating voice control nearby.\n\n" +
+                    "It checks whether your keyboard is open and where it is on screen, so the voice control appears above your keyboard whenever you're typing.\n\n" +
                     "parla does not take screenshots, and it doesn't use or keep text from other fields or the rest of your screen. The field’s text and cursor or selection stay on your phone and are not shared.\n\n" +
                     "If you enable AI cleanup, your chosen provider may also receive the type of app (such as chat or email) and whether the field is single-line, to format your dictated words.\n\n" +
                     "You can turn this service off at any time in Android’s Accessibility settings.",
@@ -316,9 +318,9 @@ private fun Card(content: @Composable ColumnScope.() -> Unit) {
 private fun SetupScreen(mic: Boolean, overlay: Boolean, access: Boolean, notify: Boolean, recoveryEnabled: Boolean, onRecovery: (Boolean) -> Unit, onMic: () -> Unit, onOverlay: () -> Unit, onAccess: () -> Unit, onNotify: () -> Unit, onKeyboard: () -> Unit, onDone: () -> Unit) {
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Your voice. Your keyboard.", fontFamily = Garamond, fontSize = 36.sp, lineHeight = 42.sp, color = M3Gray)
-        Text("Keep Gboard or your usual keyboard selected. The parla voice control floats above it. Tap to speak and tap the check mark to finish, or hold to talk.", style = BodyStyle, color = Ink)
+        Text("Keep Gboard or your usual keyboard selected. The parla voice control appears above your keyboard whenever you're typing. Tap to speak and tap the check mark to finish, or hold to talk.", style = BodyStyle, color = Ink)
         OutlinedButton(onClick = onKeyboard, modifier = Modifier.fillMaxWidth()) { Text("Choose Gboard or your usual keyboard") }
-        PermissionRow("Display over apps", "Shows the small draggable parla voice control alongside your keyboard.", overlay, "Enable", onOverlay)
+        PermissionRow("Display over apps", "Shows the small parla voice control above your keyboard whenever you're typing.", overlay, "Enable", onOverlay)
         PermissionRow("Text insertion", "Allow parla in Accessibility to insert words into the field where you started. Sensitive fields are skipped. No screenshots or general screen text are collected.", access, "Open settings", onAccess)
         PermissionRow("Microphone", "Records only when you tap or hold the voice control. Speech is transcribed on your device after you download a model.", mic, "Allow", onMic)
         Card {
@@ -326,7 +328,7 @@ private fun SetupScreen(mic: Boolean, overlay: Boolean, access: Boolean, notify:
             Text("Keep failed or interrupted recordings privately on this device for 7 days, up to 134 MB. Successful, canceled and private recordings are removed. Audio is never uploaded or backed up. Change the time in Privacy; delete recordings in Recovery audio. Text history is separate.",style = BodyStyle)
         }
         PermissionRow("Notifications", "Finish, cancel or stop parla from its ongoing notification.", notify, "Allow", onNotify)
-        Text("Next, download and select a speech model. Then tap Show parla control on Home. An API connection is optional for AI text cleanup.", style = BodyStyle, color = Muted)
+        Text("Next, download and select a speech model. The voice control then appears above your keyboard whenever you're typing. An API connection is optional for AI text cleanup.", style = BodyStyle, color = Muted)
         Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(6.dp), colors = ButtonDefaults.buttonColors(containerColor = Ink)) { Text("Continue to app") }
     }
 }
@@ -342,12 +344,13 @@ private fun PermissionRow(title: String, detail: String, granted: Boolean, actio
 }
 
 @Composable
-private fun HomeScreen(data: LocalData, status: DictationStatus, visible: Boolean, recovery: RecoveryResult?, onBubble: () -> Unit, onRecord: () -> Unit, onCancel: () -> Unit, onPractice: () -> Unit, onApi: () -> Unit, onCopy: (String) -> Unit, onDelete: (String) -> Unit, onRetry: (HistoryEntry) -> Unit, onClear: () -> Unit) {
+private fun HomeScreen(data: LocalData, status: DictationStatus, armed: Boolean, ready: Boolean, recovery: RecoveryResult?, onSetup: () -> Unit, onRecord: () -> Unit, onCancel: () -> Unit, onPractice: () -> Unit, onApi: () -> Unit, onCopy: (String) -> Unit, onDelete: (String) -> Unit, onRetry: (HistoryEntry) -> Unit, onClear: () -> Unit) {
     var clear by remember { mutableStateOf(false) }
     val words = data.history.sumOf { it.text.split(Regex("""\s+""")).count(String::isNotBlank) }
     val grouped = data.history.groupBy { SimpleDateFormat("MMMM d", Locale.getDefault()).format(Date(it.createdAt)) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         if (status.phase == Phase.ERROR) item { Card { Text(status.message, color = MaterialTheme.colorScheme.error); TextButton(onClick = onApi) { Text("Open speech models") } } }
+        if (!ready) item { SetupNeededCard(onSetup) }
         item {
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.5.dp)).background(Color.White).padding(horizontal = 48.dp, vertical = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("${java.text.NumberFormat.getIntegerInstance().format(words)} words", fontFamily = Garamond, fontSize = if (words >= 10000) 52.sp else 60.sp, lineHeight = 57.sp, color = Color(0xFF007A5A), textAlign = TextAlign.Center)
@@ -371,11 +374,10 @@ private fun HomeScreen(data: LocalData, status: DictationStatus, visible: Boolea
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                TextButton(onClick = onBubble) { Text(if (visible) "Hide parla control" else "Show parla control") }
                 TextButton(onClick = onPractice) { Text("Try it here") }
             }
         }
-        if (visible && status.phase != Phase.IDLE) item {
+        if (armed && status.phase != Phase.IDLE) item {
             Card {
                 Text(status.message, style = BodyStyle)
                 TextButton(onClick = if (status.phase == Phase.RECORDING) onRecord else onCancel) { Text(if (status.phase == Phase.RECORDING) "Done" else "Cancel") }
@@ -553,6 +555,8 @@ private fun SettingsScreen(data: LocalData, hasKey: Boolean, onRoute: (String) -
         SettingsRow("Voice control position", if (data.settings.bubbleDocked) "Follow keyboard" else "Manual") { onRoute("Voice control position") }
         SettingsSection("DATA & PRIVACY")
         SettingsRow("Privacy", if (data.settings.noHistory) "Text history off" else "Text history on") { onRoute("Privacy") }
+        Spacer(Modifier.height(8.dp))
+        SettingsRow("Diagnostics", "Timings only, no text") { onRoute("Diagnostics") }
         SettingsSection("GENERAL")
         SettingsRow("API connection", if (hasKey) providerLabel(data.settings.provider) else "Optional") { onRoute("API connection") }
         Spacer(Modifier.height(8.dp))
@@ -683,7 +687,7 @@ private fun PositionScreen(settings: Settings, onChange: (Settings) -> Unit) {
                 Text("Follow keyboard", modifier = Modifier.weight(1f))
                 Switch(settings.bubbleDocked, { onChange(settings.copy(bubbleDocked = it)) })
             }
-            Text("Keeps the voice control above your keyboard. Drag it to place it manually. Floating or split keyboards may need manual adjustment.", color = Muted, style = BodyStyle)
+            Text("The voice control appears only while your keyboard is open. Follow keyboard keeps it just above the keyboard; drag it to place it manually. Floating or split keyboards may need manual adjustment.", color = Muted, style = BodyStyle)
         }
         OutlinedButton(onClick = { onChange(settings.copy(bubbleX = 16, bubbleY = 280, bubbleDocked = true)) }) { Text("Reset position") }
     }
@@ -711,10 +715,10 @@ private fun PrivacyScreen(data: LocalData, onSettings: (Settings) -> Unit, onCle
     if (clear) ConfirmDialog("Clear saved history?", "This removes text history from this device.", { clear = false }, { onClear(); clear = false })
 }
 @Composable
-private fun PracticeScreen(visible: Boolean, onBubble: () -> Unit) {
+private fun PracticeScreen(ready: Boolean, onSetup: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-        PageTitle("Try it here", "Keep Gboard selected, tap this field, then tap the floating parla control or hold it to speak.")
-        if (!visible) Button(onClick = onBubble, modifier = Modifier.fillMaxWidth()) { Text("Show parla control") }
+        PageTitle("Try it here", "Keep Gboard selected and tap this field. The parla control appears above your keyboard whenever you're typing; tap it or hold it to speak.")
+        if (!ready) SetupNeededCard(onSetup)
         AndroidView(factory = { context -> EditText(context).apply {
             hint = "Your words go here…"; minLines = 6; gravity = android.view.Gravity.TOP
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -723,6 +727,13 @@ private fun PracticeScreen(visible: Boolean, onBubble: () -> Unit) {
             contentDescription = "Practice editor"
         } }, modifier = Modifier.fillMaxWidth().heightIn(min = 220.dp).clip(RoundedCornerShape(20.dp)))
         Text("Changing fields, moving the cursor or editing cancels dictation. If text does not appear, check the field before copying and pasting the result from parla.", color = Muted, fontSize = 12.sp, lineHeight = 20.sp)
+    }
+}
+@Composable
+private fun SetupNeededCard(onSetup: () -> Unit) {
+    Card {
+        Text("The voice control is off until setup is complete. Then it appears above your keyboard whenever you're typing.", style = BodyStyle)
+        TextButton(onClick = onSetup) { Text("Finish setup") }
     }
 }
 @Composable

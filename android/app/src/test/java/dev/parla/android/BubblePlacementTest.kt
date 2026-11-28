@@ -31,4 +31,19 @@ class BubblePlacementTest {
         assertEquals(BubblePosition(390, 106), BubblePlacement.place(900, 300, 230, 64,
             ScreenRect(40, 16, 620, 360), ScreenRect(0, 180, 640, 360), 10))
     }
+
+    @Test fun controlAttachesOnlyWithAnOpenKeyboardAndEveryRequirement() {
+        fun attached(keyboard: ScreenRect? = this.keyboard, consent: Boolean = true, connected: Boolean = true, overlay: Boolean = true, microphone: Boolean = true) =
+            BubbleVisibility.attached(keyboard, consent, connected, overlay, microphone)
+        assertTrue(attached())
+        // Keyboard closed or a degenerate rectangle: detached.
+        assertFalse(attached(keyboard = null))
+        assertFalse(attached(keyboard = ScreenRect(0, 500, 412, 500)))
+        assertFalse(attached(keyboard = ScreenRect(10, 500, 10, 820)))
+        // Keyboard open but any readiness requirement missing: detached.
+        assertFalse(attached(consent = false))
+        assertFalse(attached(connected = false))
+        assertFalse(attached(overlay = false))
+        assertFalse(attached(microphone = false))
+    }
 }

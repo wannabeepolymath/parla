@@ -214,7 +214,7 @@ class ParlaAccessibilityService : AccessibilityService() {
                         })
                         if (!selected) log.reject("setSelection", "accepted=false cursor=$cursor")
                     }
-                    "Text inserted."
+                    DictationFlow.INSERTED
                 } else recovery(text, "Text insertion is unconfirmed. Check the field before pasting.")
             } catch (cancelled: CancellationException) {
                 log.failure(cancelled)

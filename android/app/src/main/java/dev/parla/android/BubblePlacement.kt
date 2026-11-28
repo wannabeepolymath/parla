@@ -19,3 +19,9 @@ internal object BubblePlacement {
         return BubblePosition(x.coerceIn(area.left, maxX), targetY.coerceIn(area.top, maxY))
     }
 }
+
+/** The control is on screen only while a keyboard is open and every setup requirement still holds. */
+internal object BubbleVisibility {
+    fun attached(keyboard: ScreenRect?, consent: Boolean, connected: Boolean, overlay: Boolean, microphone: Boolean): Boolean =
+        consent && connected && overlay && microphone && keyboard != null && keyboard.width > 0 && keyboard.height > 0
+}
