@@ -758,6 +758,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scratchpad.quitIntent()
         scratchpad.save() // flush a pending debounced edit
         hubModel.flushPendingSave() // and a Hub edit still inside its debounce
+        releaseRecognitionForExit()
+    }
+
+    /// ggml frees its Metal device from a C++ static destructor at exit(), and a
+    /// whisper context still alive then aborts in ggml_metal_rsets_free (the
+    /// failure parla-eval's quit() avoids). Drop every whisper owner before exit
+    /// so whisper_free runs while the device is still up. The updater's quit
+    /// watchdog calls applicationWillTerminate before exit(0), so it lands here too.
+    func releaseRecognitionForExit() {
+        let hadResident = residentRecognition != nil
+        weak var client = residentRecognition?.client
+        let released = Self.releaseAfterDrain(processTask) {
+            recognitionHandles.removeAll(); residentRecognition = nil
+        }
+        if !released { NSLog("%@", "Parla quit: work still queued; resident recognition not released"); return }
+        guard hadResident else { return }
+        NSLog("%@", client == nil ? "Parla quit: released resident recognition" : "Parla quit: resident recognition still retained elsewhere")
+    }
+
+    /// Runs `release` once `chain` has finished, blocking the caller at most
+    /// `timeout`. A pass still on the chain owns the ctx and freeing it mid-pass
+    /// is a crash, so a chain that doesn't drain in time (it may itself need
+    /// the main thread) skips the release instead of deadlocking.
+    static func releaseAfterDrain(_ chain: Task<Void, Never>?, timeout: TimeInterval = 2, release: () -> Void) -> Bool {
+        if let chain {
+            let drained = DispatchSemaphore(value: 0)
+            Task.detached { await chain.value; drained.signal() }
+            guard drained.wait(timeout: .now() + timeout) == .success else { return false }
+        }
+        release()
+        return true
     }
 
     /// Safe-to-restart, decided and claimed in one main-actor turn: no session,
