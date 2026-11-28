@@ -73,7 +73,11 @@ The grant is tied to the exact provider, address, model, app profile, dictionary
 
 ## Existing users
 
-Users who agreed to the 1.3.1 disclosure are **not** asked again in this build. Each new flow that sends text off the device needs its own explicit action: tapping Command or Preset on a selection, or reviewing and turning on nearby text for an app. Undo and correction suggestions stay on the device. If Play review wants existing users to see the updated disclosure again, that needs a consent version in `Settings` and a re-prompt. Neither is implemented yet.
+Users who agreed to the 1.3.1 disclosure **are asked again**. Consent is saved with the version of the disclosure it covers (`Settings.accessibilityConsentVersion`; this build's is `CURRENT_A11Y_CONSENT = 2` in [Models.kt](../app/src/main/java/dev/parla/android/Models.kt)). Data saved by 1.3.1 has no version, so it reads as version 1. That doesn't count as consent.
+
+After the upgrade, parla does nothing through the Accessibility service: no reading, insertion, undo, suggestions or floating control. That lasts until the user sees the new "Allow text insertion?" dialog and taps **Agree**, which saves the consent with version 2. The dialog appears through the existing setup flow: opening parla shows setup as incomplete, and tapping the control sends the user to setup. **No thanks** works as before: consent stays withdrawn and parla turns its service off.
+
+Any later change to what the disclosure covers must raise `CURRENT_A11Y_CONSENT`, which re-prompts everyone again. A saved version newer than the app's still loads, but doesn't count as consent.
 
 ## Demo video checklist
 
@@ -83,3 +87,4 @@ Users who agreed to the 1.3.1 disclosure are **not** asked again in this build. 
 4. Select some text, tap **Command**, say "make this formal" and finish: the selection is replaced. Repeat with **Preset**.
 5. In Settings → Profiles, add a profile for the notes app. Open Nearby text → Turn on…, show the full disclosure and confirm. Change the cleanup model and show the app going back to Off.
 6. In a password field, show that the control offers no actions and that nothing is watched or sent.
+7. Upgrade: install 1.3.1, agree to its disclosure, then install this build. Show that the control does nothing and that setup shows text insertion as incomplete. Open the new disclosure and tap Agree, then show dictation working again.

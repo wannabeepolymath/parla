@@ -19,11 +19,11 @@ class Store private constructor(context: Context) {
     @Volatile internal var accessibilityConsentDeclined = false
         private set
     val accessibilityConsentGranted: Boolean
-        get() = ready && !accessibilityConsentDeclined && data.value.settings.accessibilityConsentGranted
+        get() = ready && !accessibilityConsentDeclined && data.value.settings.accessibilityConsentCurrent()
     fun setAccessibilityConsent(granted: Boolean): Boolean {
         // A failed disk write must not leave declined access usable in this process.
         if (!granted) accessibilityConsentDeclined = true
-        val saved = update { it.copy(settings = it.settings.copy(accessibilityConsentGranted = granted)) }
+        val saved = update { it.copy(settings = it.settings.withAccessibilityConsent(granted)) }
         if (granted && saved) accessibilityConsentDeclined = false
         return saved
     }
@@ -65,6 +65,7 @@ internal object LocalDataCodec {
         val settings = JSONObject()
             .put("onboarded", s.onboarded)
             .put("accessibilityConsentGranted", s.accessibilityConsentGranted)
+            .put("accessibilityConsentVersion", s.accessibilityConsentVersion)
             .put("provider", s.provider)
             .put("providers", JSONObject(s.providers.mapValues { (_, c) -> JSONObject().put("baseUrl", c.baseUrl).put("model", c.model) }))
             .put("backups", JSONArray(s.backups.map { JSONObject().put("provider", it.provider).put("baseUrl", it.baseUrl).put("model", it.model).put("keyless", it.keyless) }))
@@ -104,6 +105,8 @@ internal object LocalDataCodec {
         // Reject malformed known fields instead of opt* silently reusing defaults.
         require(!s.has("onboarded") || s.get("onboarded") is Boolean)
         require(!s.has("accessibilityConsentGranted") || s.get("accessibilityConsentGranted") is Boolean)
+        // Missing means the unversioned 1.3.1 disclosure. A newer version still loads; it just isn't current consent.
+        require(!s.has("accessibilityConsentVersion") || (s.get("accessibilityConsentVersion") as? Int ?: 0) >= 1)
         require(!s.has("provider") || s.get("provider") is String)
         require(!s.has("baseUrl") || s.get("baseUrl") is String)
         require(!s.has("cleanupModel") || s.get("cleanupModel") is String)
@@ -141,6 +144,7 @@ internal object LocalDataCodec {
             onboarded = if(s.has("onboarded")) s.getBoolean("onboarded") else d.onboarded,
             // Earlier schemas never recorded this disclosure's explicit consent.
             accessibilityConsentGranted = version >= 4 && s.getBoolean("accessibilityConsentGranted"),
+            accessibilityConsentVersion = if(s.has("accessibilityConsentVersion")) s.getInt("accessibilityConsentVersion") else 1,
             provider = provider, providers = providers, backups = backups,
             backupReview = if(s.has("backupReview")) s.getString("backupReview") else d.backupReview,
             localModel = if(s.has("localModel")) s.getString("localModel") else d.localModel,

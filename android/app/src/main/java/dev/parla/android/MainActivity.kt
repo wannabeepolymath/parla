@@ -201,7 +201,7 @@ private fun ParlaApp() {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             if (setup) {
-                SetupScreen(microphone, overlay, accessibility && data.settings.accessibilityConsentGranted, notifications,
+                SetupScreen(microphone, overlay, accessibility && data.settings.accessibilityConsentCurrent(), notifications,
                     recoveryEnabled = data.settings.recoveryAudioEnabled,
                     onRecovery = { enabled -> store.update { it.copy(settings = it.settings.copy(recoveryAudioEnabled = enabled)) } },
                     onMic = { permissions.launch(arrayOf(Manifest.permission.RECORD_AUDIO)) },
