@@ -157,6 +157,7 @@ class ParlaService : Service() {
             } finally {
                 owner.release(anchor)
                 if (operation === op) { operation = null; capturedAnchor = null; anchorOwner = null }
+                clearBusy()
             }
         }
     }
@@ -289,6 +290,7 @@ class ParlaService : Service() {
                     anchorOwner = null
                     if (operation === op) { operation = null }
                     if(recoveryCapture === recovery) recoveryCapture = null
+                    clearBusy()
                 }
             }
         }
@@ -325,9 +327,11 @@ class ParlaService : Service() {
     /** The previous session is still releasing the microphone/model. An idle-looking control says so instead of ignoring the tap. */
     private fun busy(): Boolean {
         if (session?.isCompleted != false && !stopping) return false
-        if (status.value.phase == Phase.IDLE || status.value.phase == Phase.ERROR) fail("Still finishing the last recording. Try again in a moment.")
+        if (status.value.phase == Phase.IDLE || status.value.phase == Phase.ERROR) mutableStatus.value = BUSY
         return true
     }
+    /** The busy notice is transient: once the session it waited for is done, only that exact notice is cleared. */
+    private fun clearBusy() { if (status.value == BUSY) mutableStatus.value = DictationStatus() }
     private fun requireAccessibilityConsent(): Boolean {
         if (store.accessibilityConsentGranted) return true
         cancelSession()
@@ -376,6 +380,7 @@ class ParlaService : Service() {
         const val HIDE = "dev.parla.HIDE"
         private const val CHANNEL = "parla_dictation"
         private const val NOTIFICATION = 10
+        private val BUSY = DictationStatus(Phase.ERROR, "Still finishing the last recording. Try again in a moment.")
         private val mutableStatus = MutableStateFlow(DictationStatus())
         val status = mutableStatus.asStateFlow()
         private val mutableArmed = MutableStateFlow(false)
