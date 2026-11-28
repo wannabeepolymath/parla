@@ -87,7 +87,9 @@ internal object WavInput {
         var squares = 0.0; for(sample in samples) squares += sample.toDouble()*sample
         val rms = if(samples.isEmpty()) 0.0 else sqrt(squares/samples.size)
         require(samples.isNotEmpty()) { "Empty recording" }
-        require(!admitSpeech || samples.size >= 6400 && rms >= 1e-4) { "Recording is too short or silent. Speak for at least half a second." }
+        // 6400 samples = 0.4 s at 16 kHz, matching the Mac minimum. Keep the copy in step with this value.
+        require(!admitSpeech || samples.size >= 6400) { "Recording is too short. Speak for at least 0.4 seconds." }
+        require(!admitSpeech || rms >= 1e-4) { "No sound was picked up. Speak closer to the microphone and try again." }
         return samples
     }
 }
