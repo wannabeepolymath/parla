@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.22.1)
+# Gradle's Debug variant would otherwise build whisper/ggml/bridge without -O. Keep symbols, optimise.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Native build type" FORCE)
+endif()
 project(parla_whisper LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
