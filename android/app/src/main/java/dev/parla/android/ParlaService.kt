@@ -14,6 +14,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import java.io.File
 
+/**
+ * [cleanup] always runs to the end. A canceled caller's withContext still throws on return (prompt cancellation),
+ * so [reset] sits in a finally: otherwise Finish → cancel left `stopping` set and every later tap was refused.
+ */
+internal suspend fun finishSession(cleanup: suspend () -> Unit, reset: () -> Unit) {
+    try { withContext(NonCancellable + Dispatchers.IO) { cleanup() } } finally { reset() }
+}
+
 /** One foreground service owns the overlay and one cancellable session at a time. */
 class ParlaService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -128,8 +136,7 @@ class ParlaService : Service() {
 
     /** Mac runSelectedPreset: the selected preset's exact intent applied to the frozen selection, no microphone. */
     private fun runPreset() {
-        if (!requireAccessibilityConsent()) return
-        if (session?.isCompleted == false || stopping) return
+        if (!requireAccessibilityConsent() || busy()) return
         if (!store.ready) { fail("Reload or repair local data in Settings → Data recovery."); openApp("Data recovery"); return }
         val owner = ParlaAccessibilityService.instance ?: run { fail("Enable parla text insertion in accessibility settings, then return to your text field."); return }
         val anchor = capture(owner, selected = true) ?: return
@@ -172,8 +179,7 @@ class ParlaService : Service() {
     }
 
     private fun beginRecording(command: Boolean = false) {
-        if (!requireAccessibilityConsent()) return
-        if (session?.isCompleted == false || stopping) return
+        if (!requireAccessibilityConsent() || busy()) return
         val snapshot = store.data.value
         if (!store.ready) { fail("Reload or repair local data in Settings → Data recovery."); openApp("Data recovery"); return }
         val manager = ModelManager.get(this)
@@ -271,18 +277,19 @@ class ParlaService : Service() {
             } finally {
                 capture.stop()
                 owner.release(anchor)
-                withContext(NonCancellable + Dispatchers.IO) {
+                finishSession({
                     // LocalSpeech cancellation revokes immediately; its serial barrier proves actual JNI exit.
                     recovery.finish(op.revoked || anchor.privateEditor || command)
                     CaptureAudio.release(file)
+                }) {
+                    recorder = null
+                    audio = null
+                    stopping = false
+                    capturedAnchor = null
+                    anchorOwner = null
+                    if (operation === op) { operation = null }
+                    if(recoveryCapture === recovery) recoveryCapture = null
                 }
-                recorder = null
-                audio = null
-                stopping = false
-                capturedAnchor = null
-                anchorOwner = null
-                if (operation === op) { operation = null }
-                if(recoveryCapture === recovery) recoveryCapture = null
             }
         }
         session?.invokeOnCompletion {
@@ -315,6 +322,12 @@ class ParlaService : Service() {
     }
 
     private fun fail(message: String) { mutableStatus.value = DictationStatus(Phase.ERROR, message) }
+    /** The previous session is still releasing the microphone/model. An idle-looking control says so instead of ignoring the tap. */
+    private fun busy(): Boolean {
+        if (session?.isCompleted != false && !stopping) return false
+        if (status.value.phase == Phase.IDLE || status.value.phase == Phase.ERROR) fail("Still finishing the last recording. Try again in a moment.")
+        return true
+    }
     private fun requireAccessibilityConsent(): Boolean {
         if (store.accessibilityConsentGranted) return true
         cancelSession()
