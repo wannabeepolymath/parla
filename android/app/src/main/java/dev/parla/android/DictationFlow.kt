@@ -5,7 +5,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** Production session policy, independent of Android microphone/editor adapters. */
-internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
+internal class DictationFlow(private val pipeline: Pipeline = Pipeline(), private val clock: () -> Long = System::nanoTime) {
     suspend fun run(
         operation: PendingOperation,
         frozen: LocalData,
@@ -17,7 +17,9 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
         save: (HistoryEntry, Boolean) -> Boolean,
         deliver: suspend (String, () -> Boolean) -> String,
         stage: (PendingOperation.Stage, String) -> Unit,
+        app: String = "",
     ): HistoryEntry {
+        val begun = clock()
         suspend fun active() { currentCoroutineContext().ensureActive(); if(operation.revoked) throw CancellationException("Operation revoked") }
         fun advance(next: PendingOperation.Stage, message: String) { operation.advance(next); stage(next,message) }
         var prepared: HistoryEntry? = null
@@ -30,7 +32,8 @@ internal class DictationFlow(private val pipeline: Pipeline = Pipeline()) {
             active(); advance(PendingOperation.Stage.ready,"Text ready · checking the text field…")
             val text = TextRules.shape(result.text,category,singleLine)
             // Persist a conservative outcome first: later disk failures must never leave a durable no-write claim.
-            val entry = HistoryEntry(raw = raw,text = text,note = listOfNotNull(result.warning,"Text insertion is unconfirmed. Check the field before pasting.").joinToString(" · "),durationMs = duration)
+            val entry = HistoryEntry(raw = raw,text = text,note = listOfNotNull(result.warning,"Text insertion is unconfirmed. Check the field before pasting.").joinToString(" · "),durationMs = duration,
+                app = app,model = frozen.settings.localModel,latencyMs = (clock()-begun)/1_000_000)
             prepared = entry; operation.prepared = entry
             val retained = RecoveryVault.retain(operation.id,raw,text,"Text ready. Nothing inserted yet.")
             saved = frozen.settings.noHistory || save(entry,false)

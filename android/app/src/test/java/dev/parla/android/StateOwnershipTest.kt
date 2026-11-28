@@ -122,6 +122,7 @@ class StateOwnershipTest {
         assertFalse(retry.valid(current,row,listOf(row.copy(text = "newer",revision = 1))))
         retry.invalidate(row.id); assertFalse(retry.valid(current,row,listOf(row))); assertFalse(retry.valid(current,row,emptyList()))
         val next = retry.begin(row); retry.clear(); assertFalse(retry.valid(next,row,listOf(row)))
-        assertTrue(exportHistory(listOf(row),true).contains("### Original\n\ncat")); assertTrue(exportHistory(listOf(row),false).contains("Original:\ncat"))
+        assertTrue(TranscriptExport.encode(listOf(row),TranscriptExport.Content.original,TranscriptExport.Format.markdown).contains("```text\ncat\n```"))
+        assertTrue(TranscriptExport.encode(listOf(row),TranscriptExport.Content.result,TranscriptExport.Format.text).endsWith("\n\nold\n"))
     }
 }

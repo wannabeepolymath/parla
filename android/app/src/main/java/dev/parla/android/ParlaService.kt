@@ -148,7 +148,8 @@ class ParlaService : Service() {
                         else if(local.settings.noHistory) local else local.copy(history = listOf(entry)+local.history)
                     } },
                     deliver = { text, authorize -> owner.insert(anchor,text,authorize) },
-                    stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) })
+                    stage = { stage, message -> if(!op.revoked) mutableStatus.value = DictationStatus(if(stage == PendingOperation.Stage.finished) Phase.IDLE else Phase.PROCESSING,message) },
+                    app = anchor.snapshot.packageName)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {

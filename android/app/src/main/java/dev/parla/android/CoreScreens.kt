@@ -1,8 +1,5 @@
 package dev.parla.android
 
-import android.content.Intent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -148,33 +145,6 @@ import kotlinx.coroutines.*
         Button(onClick = { message(if(store.repair(source)) "Repair saved. Original copy kept." else "Repair failed. Original copy kept.") },enabled = source.isNotBlank()) { Text("Save repair") }
     }
 }
-@Composable internal fun HistoryExportControls(rows: List<HistoryEntry>) {
-    val context = LocalContext.current
-    var pending by remember { mutableStateOf("") }
-    var exportStatus by remember { mutableStateOf("") }
-    var markdown by remember { mutableStateOf(false) }
-    val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if(uri != null) exportStatus = writeHistoryExport(pending) { payload ->
-            val output = context.contentResolver.openOutputStream(uri) ?: error("No writable destination")
-            output.bufferedWriter().use { it.write(payload) }
-        }
-        pending = ""
-    }
-    Column {
-        if(exportStatus.isNotEmpty()) Text(exportStatus)
-        Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) { Text("Export as Markdown",Modifier.weight(1f)); Switch(markdown,{ markdown = it }) }
-        Row {
-            TextButton(onClick = {
-                exportStatus = shareHistory(exportHistory(rows,markdown)) { text ->
-                    val intent = Intent(Intent.ACTION_SEND).setType(if(markdown) "text/markdown" else "text/plain").putExtra(Intent.EXTRA_TEXT,text)
-                    context.startActivity(Intent.createChooser(intent,"Share text history"))
-                }
-            }) { Text("Share history") }
-            TextButton(onClick = { pending = exportHistory(rows,markdown); export.launch(if(markdown) "parla-history.md" else "parla-history.txt") }) { Text("Export file") }
-        }
-    }
-}
-
 @Composable internal fun AudioRecoveryScreen(store: Store, message: (String) -> Unit) {
     val context = LocalContext.current
     val recordings = remember { RecordingStore.get(context) }
@@ -209,7 +179,7 @@ import kotlinx.coroutines.*
     CorePage {
         Text("Recovery audio",style = MaterialTheme.typography.headlineMedium)
         Text("Failed or interrupted recordings are kept on this device for ${data.settings.recoveryAudioDays} days. Saving new recordings is ${if(data.settings.recoveryAudioEnabled) "on" else "off"}. Audio is never uploaded or backed up. Successful, canceled and private recordings are removed.")
-        Text("Retranscribe uses your current speech model, language and dictionary on this device. It does not use AI cleanup or insert text. Recordings stay until you delete them or they expire. Storage is limited to 5 minutes per recording and 134 MB or 128 files.")
+        Text("Retranscribe uses your current speech model, language and dictionary on this device. It does not use AI cleanup or insert text. Recordings stay until you delete them or they expire. Storage is limited to ${WavInput.MAX_SECONDS/60} minutes per recording and 134 MB or 128 files.")
         if(state.message.isNotEmpty()) Text(state.message)
         error?.let { Text(it,color = MaterialTheme.colorScheme.error) }
         Row {

@@ -57,6 +57,15 @@ class DictationFlowTest {
         val failed = run(false); assertTrue(failed.note.contains("History was not saved")); assertEquals(failed.raw,RecoveryVault.current()?.original)
         RecoveryVault.clear()
     }
+    @Test fun historyRowRecordsAppModelAndProcessingLatency() = runBlocking {
+        var now = 5_000_000_000L; var saved: HistoryEntry? = null
+        DictationFlow(clock = { now }).run(PendingOperation(),LocalData(Settings(outputMode = "raw",localModel = "small.en-q5_1")),AppCategory.unknown,false,9000,
+            transcribe = { now += 1_500_000_000L; "text" },key = { error("no key") },save = { row,existing -> if(!existing) saved = row; true },
+            deliver = { _,authorize -> authorize(); "Inserted" },stage = { _,_ -> },app = "com.whatsapp")
+        assertEquals("com.whatsapp",saved?.app); assertEquals("small.en-q5_1",saved?.model)
+        assertEquals(1500L,saved?.latencyMs); assertEquals(9000L,saved?.durationMs)
+        RecoveryVault.clear()
+    }
     @Test fun revokedRecognitionCannotCleanSaveOrDeliverEvenIfAdapterReturnsLate() = runBlocking {
         val op = PendingOperation(); val calls = AtomicBoolean(false)
         val error = runCatching {

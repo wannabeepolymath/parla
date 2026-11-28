@@ -43,7 +43,8 @@ data class AppProfile(val id: String = UUID.randomUUID().toString(), val name: S
         require(localModel.isEmpty() || ModelCatalog.all.any { it.id == localModel })
     }
 }
-data class HistoryEntry(val id: String = UUID.randomUUID().toString(), val createdAt: Long = System.currentTimeMillis(), val raw: String, val text: String, val note: String = "", val durationMs: Long = 0, val revision: Long = 0)
+/** app: target package (local only), model: speech model ID, latencyMs: recording end to text ready. Optional; empty/0 = unknown. */
+data class HistoryEntry(val id: String = UUID.randomUUID().toString(), val createdAt: Long = System.currentTimeMillis(), val raw: String, val text: String, val note: String = "", val durationMs: Long = 0, val revision: Long = 0, val app: String = "", val model: String = "", val latencyMs: Long = 0)
 data class LocalData(val settings: Settings = Settings(), val dictionary: List<String> = emptyList(), val snippets: List<Snippet> = emptyList(), val history: List<HistoryEntry> = emptyList(), val replacements: List<LiteralReplacement> = emptyList(), val presets: List<TransformPreset> = emptyList(), val profiles: List<AppProfile> = emptyList()) {
     fun forApp(packageName: String?): LocalData {
         val p = profiles.firstOrNull { it.enabled && it.target == packageName } ?: return this

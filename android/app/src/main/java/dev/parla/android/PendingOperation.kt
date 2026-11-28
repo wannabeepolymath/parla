@@ -53,7 +53,3 @@ internal class HistoryRetry {
         return RetryProposal(token,source,result.text,"Uses your current settings for general text. Nothing inserted into an app. Style: ${styleLabel(settings.style)}." )
     }
 }
-internal fun exportHistory(rows: List<HistoryEntry>, markdown: Boolean): String = rows.joinToString("\n\n") { row ->
-    if(markdown) "## ${java.util.Date(row.createdAt)}\n\n${row.text}\n\n### Original\n\n${row.raw}\n\n${row.note}"
-    else "${java.util.Date(row.createdAt)}\n${row.text}\nOriginal:\n${row.raw}\n${row.note}"
-}
